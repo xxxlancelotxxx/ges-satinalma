@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Satınalma & Performans Takip Sistemi</title>
+    <meta name="description" content="Şantiye bazlı satınalma yönetimi, şef performans ve indirim raporlaması, AI fatura tarama ve malzeme fiyat kıyaslama paneli." />
+    <meta property="og:title" content="Satınalma & Performans Takip Sistemi" />
+    <meta property="og:description" content="Şantiye bazlı satınalma yönetimi, şef performans ve indirim raporlaması, AI fatura tarama ve malzeme fiyat kıyaslama paneli." />
+    <script>
+      window.addEventListener('unhandledrejection', function(e) {
+        var reason = e && e.reason;
+        var msg = (reason && (reason.message || reason.stack || '')) + '';
+        if (msg.includes('WebSocket') || msg.includes('@vite/client') || msg.includes('createWebSocketModuleRunnerTransport')) {
+          e.preventDefault();
+          if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        }
+      });
+      window.addEventListener('error', function(e) {
+        var msg = (e && (e.message || e.filename || '')) + '';
+        if (msg.includes('WebSocket') || msg.includes('@vite/client')) {
+          e.preventDefault();
+          if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        }
+      });
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

@@ -1,0 +1,1 @@
+async function test() { const r = await fetch("http://localhost:3000/api/upload-file", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileName: "test.pdf", fileData: "data:application/pdf;base64,JVBERi0=" }) }); console.log(r.status, await r.text()); } test();

@@ -1,0 +1,104 @@
+{
+  "entities": {
+    "Supervisor": {
+      "title": "Supervisor",
+      "description": "A purchasing supervisor",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "title": { "type": "string" },
+        "profileUrl": { "type": "string" },
+        "stats": { "type": "object" }
+      }
+    },
+    "Jobsite": {
+      "title": "Jobsite",
+      "description": "A construction jobsite",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "location": { "type": "string" },
+        "budget": { "type": "number" },
+        "status": { "type": "string" }
+      }
+    },
+    "Discount": {
+      "title": "Discount",
+      "description": "A record of a discount negotiated by a supervisor",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "supervisorId": { "type": "string" },
+        "jobsiteId": { "type": "string" },
+        "vendorName": { "type": "string" },
+        "category": { "type": "string" },
+        "offerPrice": { "type": "number" },
+        "agreedPrice": { "type": "number" },
+        "orderDate": { "type": "string" },
+        "notes": { "type": "string" },
+        "invoiceNo": { "type": "string" },
+        "firstOfferFileName": { "type": "string" },
+        "firstOfferFileUrl": { "type": "string" },
+        "finalOfferFileName": { "type": "string" },
+        "finalOfferFileUrl": { "type": "string" },
+        "items": { "type": "array" }
+      }
+    },
+    "Invoice": {
+      "title": "Invoice",
+      "description": "An invoice uploaded via AI scanner",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "date": { "type": "string" },
+        "supplier": { "type": "string" },
+        "jobsiteId": { "type": "string" },
+        "jobsiteName": { "type": "string" },
+        "uploadedBySupervisorId": { "type": "string" },
+        "uploadedBySupervisorName": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "fileUrl": { "type": "string" },
+        "rawFileName": { "type": "string" },
+        "items": { "type": "array" }
+      }
+    },
+    "SystemBackup": {
+      "title": "SystemBackup",
+      "description": "System snapshot backup stored in Firestore cloud",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "recordCounts": { "type": "object" },
+        "data": { "type": "object" }
+      }
+    }
+  },
+  "firestore": {
+    "supervisors/{supervisorId}": {
+      "schema": { "$ref": "#/entities/Supervisor" },
+      "description": "List of purchasing supervisors"
+    },
+    "jobsites/{jobsiteId}": {
+      "schema": { "$ref": "#/entities/Jobsite" },
+      "description": "List of active jobsites"
+    },
+    "discounts/{discountId}": {
+      "schema": { "$ref": "#/entities/Discount" },
+      "description": "List of discount records"
+    },
+    "invoices/{invoiceId}": {
+      "schema": { "$ref": "#/entities/Invoice" },
+      "description": "List of uploaded invoices"
+    },
+    "system_backups/{backupId}": {
+      "schema": { "$ref": "#/entities/SystemBackup" },
+      "description": "List of system backup snapshots"
+    }
+  }
+}

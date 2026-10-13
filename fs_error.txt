@@ -1,0 +1,1 @@
+Function setDoc() called with invalid data. Unsupported field value: undefined (found in field items in document invoices/inv_1789675390199)
