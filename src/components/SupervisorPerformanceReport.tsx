@@ -70,6 +70,7 @@ import {
 import { EditDiscountModal } from './EditDiscountModal';
 import { ExecutiveVendorDiversityReport } from './ExecutiveVendorDiversityReport';
 import { ExecutivePriceAndDiscountAudit } from './ExecutivePriceAndDiscountAudit';
+import { MonthlyExecutiveReportModal } from './MonthlyExecutiveReportModal';
 
 interface Props {
   performances: SupervisorPerformance[];
@@ -155,6 +156,7 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
 
   // Preview Modal for HTML/PDF Report
   const [showPreviewModal, setShowPreviewModal] = useState<boolean>(false);
+  const [showMonthlyExecutiveModal, setShowMonthlyExecutiveModal] = useState<boolean>(false);
 
   // Format Currency (Ruble)
   const formatCurrency = (amount: number) => {
@@ -924,6 +926,17 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
             >
               <FileCode className="w-4 h-4 text-indigo-200" />
               <span>HTML Rapor</span>
+            </button>
+
+            {/* TEK TUŞLA AYLIK YÖNETİCİ RAPORU */}
+            <button
+              onClick={() => setShowMonthlyExecutiveModal(true)}
+              className="bg-gradient-to-r from-amber-500 via-amber-600 to-indigo-600 hover:from-amber-600 hover:to-indigo-700 text-slate-950 hover:text-white font-black px-4 py-2.5 rounded-xl shadow-lg shadow-amber-500/20 transition-all flex items-center space-x-2 text-xs sm:text-sm cursor-pointer border border-amber-400/40 transform hover:-translate-y-0.5"
+              title="Aylık Yönetici Satınalma, Tasarruf ve Malzeme Kıyas Raporunu Tek Tuşla Al"
+            >
+              <Sparkles className="w-4 h-4 text-slate-950 hover:text-white" />
+              <span>Aylık Yönetici Raporu (Tek Tuş)</span>
+              <span className="bg-slate-950 text-amber-300 text-[10px] font-black px-1.5 py-0.5 rounded-full uppercase">YENİ</span>
             </button>
 
             {/* Print / Save as PDF */}
@@ -1882,6 +1895,18 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
           </div>
         </div>
       )}
+
+      {/* ONE-CLICK MONTHLY EXECUTIVE REPORT MODAL */}
+      <MonthlyExecutiveReportModal
+        isOpen={showMonthlyExecutiveModal}
+        onClose={() => setShowMonthlyExecutiveModal(false)}
+        discounts={discounts}
+        invoices={invoices}
+        jobsites={jobsites}
+        supervisors={supervisors}
+        personnel={personnel}
+        comparisons={comparisons}
+      />
     </div>
   );
 };

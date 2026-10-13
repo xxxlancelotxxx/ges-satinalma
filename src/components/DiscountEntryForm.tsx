@@ -1925,10 +1925,10 @@ export const DiscountEntryForm: React.FC<Props> = ({
           type="button"
           onClick={() => setIsComparativeModalOpen(true)}
           className="px-4 py-2 rounded-lg text-xs font-extrabold transition-all flex items-center space-x-2 cursor-pointer bg-gradient-to-r from-indigo-600 to-indigo-800 hover:from-indigo-700 hover:to-indigo-900 text-white shadow-sm border border-indigo-500/30"
-          title="Farklı tedarikçilerin ilk teklifleri arasındaki en düşük birim fiyata göre gerçek piyasa tasarrufunu hesapla"
+          title={language === 'ru' ? 'Для закупок от 1 000 000 ₽: расчет реальной экономии на основе единичных расценок нескольких КП' : '1.000.000 ₽ ve üzeri alımlar için: En az 2 tedarikçinin ilk teklif birim fiyatlarına göre gerçek piyasa tasarrufu hesapla'}
         >
           <Layers className="w-4 h-4 text-indigo-200" />
-          <span>{language === 'ru' ? 'Сравнительный анализ (Рыночная база)' : 'Karşılaştırmalı Teklif Analizi'}</span>
+          <span>{language === 'ru' ? '1M+ ₽ Сравнительный анализ (TDF)' : '1M+ ₽ Karşılaştırmalı Teklif (TDF)'}</span>
           <span className="bg-amber-400 text-slate-900 text-[10px] font-black px-1.5 py-0.5 rounded-full uppercase tracking-tight">Yeni Standart</span>
         </button>
       </div>

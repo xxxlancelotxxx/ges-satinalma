@@ -6018,19 +6018,238 @@ async function createNightlyBackup() {
   };
 }
 
-// OTOMATİK AKŞAM VE GECE SENKRONİZASYONU: Her akşam 21:00 ve her gece 02:30 (Moscow) Prizma'dan kesinleşmiş malzeme faturalarını günceller
-cron.schedule('0 21 * * *', () => {
+// PRIZMA OTOMATİK ENTEGRASYON VE ÇİFT KAYIT KORUMALI VERİTABANI İÇE AKTARIMI
+export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<{
+  success: boolean;
+  addedCount: number;
+  enrichedCount: number;
+  skippedCount: number;
+  totalPrizma: number;
+  message: string;
+}> {
+  if (!dbInstance) {
+    throw new Error('Firestore veritabanı bağlı değil.');
+  }
+
+  const prizmaInvs = await prizmaSyncService.getInvoicesCached();
+  if (!prizmaInvs || prizmaInvs.length === 0) {
+    return {
+      success: true,
+      addedCount: 0,
+      enrichedCount: 0,
+      skippedCount: 0,
+      totalPrizma: 0,
+      message: 'Entegre edilecek Prizma faturası bulunamadı.'
+    };
+  }
+
+  const { data: curInvs } = await getInvoicesCached();
+  const existingInvoices = (curInvs || []).filter((i: any) => !i.isDeleted && !i.isPermanentlyDeleted);
+
+  const byPrizmaDemandId = new Map<number, any>();
+  const byVendorAndNo = new Map<string, any>();
+  const byInvoiceNo = new Map<string, any>();
+  const byVendorDateAmount = new Map<string, any>();
+
+  existingInvoices.forEach(inv => {
+    if (inv.prizmaDemandId) byPrizmaDemandId.set(Number(inv.prizmaDemandId), inv);
+    const cleanNo = String(inv.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+    const cleanVendor = normalizeVendorName(inv.supplier || inv.vendorName || '');
+    const amt = Math.round(Number(inv.totalAmount) || 0);
+    const dt = String(inv.date || '').split('T')[0];
+
+    if (cleanNo) {
+      if (cleanVendor) byVendorAndNo.set(`${cleanVendor}___${cleanNo}`, inv);
+      if (cleanNo.length >= 4) byInvoiceNo.set(cleanNo, inv);
+    }
+    if (cleanVendor && dt && amt > 0) {
+      byVendorDateAmount.set(`${cleanVendor}___${dt}___${amt}`, inv);
+    }
+  });
+
+  let addedCount = 0;
+  let enrichedCount = 0;
+  let skippedCount = 0;
+
+  const newInvoicesToSave: any[] = [];
+  const updatesToSave: Array<{ id: string; payload: any }> = [];
+
+  const sanitizeFirestoreObj = (obj: any): any => {
+    if (obj === undefined) return null;
+    if (obj === null || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map(sanitizeFirestoreObj);
+    return Object.fromEntries(
+      Object.entries(obj)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => [k, sanitizeFirestoreObj(v)])
+    );
+  };
+
+  for (const pInv of prizmaInvs) {
+    if (pInv.isDeleted || !pInv.items || pInv.items.length === 0) {
+      skippedCount++;
+      continue;
+    }
+
+    const pCleanNo = String(pInv.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+    const pCleanVendor = normalizeVendorName(pInv.supplier || pInv.vendorName || '');
+    const pAmt = Math.round(Number(pInv.totalAmount) || 0);
+    const pDate = String(pInv.date || '').split('T')[0];
+    const pDemandId = Number(pInv.prizmaDemandId);
+
+    // Check for duplicate / existing match
+    let match = (pDemandId ? byPrizmaDemandId.get(pDemandId) : null) ||
+      (pCleanNo && pCleanVendor ? byVendorAndNo.get(`${pCleanVendor}___${pCleanNo}`) : null) ||
+      (pCleanNo && pCleanNo.length >= 4 ? byInvoiceNo.get(pCleanNo) : null) ||
+      (pCleanVendor && pDate && pAmt > 0 ? byVendorDateAmount.get(`${pCleanVendor}___${pDate}___${pAmt}`) : null);
+
+    if (match) {
+      // ENRICH existing invoice with Prizma metadata without creating duplicate
+      const enrichPayload: any = {
+        prizmaSource: true,
+        prizmaDemandId: pInv.prizmaDemandId,
+        prizmaRequestCode: pInv.prizmaRequestCode || match.prizmaRequestCode || null,
+        prizmaOrderCode: pInv.prizmaOrderCode || match.prizmaOrderCode || null,
+        prizmaOrderDemandId: pInv.prizmaOrderDemandId || match.prizmaOrderDemandId || null,
+        prizmaBtfUrl: pInv.prizmaBtfUrl || match.prizmaBtfUrl || null,
+        prizmaStfUrl: pInv.prizmaStfUrl || match.prizmaStfUrl || null,
+        prizmaUrl: pInv.prizmaBtfUrl || pInv.prizmaUrl || match.prizmaUrl || null,
+        prizmaStatus: pInv.prizmaStatus || match.prizmaStatus || null,
+        supplierInn: pInv.supplierInn || match.supplierInn || null
+      };
+      updatesToSave.push({ id: match.id, payload: enrichPayload });
+      enrichedCount++;
+    } else {
+      // ADD as a new system invoice
+      const id = `inv_prizma_${pInv.prizmaDemandId}`;
+      const normalizedItems = (pInv.items || []).map((it: any) => {
+        const norm = smartNormalizeItem({ ...it, supplier: pInv.supplier });
+        const cat = normalizeCategoryName(norm.category || it.category, norm.materialName || it.materialName);
+        return {
+          id: it.id || `item_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          materialName: norm.materialName || it.materialName,
+          originalName: it.originalName || it.materialName,
+          materialCode: it.materialCode || null,
+          quantity: Number(it.quantity) || 1,
+          unit: it.unit || 'Adet',
+          unitPrice: Number(it.unitPrice) || 0,
+          totalPrice: Number(it.totalPrice) || 0,
+          category: cat,
+          prizmaRequestCode: pInv.prizmaRequestCode,
+          prizmaOrderCode: pInv.prizmaOrderCode,
+          prizmaBtfUrl: pInv.prizmaBtfUrl,
+          prizmaStfUrl: pInv.prizmaStfUrl,
+          prizmaUrl: pInv.prizmaBtfUrl || pInv.prizmaUrl
+        };
+      });
+
+      const newInvDoc = {
+        id,
+        invoiceNumber: pInv.invoiceNumber || `PRZ-${pInv.prizmaDemandId}`,
+        date: pDate,
+        supplier: pInv.supplier,
+        vendorName: pInv.vendorName || pInv.supplier,
+        supplierInn: pInv.supplierInn || null,
+        jobsiteId: '',
+        jobsiteName: pInv.jobsiteName || 'Genel Şantiye',
+        uploadedBySupervisorId: '',
+        uploadedBySupervisorName: pInv.prizmaCreatedBy || 'Prizma ERP',
+        totalAmount: pInv.totalAmount || 0,
+        currency: pInv.currency || '₽',
+        category: pInv.category || (normalizedItems[0]?.category) || 'İnşaat Malzemesi',
+        items: normalizedItems,
+        created_at: pInv.date || new Date().toISOString(),
+        isDeleted: false,
+        prizmaSource: true,
+        prizmaDemandId: pInv.prizmaDemandId,
+        prizmaRequestCode: pInv.prizmaRequestCode,
+        prizmaOrderCode: pInv.prizmaOrderCode,
+        prizmaOrderDemandId: pInv.prizmaOrderDemandId,
+        prizmaBtfUrl: pInv.prizmaBtfUrl,
+        prizmaStfUrl: pInv.prizmaStfUrl,
+        prizmaUrl: pInv.prizmaBtfUrl || pInv.prizmaUrl,
+        prizmaStatus: pInv.prizmaStatus,
+        rawFileName: `prizma_${pInv.prizmaDemandId}.pdf`,
+        fileUrl: `/api/prizma/invoice-file/${pInv.prizmaDemandId}?type=schet`
+      };
+
+      newInvoicesToSave.push(newInvDoc);
+      addedCount++;
+
+      // Add to in-memory lookup to avoid duplicates in subsequent iterations
+      if (pDemandId) byPrizmaDemandId.set(pDemandId, newInvDoc);
+      if (pCleanNo) {
+        if (pCleanVendor) byVendorAndNo.set(`${pCleanVendor}___${pCleanNo}`, newInvDoc);
+        if (pCleanNo.length >= 4) byInvoiceNo.set(pCleanNo, newInvDoc);
+      }
+    }
+  }
+
+  // Write to Firestore in batches
+  if (newInvoicesToSave.length > 0 || updatesToSave.length > 0) {
+    const batchSize = 100;
+    for (let i = 0; i < newInvoicesToSave.length; i += batchSize) {
+      const batch = writeBatch(dbInstance);
+      const chunk = newInvoicesToSave.slice(i, i + batchSize);
+      chunk.forEach(inv => {
+        batch.set(doc(dbInstance, 'invoices', inv.id), sanitizeFirestoreObj(inv), { merge: true });
+      });
+      await batch.commit();
+    }
+
+    for (let i = 0; i < updatesToSave.length; i += batchSize) {
+      const batch = writeBatch(dbInstance);
+      const chunk = updatesToSave.slice(i, i + batchSize);
+      chunk.forEach(u => {
+        batch.set(doc(dbInstance, 'invoices', u.id), sanitizeFirestoreObj(u.payload), { merge: true });
+      });
+      await batch.commit();
+    }
+
+    // Invalidate memory cache so next read has latest merged data
+    if (memoryStore.invoices) memoryStore.invoices.timestamp = 0;
+  }
+
+  return {
+    success: true,
+    addedCount,
+    enrichedCount,
+    skippedCount,
+    totalPrizma: prizmaInvs.length,
+    message: `${addedCount} yeni Prizma faturası sisteme başarıyla entegre edildi. ${enrichedCount} mevcut fatura mükerrer oluşturulmadan Prizma verileriyle zenginleştirildi.`
+  };
+}
+
+// OTOMATİK AKŞAM VE GECE SENKRONİZASYONU & ENTEGRASYONU: Her akşam 21:00 ve her gece 02:30 (Moscow)
+// Prizma'dan kesinleşmiş malzeme faturalarını günceller ve sisteme otomatik olarak entegre eder.
+cron.schedule('0 21 * * *', async () => {
   console.log('[AUTO PRIZMA SYNC] Akşam 21:00 otomatik Prizma malzeme faturası senkronizasyonu başladı...');
-  prizmaSyncService.syncLast3Months({ maxItems: 1500 })
-    .then(r => console.log('[AUTO PRIZMA SYNC SUCCESS - AKŞAM]:', r.message))
-    .catch(err => console.error('[AUTO PRIZMA SYNC ERROR - AKŞAM]:', err.message));
+  try {
+    const syncRes = await prizmaSyncService.syncLast3Months({ maxItems: 1500 });
+    console.log('[AUTO PRIZMA SYNC SUCCESS - AKŞAM]:', syncRes.message);
+    if (db) {
+      console.log('[AUTO PRIZMA INTEGRATION] Akşam otomatik fatura entegrasyonu ve akıllı kümeleme başladı...');
+      const integRes = await integratePrizmaInvoicesInternal(db);
+      console.log('[AUTO PRIZMA INTEGRATION SUCCESS - AKŞAM]:', integRes.message);
+    }
+  } catch (err: any) {
+    console.error('[AUTO PRIZMA SYNC/INTEGRATION ERROR - AKŞAM]:', err.message);
+  }
 }, { timezone: 'Europe/Moscow' });
 
-cron.schedule('30 2 * * *', () => {
+cron.schedule('30 2 * * *', async () => {
   console.log('[AUTO PRIZMA SYNC] Gece 02:30 otomatik Prizma malzeme faturası senkronizasyonu başladı...');
-  prizmaSyncService.syncLast3Months({ maxItems: 1500 })
-    .then(r => console.log('[AUTO PRIZMA SYNC SUCCESS - GECE]:', r.message))
-    .catch(err => console.error('[AUTO PRIZMA SYNC ERROR - GECE]:', err.message));
+  try {
+    const syncRes = await prizmaSyncService.syncLast3Months({ maxItems: 1500 });
+    console.log('[AUTO PRIZMA SYNC SUCCESS - GECE]:', syncRes.message);
+    if (db) {
+      console.log('[AUTO PRIZMA INTEGRATION] Gece otomatik fatura entegrasyonu ve akıllı kümeleme başladı...');
+      const integRes = await integratePrizmaInvoicesInternal(db);
+      console.log('[AUTO PRIZMA INTEGRATION SUCCESS - GECE]:', integRes.message);
+    }
+  } catch (err: any) {
+    console.error('[AUTO PRIZMA SYNC/INTEGRATION ERROR - GECE]:', err.message);
+  }
 }, { timezone: 'Europe/Moscow' });
 
 cron.schedule('0 3 * * *', () => {
@@ -7263,186 +7482,8 @@ app.post('/api/prizma/sync-last-3-months', async (req, res) => {
 app.post('/api/prizma/integrate-invoices', async (_req, res) => {
   if (!db) return res.status(500).json({ error: 'Firestore veritabanı bağlı değil.' });
   try {
-    const prizmaInvs = await prizmaSyncService.getInvoicesCached();
-    if (!prizmaInvs || prizmaInvs.length === 0) {
-      return res.status(400).json({ error: 'Entegre edilecek Prizma faturası bulunamadı. Lütfen önce [Son 3 Ayı Prizma\'dan Güncelle] butonuna basınız.' });
-    }
-
-    const { data: curInvs } = await getInvoicesCached();
-    const existingInvoices = (curInvs || []).filter((i: any) => !i.isDeleted && !i.isPermanentlyDeleted);
-
-    const byPrizmaDemandId = new Map<number, any>();
-    const byVendorAndNo = new Map<string, any>();
-    const byInvoiceNo = new Map<string, any>();
-    const byVendorDateAmount = new Map<string, any>();
-
-    existingInvoices.forEach(inv => {
-      if (inv.prizmaDemandId) byPrizmaDemandId.set(Number(inv.prizmaDemandId), inv);
-      const cleanNo = String(inv.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
-      const cleanVendor = normalizeVendorName(inv.supplier || inv.vendorName || '');
-      const amt = Math.round(Number(inv.totalAmount) || 0);
-      const dt = String(inv.date || '').split('T')[0];
-
-      if (cleanNo) {
-        if (cleanVendor) byVendorAndNo.set(`${cleanVendor}___${cleanNo}`, inv);
-        if (cleanNo.length >= 4) byInvoiceNo.set(cleanNo, inv);
-      }
-      if (cleanVendor && dt && amt > 0) {
-        byVendorDateAmount.set(`${cleanVendor}___${dt}___${amt}`, inv);
-      }
-    });
-
-    let addedCount = 0;
-    let enrichedCount = 0;
-    let skippedCount = 0;
-
-    const newInvoicesToSave: any[] = [];
-    const updatesToSave: Array<{ id: string; payload: any }> = [];
-
-    const sanitizeFirestoreObj = (obj: any): any => {
-      if (obj === undefined) return null;
-      if (obj === null || typeof obj !== 'object') return obj;
-      if (Array.isArray(obj)) return obj.map(sanitizeFirestoreObj);
-      return Object.fromEntries(
-        Object.entries(obj)
-          .filter(([, v]) => v !== undefined)
-          .map(([k, v]) => [k, sanitizeFirestoreObj(v)])
-      );
-    };
-
-    for (const pInv of prizmaInvs) {
-      if (pInv.isDeleted || !pInv.items || pInv.items.length === 0) {
-        skippedCount++;
-        continue;
-      }
-
-      const pCleanNo = String(pInv.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
-      const pCleanVendor = normalizeVendorName(pInv.supplier || pInv.vendorName || '');
-      const pAmt = Math.round(Number(pInv.totalAmount) || 0);
-      const pDate = String(pInv.date || '').split('T')[0];
-      const pDemandId = Number(pInv.prizmaDemandId);
-
-      // Check for duplicate / existing match
-      let match = (pDemandId ? byPrizmaDemandId.get(pDemandId) : null) ||
-        (pCleanNo && pCleanVendor ? byVendorAndNo.get(`${pCleanVendor}___${pCleanNo}`) : null) ||
-        (pCleanNo && pCleanNo.length >= 4 ? byInvoiceNo.get(pCleanNo) : null) ||
-        (pCleanVendor && pDate && pAmt > 0 ? byVendorDateAmount.get(`${pCleanVendor}___${pDate}___${pAmt}`) : null);
-
-      if (match) {
-        // ENRICH existing invoice with Prizma metadata without creating duplicate
-        const enrichPayload: any = {
-          prizmaSource: true,
-          prizmaDemandId: pInv.prizmaDemandId,
-          prizmaRequestCode: pInv.prizmaRequestCode || match.prizmaRequestCode || null,
-          prizmaOrderCode: pInv.prizmaOrderCode || match.prizmaOrderCode || null,
-          prizmaOrderDemandId: pInv.prizmaOrderDemandId || match.prizmaOrderDemandId || null,
-          prizmaBtfUrl: pInv.prizmaBtfUrl || match.prizmaBtfUrl || null,
-          prizmaStfUrl: pInv.prizmaStfUrl || match.prizmaStfUrl || null,
-          prizmaUrl: pInv.prizmaBtfUrl || pInv.prizmaUrl || match.prizmaUrl || null,
-          prizmaStatus: pInv.prizmaStatus || match.prizmaStatus || null,
-          supplierInn: pInv.supplierInn || match.supplierInn || null
-        };
-        updatesToSave.push({ id: match.id, payload: enrichPayload });
-        enrichedCount++;
-      } else {
-        // ADD as a new system invoice
-        const id = `inv_prizma_${pInv.prizmaDemandId}`;
-        const normalizedItems = (pInv.items || []).map((it: any) => {
-          const norm = smartNormalizeItem({ ...it, supplier: pInv.supplier });
-          const cat = normalizeCategoryName(norm.category || it.category, norm.materialName || it.materialName);
-          return {
-            id: it.id || `item_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-            materialName: norm.materialName || it.materialName,
-            originalName: it.originalName || it.materialName,
-            materialCode: it.materialCode || null,
-            quantity: Number(it.quantity) || 1,
-            unit: it.unit || 'Adet',
-            unitPrice: Number(it.unitPrice) || 0,
-            totalPrice: Number(it.totalPrice) || 0,
-            category: cat,
-            prizmaRequestCode: pInv.prizmaRequestCode,
-            prizmaOrderCode: pInv.prizmaOrderCode,
-            prizmaBtfUrl: pInv.prizmaBtfUrl,
-            prizmaStfUrl: pInv.prizmaStfUrl,
-            prizmaUrl: pInv.prizmaBtfUrl || pInv.prizmaUrl
-          };
-        });
-
-        const newInvDoc = {
-          id,
-          invoiceNumber: pInv.invoiceNumber || `PRZ-${pInv.prizmaDemandId}`,
-          date: pDate,
-          supplier: pInv.supplier,
-          vendorName: pInv.vendorName || pInv.supplier,
-          supplierInn: pInv.supplierInn || null,
-          jobsiteId: '',
-          jobsiteName: pInv.jobsiteName || 'Genel Şantiye',
-          uploadedBySupervisorId: '',
-          uploadedBySupervisorName: pInv.prizmaCreatedBy || 'Prizma ERP',
-          totalAmount: pInv.totalAmount || 0,
-          currency: pInv.currency || '₽',
-          category: pInv.category || (normalizedItems[0]?.category) || 'İnşaat Malzemesi',
-          items: normalizedItems,
-          created_at: pInv.date || new Date().toISOString(),
-          isDeleted: false,
-          prizmaSource: true,
-          prizmaDemandId: pInv.prizmaDemandId,
-          prizmaRequestCode: pInv.prizmaRequestCode,
-          prizmaOrderCode: pInv.prizmaOrderCode,
-          prizmaOrderDemandId: pInv.prizmaOrderDemandId,
-          prizmaBtfUrl: pInv.prizmaBtfUrl,
-          prizmaStfUrl: pInv.prizmaStfUrl,
-          prizmaUrl: pInv.prizmaBtfUrl || pInv.prizmaUrl,
-          prizmaStatus: pInv.prizmaStatus,
-          rawFileName: `prizma_${pInv.prizmaDemandId}.pdf`,
-          fileUrl: `/api/prizma/invoice-file/${pInv.prizmaDemandId}?type=schet`
-        };
-
-        newInvoicesToSave.push(newInvDoc);
-        addedCount++;
-
-        // Add to in-memory lookup to avoid duplicates in subsequent iterations
-        if (pDemandId) byPrizmaDemandId.set(pDemandId, newInvDoc);
-        if (pCleanNo) {
-          if (pCleanVendor) byVendorAndNo.set(`${pCleanVendor}___${pCleanNo}`, newInvDoc);
-          if (pCleanNo.length >= 4) byInvoiceNo.set(pCleanNo, newInvDoc);
-        }
-      }
-    }
-
-    // Write to Firestore in batches
-    if (newInvoicesToSave.length > 0 || updatesToSave.length > 0) {
-      const batchSize = 100;
-      for (let i = 0; i < newInvoicesToSave.length; i += batchSize) {
-        const batch = writeBatch(db);
-        const chunk = newInvoicesToSave.slice(i, i + batchSize);
-        chunk.forEach(inv => {
-          batch.set(doc(db, 'invoices', inv.id), sanitizeFirestoreObj(inv), { merge: true });
-        });
-        await batch.commit();
-      }
-
-      for (let i = 0; i < updatesToSave.length; i += batchSize) {
-        const batch = writeBatch(db);
-        const chunk = updatesToSave.slice(i, i + batchSize);
-        chunk.forEach(u => {
-          batch.set(doc(db, 'invoices', u.id), sanitizeFirestoreObj(u.payload), { merge: true });
-        });
-        await batch.commit();
-      }
-
-      // Invalidate memory cache so next read has latest merged data
-      if (memoryStore.invoices) memoryStore.invoices.timestamp = 0;
-    }
-
-    res.json({
-      success: true,
-      addedCount,
-      enrichedCount,
-      skippedCount,
-      totalPrizma: prizmaInvs.length,
-      message: `${addedCount} yeni Prizma faturası sisteme başarıyla entegre edildi. ${enrichedCount} mevcut fatura mükerrer oluşturulmadan Prizma verileriyle zenginleştirildi.`
-    });
+    const result = await integratePrizmaInvoicesInternal(db);
+    res.json(result);
   } catch (err: any) {
     console.error('[PRIZMA INTEGRATE ERROR]:', err);
     res.status(500).json({ error: err.message });

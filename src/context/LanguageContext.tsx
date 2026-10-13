@@ -24,6 +24,7 @@ export const translations: Record<Language, Record<string, string>> = {
     navDashboard: 'Genel Bakış ve Dashboard',
     navPreApprovalAudit: 'Hızlı Ön Onay Fiyat Denetimi',
     navDiscountEntry: 'Şef İndirim & Tasarruf Girişi',
+    navComparativeOffers: '1M+ ₽ Karşılaştırmalı Teklif (TDF)',
     navInvoiceAI: 'AI Otomatik Fatura Okuma',
     navAnomalies: 'Anomali & Fiyat Artış Paneli',
     navMaterialCompare: 'Malzeme Fiyat Kıyaslama',
@@ -34,6 +35,7 @@ export const translations: Record<Language, Record<string, string>> = {
 
     // Sub-item descriptions TR
     subDescDiscountEntry: 'Tedarikçi pazarlıkları, teklif kıyaslama ve tasarruf kayıtları',
+    subDescComparativeOffers: '1.000.000 ₽ üzeri TDF & çoklu teklif analizi ile indirim girişi',
     subDescPreAudit: 'Satınalma onayı öncesi piyasa ve bütçe fiyat denetimi',
     subDescInvoiceAI: 'Fatura, irsaliye ve çeklerden otomatik AI veri okuma',
     subDescDrive: 'Şantiyelere ait tüm orijinal fatura ve belgelerin bulut arşivi',
@@ -48,6 +50,7 @@ export const translations: Record<Language, Record<string, string>> = {
     badgeOverview: 'Özet & KPI',
     badgePreAudit: 'Ön Denetim & Koruma',
     badgeEntry: 'Giriş',
+    badgeComparativeOffers: '1M+ ₽ TDF',
     badgeAutomation: 'Otomasyon',
     badgeWarning: 'Uyarı',
     badgeAnalysis: 'Analiz',
@@ -249,6 +252,7 @@ export const translations: Record<Language, Record<string, string>> = {
     navDashboard: 'Обзор и Дашборд',
     navPreApprovalAudit: 'Быстрая предварительная проверка цен',
     navDiscountEntry: 'Ввод скидок и экономии',
+    navComparativeOffers: 'Сравнительный анализ (1M+ ₽ TDF)',
     navInvoiceAI: 'ИИ Считывание счетов',
     navAnomalies: 'Аномалии и рост цен',
     navMaterialCompare: 'Сравнение цен на материалы',
@@ -259,6 +263,7 @@ export const translations: Record<Language, Record<string, string>> = {
 
     // Sub-item descriptions RU
     subDescDiscountEntry: 'Учет скидок от поставщиков и фиксация экономии',
+    subDescComparativeOffers: 'Сравнительный анализ коммерческих предложений свыше 1 000 000 ₽',
     subDescPreAudit: 'Контроль рыночных цен до согласования счета',
     subDescInvoiceAI: 'Автоматическое ИИ распознавание счетов и накладных',
     subDescDrive: 'Облачное хранилище оригиналов счетов по объектам',
@@ -273,6 +278,7 @@ export const translations: Record<Language, Record<string, string>> = {
     badgeOverview: 'KPI и Обзор',
     badgePreAudit: 'Предконтроль',
     badgeEntry: 'Ввод',
+    badgeComparativeOffers: '1M+ ₽ TDF',
     badgeAutomation: 'Автоматизация',
     badgeWarning: 'Предупреждение',
     badgeAnalysis: 'Анализ',

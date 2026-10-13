@@ -53,6 +53,7 @@ const InvoiceScannerAI = lazyWithRetry(() => import('./components/InvoiceScanner
 const InvoiceDriveVault = lazyWithRetry(() => import('./components/InvoiceDriveVault').then(m => ({ default: m.InvoiceDriveVault })), 'InvoiceDriveVault');
 const TrashCanModal = lazyWithRetry(() => import('./components/TrashCanModal').then(m => ({ default: m.TrashCanModal })), 'TrashCanModal');
 const DataBackupCenterModal = lazyWithRetry(() => import('./components/DataBackupCenterModal').then(m => ({ default: m.DataBackupCenterModal })), 'DataBackupCenterModal');
+const ComparativeOffersView = lazyWithRetry(() => import('./components/ComparativeOffersView').then(m => ({ default: m.ComparativeOffersView })), 'ComparativeOffersView');
 
 import { Coins } from 'lucide-react';
 import { evaluateDiscountAudit } from './utils/auditRiskEngine';
@@ -678,6 +679,16 @@ function AppContent() {
                     document.getElementById('recent-discounts-section')?.scrollIntoView({ behavior: 'smooth' });
                   }, 150);
                 }}
+              />
+            )}
+
+            {activeTab === 'comparative-offers' && (
+              <ComparativeOffersView
+                jobsites={jobsites}
+                supervisors={supervisors}
+                personnel={personnel}
+                onNavigateToTab={(tabId) => setActiveTab(tabId)}
+                onRefreshData={() => loadData(false)}
               />
             )}
 
