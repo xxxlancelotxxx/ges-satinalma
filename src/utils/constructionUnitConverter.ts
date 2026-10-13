@@ -74,7 +74,7 @@ export function extractRebarDiameter(text: string): number | null {
   const t = text.replace(/,/g, '.');
 
   // 1. Explicit diameter symbols: Q8, Q-8, Ø12, d12, D-18, ф12, фи12, fi12, çap: 16
-  const symMatch = t.match(/(?:[qQøØdDдДфФ]|fi|фи|диаметр|çap)\s*[-:=]?\s*(\d+(?:\.\d+)?)\s*(?:мм|mm)?(?:$|[^0-9a-zA-Zа-яА-Я])/i);
+  const symMatch = t.match(/(?:[qQøØdDдДфФ]|fi|фи|диаметр|çap)\s*[-:=№#]?\s*(\d+(?:\.\d+)?)\s*(?:мм|mm)?(?:$|[^0-9a-zA-Zа-яА-Я])/i);
   if (symMatch && symMatch[1]) {
     const val = parseFloat(symMatch[1]);
     if ([6, 8, 10, 12, 14, 16, 18, 20, 22, 25, 28, 32, 36, 40].includes(val)) return val;
@@ -89,8 +89,8 @@ export function extractRebarDiameter(text: string): number | null {
     if (val >= 6 && val <= 50) return val;
   }
 
-  // 3. Grade + Diameter: A500C 8, А500 36, А500С-12, B500C 16, A240 10
-  const gradeMatch = t.match(/(?:a500c|а500с|a500|а500|b500c|b500|a240|а240|a400)\s*[-/:]?\s*(\d+(?:\.\d+)?)(?:$|[^0-9a-zA-Zа-яА-Я])/i);
+  // 3. Grade + Diameter: A500C 8, А500 36, А500С-12, B500C 16, A240 10, 25G2S 12, 35GS 14
+  const gradeMatch = t.match(/(?:a500c|а500с|a500|а500|b500c|b500|a240|а240|a400|а400|25г2с|35гс)\s*[-/:=№#]?\s*(\d+(?:\.\d+)?)(?:$|[^0-9a-zA-Zа-яА-Я])/i);
   if (gradeMatch && gradeMatch[1]) {
     const val = parseFloat(gradeMatch[1]);
     if ([6, 8, 10, 12, 14, 16, 18, 20, 22, 25, 28, 32, 36, 40].includes(val)) return val;
@@ -108,6 +108,13 @@ export function extractRebarDiameter(text: string): number | null {
   const lenMatch = t.match(/(?:^|[^0-9a-zA-Zа-яА-Я])(\d+)\s*[*xх]\s*(?:11700|12000|6000)\b/i);
   if (lenMatch && lenMatch[1]) {
     const val = parseInt(lenMatch[1]);
+    if ([6, 8, 10, 12, 14, 16, 18, 20, 22, 25, 28, 32, 36, 40].includes(val)) return val;
+  }
+
+  // 6. Generic rebar term followed by diameter (e.g. "Арматура 8", "Арматура №8", "İnşaat Demiri 12", "Пруток 10")
+  const genMatch = t.match(/(?:арматур[а-я]*|сталь\s+арматурн[а-я]*|пруток|inşaat\s+demir[a-zğüşıöç]*|insaat\s+demir[a-zğüşıöç]*)\D{0,15}?(?:№\s*|n[°o.]\s*)?(\d+(?:\.\d+)?)(?:$|[^0-9a-zA-Zа-яА-Я])/i);
+  if (genMatch && genMatch[1]) {
+    const val = parseFloat(genMatch[1]);
     if ([6, 8, 10, 12, 14, 16, 18, 20, 22, 25, 28, 32, 36, 40].includes(val)) return val;
   }
 

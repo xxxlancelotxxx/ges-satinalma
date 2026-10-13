@@ -1,0 +1,1586 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GES İnşaat - Satınalma & Maliyet Kontrol Sistemi Profesyonel El Kitabı</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary: #0f172a;
+      --primary-light: #1e293b;
+      --accent-blue: #2563eb;
+      --accent-blue-light: #3b82f6;
+      --accent-emerald: #059669;
+      --accent-amber: #d97706;
+      --accent-rose: #e11d48;
+      --text-main: #1e293b;
+      --text-muted: #64748b;
+      --bg-page: #f8fafc;
+      --bg-card: #ffffff;
+      --border-color: #e2e8f0;
+      --border-dark: #cbd5e1;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--text-main);
+      background-color: var(--bg-page);
+      line-height: 1.65;
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Print Controls Bar (Screen Only) */
+    .screen-control-bar {
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+      background: #0f172a;
+      color: #ffffff;
+      padding: 12px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+      border-bottom: 1px solid #334155;
+    }
+
+    .screen-control-bar .brand-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .screen-control-bar .badge-live {
+      background: #10b981;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 999px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .portal-link {
+      color: #94a3b8;
+      font-size: 12px;
+      text-decoration: none;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .portal-link:hover {
+      color: #38bdf8;
+    }
+
+    .btn-print {
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      color: #ffffff;
+      border: none;
+      padding: 10px 22px;
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s;
+      box-shadow: 0 3px 10px rgba(37,99,235,0.35);
+    }
+
+    .btn-print:hover {
+      background: linear-gradient(135deg, #1d4ed8, #1e40af);
+      transform: translateY(-1px);
+    }
+
+    /* Document Wrapper */
+    .document-wrapper {
+      max-width: 1100px;
+      margin: 30px auto;
+      background: #ffffff;
+      padding: 60px 85px;
+      border-radius: 16px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.06);
+      border: 1px solid var(--border-color);
+    }
+
+    /* Cover Page */
+    .cover-page {
+      min-height: 850px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding-bottom: 40px;
+      border-bottom: 3px solid #f1f5f9;
+      margin-bottom: 60px;
+      position: relative;
+    }
+
+    .cover-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 3px solid var(--accent-blue);
+      padding-bottom: 24px;
+    }
+
+    .ges-logo-box {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .ges-logo-emblem {
+      background: #0f172a;
+      color: #ffffff;
+      width: 56px;
+      height: 56px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 27px;
+      font-weight: 900;
+      letter-spacing: -1px;
+      border: 2px solid #2563eb;
+    }
+
+    .ges-company-title {
+      font-size: 25px;
+      font-weight: 900;
+      color: #0f172a;
+      letter-spacing: -0.5px;
+      line-height: 1.1;
+    }
+
+    .ges-company-subtitle {
+      font-size: 11px;
+      font-weight: 700;
+      color: #64748b;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    .doc-ref-pill {
+      background: #f1f5f9;
+      border: 1px solid #cbd5e1;
+      padding: 7px 15px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #334155;
+      font-weight: 700;
+    }
+
+    .cover-hero {
+      margin: 80px 0 60px 0;
+    }
+
+    .cover-kicker {
+      display: inline-block;
+      background: #eff6ff;
+      color: #2563eb;
+      font-weight: 800;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      padding: 6px 14px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      border-left: 4px solid #2563eb;
+    }
+
+    .cover-title {
+      font-size: 44px;
+      font-weight: 900;
+      color: #0f172a;
+      line-height: 1.15;
+      letter-spacing: -1px;
+      margin-bottom: 18px;
+    }
+
+    .cover-title span {
+      color: #2563eb;
+    }
+
+    .cover-description {
+      font-size: 17px;
+      color: #475569;
+      line-height: 1.65;
+      max-width: 850px;
+    }
+
+    .cover-meta-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      background: #f8fafc;
+      padding: 24px;
+      border-radius: 12px;
+      border: 1px solid var(--border-color);
+    }
+
+    .meta-item .meta-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: #64748b;
+      font-weight: 700;
+      margin-bottom: 4px;
+      letter-spacing: 0.5px;
+    }
+
+    .meta-item .meta-value {
+      font-size: 14px;
+      font-weight: 800;
+      color: #0f172a;
+    }
+
+    /* Section Styles */
+    .guide-section {
+      margin-bottom: 60px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      border-bottom: 2px solid #e2e8f0;
+      padding-bottom: 12px;
+      margin-bottom: 24px;
+    }
+
+    .section-num {
+      background: #0f172a;
+      color: #ffffff;
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    .section-title {
+      font-size: 23px;
+      font-weight: 800;
+      color: #0f172a;
+      letter-spacing: -0.5px;
+    }
+
+    .lead-paragraph {
+      font-size: 15px;
+      line-height: 1.7;
+      color: #334155;
+      margin-bottom: 20px;
+    }
+
+    /* Callouts */
+    .callout {
+      padding: 20px 24px;
+      border-radius: 12px;
+      margin: 24px 0;
+      border-left: 5px solid;
+    }
+
+    .callout-info {
+      background: #eff6ff;
+      border-color: #2563eb;
+      color: #1e3a8a;
+    }
+
+    .callout-success {
+      background: #ecfdf5;
+      border-color: #059669;
+      color: #064e3b;
+    }
+
+    .callout-warning {
+      background: #fffbeb;
+      border-color: #d97706;
+      color: #78350f;
+    }
+
+    .callout-danger {
+      background: #fff1f2;
+      border-color: #e11d48;
+      color: #881337;
+    }
+
+    .callout-title {
+      font-weight: 800;
+      font-size: 14px;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Tables */
+    .styled-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 24px 0;
+      font-size: 13px;
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+      border: 1px solid var(--border-color);
+    }
+
+    .styled-table th {
+      background: #0f172a;
+      color: #ffffff;
+      text-align: left;
+      padding: 12px 16px;
+      font-weight: 700;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .styled-table td {
+      padding: 12px 16px;
+      border-bottom: 1px solid #f1f5f9;
+      color: #334155;
+    }
+
+    .styled-table tr:nth-child(even) td {
+      background: #f8fafc;
+    }
+
+    .styled-table tr:hover td {
+      background: #f1f5f9;
+    }
+
+    .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* Comparison Cards (Before vs After) */
+    .comparison-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin: 24px 0;
+    }
+
+    .comparison-card {
+      padding: 24px;
+      border-radius: 12px;
+      border: 1px solid;
+    }
+
+    .comparison-card.bad {
+      background: #fff5f5;
+      border-color: #fecdd3;
+    }
+
+    .comparison-card.good {
+      background: #f0fdf4;
+      border-color: #bbf7d0;
+    }
+
+    .comparison-badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    .comparison-badge.bad {
+      background: #ffe4e6;
+      color: #be123c;
+    }
+
+    .comparison-badge.good {
+      background: #dcfce7;
+      color: #15803d;
+    }
+
+    /* 3 Stage Step Cards */
+    .stage-timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      margin: 24px 0;
+    }
+
+    .stage-card {
+      display: grid;
+      grid-template-columns: 80px 1fr 220px;
+      align-items: center;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 18px 24px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.03);
+      position: relative;
+    }
+
+    .stage-card.highlight {
+      border: 2px solid #2563eb;
+      background: #f8faff;
+    }
+
+    .stage-pill-num {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 900;
+      color: #ffffff;
+    }
+
+    .stage-pill-1 { background: #64748b; }
+    .stage-pill-mid { background: #d97706; }
+    .stage-pill-2 { background: #059669; }
+    .stage-pill-3 { background: #2563eb; }
+
+    .stage-info h4 {
+      font-size: 16px;
+      font-weight: 800;
+      color: #0f172a;
+      margin-bottom: 4px;
+    }
+
+    .stage-info p {
+      font-size: 13px;
+      color: #64748b;
+    }
+
+    .stage-rule {
+      background: #f8fafc;
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid #e2e8f0;
+      font-size: 12px;
+      color: #334155;
+      font-weight: 600;
+    }
+
+    /* Workflow Diagram */
+    .workflow-box {
+      background: #0f172a;
+      color: #ffffff;
+      padding: 30px;
+      border-radius: 14px;
+      margin: 30px 0;
+    }
+
+    .workflow-header {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+
+    .workflow-steps-horizontal {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      position: relative;
+    }
+
+    .wf-step {
+      background: #1e293b;
+      padding: 20px 16px;
+      border-radius: 10px;
+      border: 1px solid #334155;
+      text-align: center;
+      position: relative;
+    }
+
+    .wf-step .step-circle {
+      width: 32px;
+      height: 32px;
+      background: #2563eb;
+      color: #ffffff;
+      border-radius: 50%;
+      margin: 0 auto 10px auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 13px;
+    }
+
+    .wf-step h5 {
+      font-size: 13px;
+      font-weight: 700;
+      color: #f8fafc;
+      margin-bottom: 6px;
+    }
+
+    .wf-step p {
+      font-size: 11px;
+      color: #94a3b8;
+      line-height: 1.4;
+    }
+
+    /* Formula Box */
+    .formula-card {
+      background: #f8fafc;
+      border: 2px dashed #94a3b8;
+      padding: 20px 24px;
+      border-radius: 12px;
+      margin: 20px 0;
+      text-align: center;
+    }
+
+    .formula-text {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 16px;
+      font-weight: 700;
+      color: #0f172a;
+      letter-spacing: -0.5px;
+    }
+
+    .formula-explanation {
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 8px;
+    }
+
+    /* UI Mockup Window */
+    .mockup-window {
+      background: #0f172a;
+      border-radius: 14px;
+      border: 1px solid #334155;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+      margin: 24px 0;
+      overflow: hidden;
+    }
+
+    .mockup-topbar {
+      background: #1e293b;
+      padding: 10px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid #334155;
+    }
+
+    .mockup-dots {
+      display: flex;
+      gap: 6px;
+    }
+
+    .mockup-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .dot-red { background: #ef4444; }
+    .dot-yellow { background: #eab308; }
+    .dot-green { background: #22c55e; }
+
+    .mockup-address {
+      background: #0f172a;
+      color: #94a3b8;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 3px 14px;
+      border-radius: 6px;
+      border: 1px solid #334155;
+    }
+
+    .mockup-body {
+      padding: 22px;
+      background: #0f172a;
+      color: #ffffff;
+    }
+
+    /* KPI Row inside Mockup */
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    .kpi-tile {
+      background: #1e293b;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid #334155;
+    }
+
+    .kpi-tile .kpi-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: #94a3b8;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .kpi-tile .kpi-val {
+      font-size: 19px;
+      font-weight: 900;
+      color: #f8fafc;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .kpi-tile .kpi-sub {
+      font-size: 11px;
+      color: #10b981;
+      font-weight: 600;
+      margin-top: 2px;
+    }
+
+    /* Mockup Table */
+    .ui-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin: 12px 0;
+    }
+
+    .ui-table th {
+      background: #1e293b;
+      color: #94a3b8;
+      text-align: left;
+      padding: 10px 12px;
+      font-weight: 700;
+      border-bottom: 1px solid #334155;
+    }
+
+    .ui-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #1e293b;
+      color: #e2e8f0;
+    }
+
+    .ui-table tr.highlight-row {
+      background: rgba(37,99,235,0.18);
+      border-left: 3px solid #3b82f6;
+    }
+
+    .ui-table tr.baseline-row {
+      background: rgba(16, 185, 129, 0.18);
+      border-left: 3px solid #10b981;
+    }
+
+    /* Leaderboard Badge Table */
+    .leaderboard-sample {
+      background: #1e293b;
+      border-radius: 12px;
+      padding: 14px;
+      border: 1px solid #334155;
+    }
+
+    .lb-row {
+      display: grid;
+      grid-template-columns: 45px 1.4fr 120px 120px 90px 90px;
+      align-items: center;
+      padding: 9px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      margin-bottom: 5px;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+
+    .lb-row.gold { border-left: 4px solid #f59e0b; }
+    .lb-row.silver { border-left: 4px solid #94a3b8; }
+    .lb-row.bronze { border-left: 4px solid #b45309; }
+
+    .rank-pill {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 900;
+      font-size: 11px;
+    }
+
+    .rank-gold { background: #f59e0b; color: #000; }
+    .rank-silver { background: #94a3b8; color: #000; }
+    .rank-bronze { background: #b45309; color: #fff; }
+
+    .score-badge {
+      background: rgba(37,99,235,0.25);
+      color: #60a5fa;
+      font-weight: 800;
+      padding: 3px 8px;
+      border-radius: 6px;
+      text-align: center;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* Print Rules */
+    @media print {
+      body {
+        background: #ffffff;
+        font-size: 12px;
+      }
+
+      .screen-control-bar {
+        display: none !important;
+      }
+
+      .document-wrapper {
+        max-width: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        box-shadow: none !important;
+        border: none !important;
+      }
+
+      .cover-page {
+        min-height: 98vh;
+        page-break-after: always;
+        padding-top: 40px;
+      }
+
+      .page-break {
+        page-break-before: always;
+      }
+
+      .avoid-break {
+        page-break-inside: avoid;
+      }
+
+      .mockup-window {
+        background: #0f172a !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Screen Top Navigation Bar with Single Click PDF Button -->
+  <div class="screen-control-bar">
+    <div class="brand-info">
+      <span class="badge-live">CANLI SİSTEM KILAVUZU</span>
+      <strong style="color: #f8fafc;">GES İNŞAAT</strong>
+      <span style="color: #475569;">|</span>
+      <a href="https://gescons.ai.studio/" target="_blank" class="portal-link">
+        https://gescons.ai.studio/ ↗
+      </a>
+    </div>
+    <button class="btn-print" onclick="window.print()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M6 9V2h12v7"></path>
+        <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+        <rect x="6" y="14" width="12" height="8"></rect>
+      </svg>
+      PDF Olarak Kaydet / Yazdır (Ctrl + P)
+    </button>
+  </div>
+
+  <div class="document-wrapper">
+
+    <!-- ===================================================================== -->
+    <!-- KAPAK SAYFASI                                                         -->
+    <!-- ===================================================================== -->
+    <div class="cover-page">
+      <div class="cover-header">
+        <div class="ges-logo-box">
+          <div class="ges-logo-emblem">G</div>
+          <div>
+            <div class="ges-company-title">GES İNŞAAT</div>
+            <div class="ges-company-subtitle">GES CONSTRUCTION PROCUREMENT & AUDIT</div>
+          </div>
+        </div>
+        <div class="doc-ref-pill">DOKÜMAN NO: GES-PROC-2026-MAN01</div>
+      </div>
+
+      <div class="cover-hero">
+        <div class="cover-kicker">Resmi Kurumsal Eğitim & Uygulama Dokümanı</div>
+        <h1 class="cover-title">
+          Satınalma, TDF ve Maliyet Kontrol Sistemi <span>Kullanım El Kitabı</span>
+        </h1>
+        <p class="cover-description">
+          Tüm Satınalma Şefleri, Satınalma Uzmanları ve Şantiye Personeli için tasarlanmış; 
+          <strong>1 Milyon Ruble üzeri alımlarda zorunlu TDF</strong> (Karşılaştırmalı Teklif Analizi - Yeni Standart), 
+          en düşük ilk teklifin taban alınarak gerçek piyasa tasarrufunun tespiti, 
+          koşulsuz indirim isteme protokolü, <strong>AI Fatura Tarama</strong>, 
+          inşaat birim çevrimleri ve <strong>Şefler Arası Tasarruf & Rekabet Sıralaması</strong> yönergeleri.
+        </p>
+      </div>
+
+      <div class="cover-meta-grid">
+        <div class="meta-item">
+          <div class="meta-label">Hedef Kitle</div>
+          <div class="meta-value">Tüm Satınalma Şefleri & Personeli</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">Yürürlük Tarihi</div>
+          <div class="meta-value">Ekim 2026 (Aktif Canlı Sürüm)</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">Onay Makamı</div>
+          <div class="meta-value">Genel Yönetim & Mali Denetim</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">Sistem Portali</div>
+          <div class="meta-value font-mono">gescons.ai.studio</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- BÖLÜM 1: SİSTEMİN VİZYONU VE AMACI                                    -->
+    <!-- ===================================================================== -->
+    <div class="guide-section">
+      <div class="section-header">
+        <div class="section-num">1</div>
+        <h2 class="section-title">Sistemin Vizyonu ve Amacı: Neden Bu Sistemi Kurduk?</h2>
+      </div>
+
+      <p class="lead-paragraph">
+        GES İnşaat olarak yürüttüğümüz mega şantiye projelerinde (<strong>Bs Jois, Jk Dream Riva, Jk Jois, SET OF3a, Veer Ub10, Citybay6</strong>), malzeme ve hizmet satınalmaları şirket bütçemizin 
+        en kritik harcama kalemini oluşturmaktadır. Ancak geçmiş dönemlerde klasik şantiye satınalma süreçlerinde yaşanan 
+        denetim yetersizlikleri ve bilgi asimetrisi, hem şirketimizi haksız maliyetlere maruz bırakmış hem de gerçekten 
+        masaya oturup ter döken satınalma şeflerimizin emeğini görünmez kılmıştır.
+      </p>
+
+      <div class="comparison-grid avoid-break">
+        <div class="comparison-card bad">
+          <span class="comparison-badge bad">❌ Eski / Hatalı Sistem (Yanılsama)</span>
+          <h4 style="font-size: 15px; font-weight: 800; color: #991b1b; margin-bottom: 8px;">"Şişirilmiş Liste Fiyatı" İndirim Tuzağı</h4>
+          <p style="font-size: 12px; color: #4b5563; line-height: 1.5;">
+            Tedarikçi piyasada <strong>70.000 ₽</strong> olan inşaat demirini <strong>90.000 ₽</strong> liste fiyatıyla teklif eder. 
+            Ardından <em>"%15 özel şantiye indirimi"</em> uygulayıp <strong>76.500 ₽</strong>'ye satar. 
+            Eski sistemde şef <em>"13.500 ₽ indirim aldım!"</em> diye raporlar, oysa şirketimiz piyasa rayicinden 
+            <strong>6.500 ₽ daha pahalıya</strong> alım yapmış ve zarara uğratılmıştır.
+          </p>
+        </div>
+
+        <div class="comparison-card good">
+          <span class="comparison-badge good">✅ Yeni GES İnşaat Sistemi (Gerçek Tasarruf)</span>
+          <h4 style="font-size: 15px; font-weight: 800; color: #166534; margin-bottom: 8px;">Reel Piyasa Kıyaslama Tasarrufu (Market Baseline)</h4>
+          <p style="font-size: 12px; color: #4b5563; line-height: 1.5;">
+            Sistemimiz piyasadaki <strong>tüm bağımsız ilk tekliflerin en düşüğünü (Taban Fiyat)</strong> referans alır. 
+            Şefimiz masaya oturup 70.000 ₽'lik taban teklifi <strong>66.000 ₽</strong>'ye indirdiğinde, 
+            kasaya giren net <strong>4.000 ₽/ton gerçek tasarruf</strong> sisteme işlenir ve şefin başarı hanesine tam puan yazılır.
+          </p>
+        </div>
+      </div>
+
+      <div class="callout callout-info avoid-break">
+        <div class="callout-title">
+          🎯 Bu Sistemin 3 Temel Varoluş Amacı:
+        </div>
+        <ul style="margin-left: 20px; font-size: 13px; line-height: 1.7;">
+          <li><strong>Şeffaf ve Matematiksel Denetim:</strong> Faturasız, belgesiz veya sözlü iddialarla indirim beyan edilmesini tamamen sonlandırmak.</li>
+          <li><strong>Hakkaniyetli Prim ve Takdir:</strong> Masa başında gerçekten sert pazarlık yapan, ek tedarikçi bulan şeflerin emeğini matematiksel olarak ödüllendirmek.</li>
+          <li><strong>Merkezi Fiyat Hafızası:</strong> Moskova, St. Petersburg veya bölgesel şantiyelerimiz arasında birim fiyat farklarını anlık kıyaslayarak en uygun tedarikçiyi korumak.</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- BÖLÜM 2: 1M+ RUBLE ALIMLARDA ZORUNLU TDF VE KARŞILAŞTIRMALI TEKLİF    -->
+    <!-- ===================================================================== -->
+    <div class="guide-section page-break">
+      <div class="section-header">
+        <div class="section-num">2</div>
+        <h2 class="section-title">1 Milyon ₽ Üzeri Siparişlerde Zorunlu TDF ve Karşılaştırmalı Teklif Analizi (Yeni Standart)</h2>
+      </div>
+
+      <div class="callout callout-danger avoid-break">
+        <div class="callout-title">🚨 KESİN PROSEDÜR KURALI: TDF YAPILMADAN 1M+ SİPARİŞ VERİLEMEZ!</div>
+        <p style="font-size: 13px; line-height: 1.7;">
+          <strong>1.000.000 ₽ ve üzerindeki tüm malzeme ve hizmet alımlarında</strong> Teklif Değerlendirme Formu (TDF / Karşılaştırmalı Teklif Analizi) düzenlenmesi <strong>YÖNETİMCE KESİNLİKLE ZORUNLUDUR</strong>. 
+          En az 3 bağımsız tedarikçiden teklif alınmadan, sistemde TDF oluşturulmadan verilen hiçbir sipariş onaylanmaz, muhasebeleştirilemez ve şefe 0 ₽ tasarruf yazılır!
+        </p>
+      </div>
+
+      <h3 style="font-size: 17px; font-weight: 800; color: #0f172a; margin: 24px 0 10px 0;">
+        📌 Nihai İndirim Nasıl Hesaplanır? (En Düşük İlk Teklif - Baseline Kuralı)
+      </h3>
+      <p class="lead-paragraph">
+        TDF hazırlanırken sisteme toplanan tüm teklif belgeleri yüklenir. Yapay zeka motorumuz bu teklifleri satır satır okur ve 
+        <strong>PİYASADAKİ TÜM İLK TEKLİFLERİN EN DÜŞÜĞÜNÜ (TABAN FİYAT / BASELINE)</strong> tespit eder. 
+        Şefimizin masaya oturup pazarlık ederek anlaştığı <strong>Son Nihai Fatura</strong> arasındaki fark resmi <strong>NİHAİ İNDİRİM (Reel Tasarruf)</strong> olarak tescil edilir!
+      </p>
+
+      <div class="formula-card avoid-break">
+        <div class="formula-text">Nihai Reel Tasarruf (₽) = En Düşük Rakip İlk Teklifi - Anlaşılan Son Fatura</div>
+        <div class="formula-explanation">1 Milyon ₽ ve Üzeri Alımlarda Uygulanan Zorunlu Piyasa Tasarrufu Formülü</div>
+      </div>
+
+      <!-- Mockup: Karşılaştırmalı Teklif Analizi Ekranı (Canlı Şantiye ve Gerçek Tedarikçi Verileriyle) -->
+      <div class="mockup-window avoid-break">
+        <div class="mockup-topbar">
+          <div class="mockup-dots">
+            <div class="mockup-dot dot-red"></div>
+            <div class="mockup-dot dot-yellow"></div>
+            <div class="mockup-dot dot-green"></div>
+          </div>
+          <div class="mockup-address">https://gescons.ai.studio/ #comparative-offer-analysis</div>
+          <div style="font-size: 11px; color: #60a5fa; font-weight: 700;">TDF Kayıt No: ANL_1791189550806</div>
+        </div>
+        <div class="mockup-body">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+            <div>
+              <h4 style="font-size: 14px; font-weight: 900; color: #f8fafc;">
+                Karşılaştırmalı Teklif Analizi (Yeni Standart) - TDF Matrisi
+              </h4>
+              <p style="font-size: 11px; color: #94a3b8;">
+                Malzeme Kapsamı: A500C Nervürlü İnşaat Demiri Ø10-Ø36 (Toplam 352 Ton Alım) | Şantiye: <strong>SET OF3a Projesi</strong>
+              </p>
+            </div>
+            <span style="background: #2563eb; color: #fff; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 6px;">
+              Resmi PDF Teklifleri İncelendi
+            </span>
+          </div>
+
+          <table class="ui-table">
+            <thead>
+              <tr>
+                <th>Tedarikçi Firma</th>
+                <th>Belge & Belge No</th>
+                <th>İlk / Nihai Tutar</th>
+                <th>Birim Fiyat</th>
+                <th>Sistem Değerlendirmesi</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="baseline-row">
+                <td><strong>ООО "ТОРГОВЫЙ ДОМ "ТУЛА-СТАЛЬ"</strong></td>
+                <td><strong style="color: #10b981;">Спецификация № ВЕ.П-40060018</strong></td>
+                <td class="font-mono" style="font-weight: 900; color: #10b981;">23.263.000 ₽</td>
+                <td>~66.088 ₽/t</td>
+                <td><strong style="color: #10b981;">✓ PİYASA REFERANS TABANI (Tüm Tekliflerin En Düşüğü)</strong></td>
+              </tr>
+              <tr>
+                <td><strong>ООО "ТОРГОВЫЙ ДОМ БМЗ"</strong></td>
+                <td>Счет на оплату № NU-2938 (İlk Teklif)</td>
+                <td class="font-mono">23.763.000 ₽</td>
+                <td>~67.508 ₽/t</td>
+                <td><span style="color: #94a3b8;">Firma İlk Liste Teklifi</span></td>
+              </tr>
+              <tr class="highlight-row">
+                <td><strong>ООО "ТОРГОВЫЙ ДОМ БМЗ" (Şef: Muhammed Hancı)</strong></td>
+                <td><strong style="color: #60a5fa;">Nihai Sevk Faturası № NU-2938 (Revize)</strong></td>
+                <td class="font-mono" style="font-weight: 900; color: #60a5fa;">22.894.800 ₽</td>
+                <td>~65.042 ₽/t</td>
+                <td><strong style="color: #60a5fa;">Pazarlık Sonucu Kesilen Nihai Fatura</strong></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div style="background: #1e293b; padding: 14px 18px; border-radius: 10px; margin-top: 14px; border: 1px solid #334155; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-size: 11px; color: #94a3b8; font-weight: 700;">HESAPLANAN GERÇEK PİYASA TASARRUFU (NET KPI):</div>
+              <div style="font-size: 13px; color: #e2e8f0; margin-top: 2px;">
+                23.263.000 ₽ (Piyasa En Düşük Teklifi - Тула) - 22.894.800 ₽ (БМЗ Nihai Faturası)
+              </div>
+              <div style="font-size: 11px; color: #94a3b8; margin-top: 4px;">
+                Firma İçi İskonto: 899.400 ₽ (23.763.000 - 22.894.800) | Net Şef Başarı Tasarrufu: <strong>+368.200 ₽</strong>
+              </div>
+            </div>
+            <div style="text-align: right;">
+              <div style="font-size: 22px; font-weight: 900; color: #10b981; font-family: 'JetBrains Mono';">
+                +368.200 ₽ (% 1.58)
+              </div>
+              <div style="font-size: 11px; color: #10b981; font-weight: 700;">✓ Şef Başarı Hanenize Yazıldı</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-warning avoid-break">
+        <div class="callout-title">⚠️ Kritik İlke: "Firma İçi İndirim" vs "Piyasa Bazlı Gerçek Tasarruf" Farkı</div>
+        <p style="font-size: 13px; line-height: 1.6;">
+          Yukarıdaki canlı örnekte görüldüğü gibi: Şefimiz Muhammed Hancı, БМЗ firmasından alım yaparken firmanın ilk teklifi (23.763.000 ₽) ile 
+          son faturası (22.894.800 ₽) arasında <strong>899.400 ₽</strong> indirim almıştır. Ancak ilk tekliflerde <strong>Тула-Сталь</strong> firması 
+          <strong>23.263.000 ₽</strong> vermişti. Sistem bu nedenle şirketin gerçek kazancını piyasadaki en iyi alternatife göre hesaplar: 
+          <strong>23.263.000 ₽ - 22.894.800 ₽ = 368.200 ₽ (% 1.58)</strong>. Böylece piyasanın altında kapanış sağlandığı kesinleşir!
+        </p>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- BÖLÜM 3: ZORUNLU İNDİRİM PROTOKOLÜ VE İNDİRİMSİZ FATURALAR            -->
+    <!-- ===================================================================== -->
+    <div class="guide-section page-break">
+      <div class="section-header">
+        <div class="section-num">3</div>
+        <h2 class="section-title">Zorunlu İndirim Protokolü ve İndirimsiz Faturaların Giriş Kuralı</h2>
+      </div>
+
+      <p class="lead-paragraph">
+        GES İnşaat Satınalma Departmanı'nda görev yapan tüm şef ve personelin <strong>birincil görevi her siparişte istisnasız indirim talep etmek ve tedarikçiyi zorlamaktır.</strong> Masaya oturmadan, iskonto istemeden doğrudan liste fiyatından fatura kabul etmek kesinlikle yasaktır.
+      </p>
+
+      <div class="comparison-grid avoid-break">
+        <div class="comparison-card good">
+          <span class="comparison-badge good">Kural 1: İndirim Alındıysa</span>
+          <h4 style="font-size: 14px; font-weight: 800; color: #166534; margin-bottom: 6px;">Tasarrufu Sisteme Tescil Ettirin</h4>
+          <p style="font-size: 12px; color: #4b5563;">
+            İlk teklif belgesi ve nihai anlaşılan faturayı yükleyerek <strong>"İndirim & Teklif Girişi"</strong> veya 
+            1M+ alımlarda <strong>"TDF"</strong> modülünden tasarrufu sisteme işleyin. Efor puanınız artar.
+          </p>
+        </div>
+
+        <div class="comparison-card bad" style="background: #fffbeb; border-color: #fde68a;">
+          <span class="comparison-badge bad" style="background: #fef3c7; color: #92400e;">Kural 2: İndirim Kesinlikle Alınamadıysa</span>
+          <h4 style="font-size: 14px; font-weight: 800; color: #92400e; margin-bottom: 6px;">Zorunlu Açıklama ile AI Fatura Taramadan Giriş</h4>
+          <p style="font-size: 12px; color: #4b5563;">
+            Tedarikçi tüm zorlamalara rağmen indirim vermediyse fatura <strong>"AI Otomatik Fatura / Çek Okuma & Muhasebeleştirme"</strong> 
+            sekmesinden girilir ve zorunlu açıklama alanı doldurulur.
+          </p>
+        </div>
+      </div>
+
+      <h3 style="font-size: 16px; font-weight: 800; color: #0f172a; margin: 24px 0 10px 0;">
+        📌 Tedarikçi İndirim Vermediyse Fatura Nasıl Girilir? (Zorunlu Açıklama Alanı)
+      </h3>
+      <p class="lead-paragraph">
+        Tedarikçi kesinlikle indirim vermediyse, bu fatura <strong>"AI Otomatik Fatura Tarama"</strong> modülünden yüklenir. 
+        Ancak sistem bu faturayı açıklama yazılmadan kaydetmenize <strong>ASLA İZİN VERMEZ</strong>:
+      </p>
+
+      <!-- Mockup: AI Fatura Okuma ve Zorunlu Açıklama (Canlı Şantiye ve Gerçek Fatura Verisiyle) -->
+      <div class="mockup-window avoid-break">
+        <div class="mockup-topbar">
+          <div class="mockup-dots">
+            <div class="mockup-dot dot-red"></div>
+            <div class="mockup-dot dot-yellow"></div>
+            <div class="mockup-dot dot-green"></div>
+          </div>
+          <div class="mockup-address">https://gescons.ai.studio/ #invoice-scanner-ai</div>
+          <div style="font-size: 11px; color: #f59e0b; font-weight: 700;">İndirimsiz Alım Protokolü</div>
+        </div>
+        <div class="mockup-body">
+          <div style="background: #1e293b; padding: 18px; border-radius: 12px; border: 1px solid #334155;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <div>
+                <strong style="font-size: 14px; color: #f8fafc;">Fatura No: 37071 / ООО "ДИКАТ" (Hırdavat & Bağlantı Ekipmanı)</strong>
+                <p style="font-size: 11px; color: #94a3b8;">Tutar: 88.425 ₽ | Şantiye: <strong>Citybay6</strong> | Personel: Furkat Bekimbetov (Şef: Osman Yılmaz)</p>
+              </div>
+              <span style="background: #ef4444; color: #fff; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px;">
+                İskontosuz Fatura Girişi
+              </span>
+            </div>
+
+            <div style="background: #0f172a; padding: 12px 14px; border-radius: 8px; border: 1px dashed #f59e0b; margin-top: 10px;">
+              <label style="font-size: 11px; color: #fbbf24; font-weight: 700; display: block; margin-bottom: 4px;">
+                ⚠️ ZORUNLU AÇIKLAMA METNİ (Denetim & Genel Müdürlük İncelemesi İçin):
+              </label>
+              <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #e2e8f0; background: #1e293b; padding: 8px 12px; border-radius: 6px; border: 1px solid #334155;">
+                "İndirim talep edildi fakat tedarikçi vermedi. Sebep: Üretici fabrikanın tek yetkili bölge bayisi olması, acil şantiye montaj ihtiyacı ve standart sabit liste fiyatı uygulanması nedeniyle indirim alınamamıştır."
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-danger avoid-break">
+        <div class="callout-title">⛔ Geçersiz Sayılan ve Reddedilen Açıklamalar:</div>
+        <p style="font-size: 13px;">
+          <em>"Firma indirim yapmıyor"</em>, <em>"Gerek görülmedi"</em>, <em>"Unutuldu"</em> gibi gerekçeler sistem denetçileri tarafından 
+          <strong>DERHAL REDDEDİLİR</strong> ve personelin efor puanı cezai olarak düşürülür. İndirimin neden alınamadığı somut ve haklı gerekçeyle yazılmalıdır.
+        </p>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- BÖLÜM 4: 3 AŞAMALI BELGE VE DOĞRULAMA STANDARDI                       -->
+    <!-- ===================================================================== -->
+    <div class="guide-section page-break">
+      <div class="section-header">
+        <div class="section-num">4</div>
+        <h2 class="section-title">3 Aşamalı Belge Standardı ve Şantiyeden Muhasebeye Hatasız Akış</h2>
+      </div>
+
+      <p class="lead-paragraph">
+        Sistemimize bir satınalma ve tasarruf kaydı girilirken, her belgenin kendine ait bir rolü (Document Role) bulunur. 
+        Evrakların doğru sırayla sisteme yüklenmesi zorunludur:
+      </p>
+
+      <div class="stage-timeline avoid-break">
+        <div class="stage-card">
+          <div class="stage-pill-num stage-pill-1">1</div>
+          <div class="stage-info">
+            <h4>Aşama 1: İlk Teklif Belgesi (Bargaining Baseline)</h4>
+            <p>Tedarikçiden gelen ilk resmi teklif mektubu, proforma fatura veya e-posta teklif ekran görüntüsü. İndirimsiz başlangıç fiyatıdır.</p>
+          </div>
+          <div class="stage-rule">
+            Zorunlu Belge: PDF / Resim<br>
+            <span style="color: #64748b;">(Liste Fiyatı Referansı)</span>
+          </div>
+        </div>
+
+        <div class="stage-card">
+          <div class="stage-pill-num stage-pill-mid">Tur</div>
+          <div class="stage-info">
+            <h4>Ara Pazarlık Turları (1. Tur, 2. Tur Teklifleri - Opsiyonel)</h4>
+            <p>Şefin "Fiyatınız yüksek, şu rakama inin" yazışması sonrası tedarikçinin gönderdiği revize ara teklifler. Şefe ekstra efor puanı kazandırır.</p>
+          </div>
+          <div class="stage-rule">
+            Destekleyici Belge<br>
+            <span style="color: #d97706;">(+Müzakere Efor Puanı)</span>
+          </div>
+        </div>
+
+        <div class="stage-card highlight">
+          <div class="stage-pill-num stage-pill-2">2</div>
+          <div class="stage-info">
+            <h4>Aşama 2: Nihai Satınalma Faturası (UPD / Torg-12)</h4>
+            <p>Pazarlık sonucu mutabık kalınan, şantiyeye sevk edilen malzemeyle birlikte gelen ve muhasebeye işlenen nihai resmi fatura.</p>
+          </div>
+          <div class="stage-rule" style="border-color: #2563eb; background: #eff6ff;">
+            <strong>Zorunlu Resmi Belge</strong><br>
+            <span style="color: #2563eb;">(Muhasebe / Sevk Faturası)</span>
+          </div>
+        </div>
+
+        <div class="stage-card">
+          <div class="stage-pill-num stage-pill-3">3</div>
+          <div class="stage-info">
+            <h4>Aşama 3: Karşılaştırmalı Teklif & Piyasa Matrisi (Excel)</h4>
+            <p>≥1.000.000 ₽ alımlarda zorunlu olan; en az 3 firmanın birim fiyatlarının, teslim şartlarının ve toplam tutarlarının kıyaslandığı onaylı tablo.</p>
+          </div>
+          <div class="stage-rule">
+            Zorunlu (≥1M ₽ Alımlarda)<br>
+            <span style="color: #2563eb;">(Excel .xlsx / PDF)</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="workflow-box avoid-break">
+        <div class="workflow-header">
+          <h4 style="font-size: 16px; font-weight: 800;">Şantiyeden Muhasebeye Hatasız Satınalma Akışı</h4>
+          <p style="font-size: 12px; color: #94a3b8;">Personel ve Şeflerin her siparişte izlemesi gereken standart işlem adımları</p>
+        </div>
+        <div class="workflow-steps-horizontal">
+          <div class="wf-step">
+            <div class="step-circle">1</div>
+            <h5>Teklif Toplama</h5>
+            <p>En az 3 firmadan şartnameye uygun yazılı teklif alınır (m², ton, adet).</p>
+          </div>
+          <div class="wf-step">
+            <div class="step-circle">2</div>
+            <h5>Pazarlık & Müzakere</h5>
+            <p>En düşük teklif veren firmayla masaya oturulur, ara turlarla indirim koparılır.</p>
+          </div>
+          <div class="wf-step">
+            <div class="step-circle">3</div>
+            <h5>Sisteme Giriş & OCR</h5>
+            <p>UPD ve Teklif belgeleri sisteme yüklenir, AI motoru kalemleri otomatik ayrıştırır.</p>
+          </div>
+          <div class="wf-step">
+            <div class="step-circle">4</div>
+            <h5>Denetim & Onay</h5>
+            <p>Geçmiş fiyatlar kontrol edilir, tasarruf kesinleşir ve şefin KPI'ına işlenir.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- BÖLÜM 5: BİRİM DÖNÜŞÜMLERİ VE İNŞAAT STANDARTLARI                     -->
+    <!-- ===================================================================== -->
+    <div class="guide-section page-break">
+      <div class="section-header">
+        <div class="section-num">5</div>
+        <h2 class="section-title">Akıllı Birim Çevrimleri: "Elma ile Elma" Karşılaştırması</h2>
+      </div>
+
+      <p class="lead-paragraph">
+        İnşaat satınalmalarında yapılan en ölümcül hata, farklı birimlerle satılan aynı malzemeyi doğrudan fiyatına bakarak 
+        kıyaslamaktır. Bir tedarikçi inşaat demirini <em>metre</em> veya <em>boy (çubuk)</em> olarak satarken diğeri <em>ton</em> 
+        olarak satar. Sistemimiz, inşaat mühendisliği standartlarına göre deterministik çevrim yapar.
+      </p>
+
+      <div class="formula-card avoid-break">
+        <div class="formula-text">w (kg/metre) = 0.006165 × (Çap Ø in mm)²</div>
+        <div class="formula-explanation">GOST 5781-82 / GOST 34028-2016 (A500C İnşaat Demiri Standart Metre-Tül Ağırlık Formülü)</div>
+      </div>
+
+      <table class="styled-table avoid-break">
+        <thead>
+          <tr>
+            <th>Demir Çapı (Ø)</th>
+            <th>1 Metre Ağırlığı (kg/m)</th>
+            <th>1 Standart Boy (11.7m) Ağırlığı</th>
+            <th>1 Tondaki Metre Tül Karşılığı</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Ø8 mm A500C</strong></td>
+            <td class="font-mono">0.395 kg</td>
+            <td class="font-mono">4.62 kg</td>
+            <td class="font-mono">2.531,6 metre</td>
+          </tr>
+          <tr>
+            <td><strong>Ø10 mm A500C</strong></td>
+            <td class="font-mono">0.617 kg</td>
+            <td class="font-mono">7.22 kg</td>
+            <td class="font-mono">1.620,7 metre</td>
+          </tr>
+          <tr>
+            <td><strong>Ø12 mm A500C</strong></td>
+            <td class="font-mono">0.888 kg</td>
+            <td class="font-mono">10.39 kg</td>
+            <td class="font-mono">1.126,1 metre</td>
+          </tr>
+          <tr>
+            <td><strong>Ø14 mm A500C</strong></td>
+            <td class="font-mono">1.208 kg</td>
+            <td class="font-mono">14.13 kg</td>
+            <td class="font-mono">827,8 metre</td>
+          </tr>
+          <tr>
+            <td><strong>Ø16 mm A500C</strong></td>
+            <td class="font-mono">1.578 kg</td>
+            <td class="font-mono">18.46 kg</td>
+            <td class="font-mono">633,7 metre</td>
+          </tr>
+          <tr>
+            <td><strong>Ø18 mm A500C</strong></td>
+            <td class="font-mono">1.998 kg</td>
+            <td class="font-mono">23.38 kg</td>
+            <td class="font-mono">500,5 metre</td>
+          </tr>
+          <tr>
+            <td><strong>Ø20 mm A500C</strong></td>
+            <td class="font-mono">2.466 kg</td>
+            <td class="font-mono">28.85 kg</td>
+            <td class="font-mono">405,5 metre</td>
+          </tr>
+          <tr>
+            <td><strong>Ø22 mm A500C</strong></td>
+            <td class="font-mono">2.984 kg</td>
+            <td class="font-mono">34.91 kg</td>
+            <td class="font-mono">335,1 metre</td>
+          </tr>
+          <tr>
+            <td><strong>Ø25 mm A500C</strong></td>
+            <td class="font-mono">3.853 kg</td>
+            <td class="font-mono">45.08 kg</td>
+            <td class="font-mono">259,5 metre</td>
+          </tr>
+          <tr>
+            <td><strong>Ø28 mm A500C</strong></td>
+            <td class="font-mono">4.834 kg</td>
+            <td class="font-mono">56.56 kg</td>
+            <td class="font-mono">206,9 metre</td>
+          </tr>
+          <tr>
+            <td><strong>Ø32 mm A500C</strong></td>
+            <td class="font-mono">6.313 kg</td>
+            <td class="font-mono">73.86 kg</td>
+            <td class="font-mono">158,4 metre</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 style="font-size: 16px; font-weight: 800; color: #0f172a; margin: 24px 0 12px 0;">Diğer Kritik Malzemelerde Kıyaslama Standartları:</h3>
+      <ul style="font-size: 13px; line-height: 1.8; margin-left: 20px; color: #334155;">
+        <li><strong>Gazbeton / Duvar Blokları (D500 / D600 - Bonolit):</strong> Fatura ister adet, ister palet kesilsin; sistem ebatları (örn: 200×250×600 mm = 0.03 m³) çarparak her zaman <strong>m³ (metreküp)</strong> birim fiyatına normalize eder. (1 m³ = 33.3 adet blok).</li>
+        <li><strong>Çelik Hasır & Donatı Filesi:</strong> Göz aralığı ve tel kalınlığına göre m² ağırlığı hesaplanır, piyasa standardı <strong>m² (1 kart panel = 12 m²)</strong> olarak kıyaslanır.</li>
+        <li><strong>Yalıtım Membranları (İzoplast / Technoelast):</strong> Rulo adetine değil, toplam kaplama alanı olan <strong>m² (1 rulo = 10 m²)</strong> birimine çevrilerek denetlenir.</li>
+        <li><strong>KDV Eşitleme (Rusya %20 KDV):</strong> Bir teklif KDV hariç (без НДС), diğeri KDV dahil ise sistem otomatik olarak %20 ekleyerek teklifleri adil zemine getirir.</li>
+      </ul>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- BÖLÜM 6: GENEL BAKIŞ VE ŞEFLER ARASI REKABET SIRALAMASI              -->
+    <!-- ===================================================================== -->
+    <div class="guide-section page-break">
+      <div class="section-header">
+        <div class="section-num">6</div>
+        <h2 class="section-title">Genel Bakış (Dashboard) ve Şefler Arası Tasarruf & Rekabet Sıralaması</h2>
+      </div>
+
+      <p class="lead-paragraph">
+        Sisteme <a href="https://gescons.ai.studio/" target="_blank" style="color: #2563eb; font-weight: 700;">https://gescons.ai.studio/</a> üzerinden giriş yaptığınızda açılan <strong>Genel Bakış (Dashboard)</strong> ekranı, tüm şantiyelerimizin anlık harcama durumunu, net kasada kalan tasarrufları ve şeflerimizin rekabet sıralamasını canlı olarak yansıtır.
+      </p>
+
+      <!-- Mockup: Dashboard Overview & Leaderboard (Canlı Şefler ve Gerçek Verilerle) -->
+      <div class="mockup-window avoid-break">
+        <div class="mockup-topbar">
+          <div class="mockup-dots">
+            <div class="mockup-dot dot-red"></div>
+            <div class="mockup-dot dot-yellow"></div>
+            <div class="mockup-dot dot-green"></div>
+          </div>
+          <div class="mockup-address">https://gescons.ai.studio/ #dashboard</div>
+          <div style="font-size: 11px; color: #10b981; font-weight: 700;">● Canlı Sistem Veritabanı</div>
+        </div>
+        <div class="mockup-body">
+          <div class="kpi-row">
+            <div class="kpi-tile">
+              <div class="kpi-label">Toplam Satınalma</div>
+              <div class="kpi-val">148.520.400 ₽</div>
+              <div class="kpi-sub">385 Aktif Fatura</div>
+            </div>
+            <div class="kpi-tile" style="border-color: #059669;">
+              <div class="kpi-label">Reel Piyasa Tasarrufu</div>
+              <div class="kpi-val" style="color: #10b981;">27.518.811 ₽</div>
+              <div class="kpi-sub" style="color: #10b981;">217 Onaylı İndirim Kaydı</div>
+            </div>
+            <div class="kpi-tile">
+              <div class="kpi-label">Ortalama İskonto Oranı</div>
+              <div class="kpi-val" style="color: #60a5fa;">% 8.45</div>
+              <div class="kpi-sub">Piyasa Taban Kıyaslaması</div>
+            </div>
+            <div class="kpi-tile">
+              <div class="kpi-label">Aktif Şef / Ekip</div>
+              <div class="kpi-val">5 Şef / 8 Personel</div>
+              <div class="kpi-sub" style="color: #f59e0b;">7 Aktif Şantiye</div>
+            </div>
+          </div>
+
+          <div style="border-top: 1px solid #334155; padding-top: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <h4 style="font-size: 13px; font-weight: 800; color: #f8fafc;">
+                🏆 Şefler Arası Tasarruf & Rekabet Sıralaması (Canlı Firestore Verileri)
+              </h4>
+              <span style="font-size: 11px; color: #94a3b8;">Filtre: Toplam Tasarruf Hacmi & MVP Efor Puanı</span>
+            </div>
+
+            <div class="leaderboard-sample">
+              <div class="lb-row gold">
+                <div class="rank-pill rank-gold">1</div>
+                <div><strong>Nuri Buga</strong> <span style="font-size: 11px; color: #94a3b8;">(Satınalma Şefi - Ekip: Aleksandra Ozlav, Zamonbek Omonov | Şantiyeler: Dream Riva, Mnevniki, SET OF3a)</span></div>
+                <div>13.336.163 ₽ Tasarruf</div>
+                <div><span style="color: #f59e0b; font-weight: 700;">40 İndirim</span> / 28 Tedarikçi</div>
+                <div>👑 Liderlik Tacı</div>
+                <div class="score-badge">96 Puan</div>
+              </div>
+              <div class="lb-row silver">
+                <div class="rank-pill rank-silver">2</div>
+                <div><strong>Muhammed Hancı</strong> <span style="font-size: 11px; color: #94a3b8;">(Satınalma Şefi - Ekip: Batyrhan Djailov, Adkhamzhon Aslonov | Şantiyeler: SET OF3a, Veer Ub10)</span></div>
+                <div>6.251.925 ₽ Tasarruf</div>
+                <div><span style="color: #f59e0b; font-weight: 700;">70 İndirim (Zirve)</span> / 35 Tedarikçi</div>
+                <div>⚡ Pazarlık Şampiyonu</div>
+                <div class="score-badge">92 Puan</div>
+              </div>
+              <div class="lb-row bronze">
+                <div class="rank-pill rank-bronze">3</div>
+                <div><strong>Serkan Demirbaş</strong> <span style="font-size: 11px; color: #94a3b8;">(Satınalma Şefi - Ekip: Sukhrob Masharipov, Mariya Myagkova | Şantiyeler: Jk Jois, Bs Jois)</span></div>
+                <div>3.968.726 ₽ Tasarruf</div>
+                <div><span style="color: #f59e0b; font-weight: 700;">65 İndirim</span> / 31 Tedarikçi</div>
+                <div>🛡️ Verimlilik Rozeti</div>
+                <div class="score-badge">87 Puan</div>
+              </div>
+              <div class="lb-row" style="border-left: 4px solid #64748b;">
+                <div class="rank-pill" style="background: #334155; color: #fff;">4</div>
+                <div><strong>Osman Yılmaz</strong> <span style="font-size: 11px; color: #94a3b8;">(Satınalma Şefi - Ekip: Furkat Bekimbetov | Şantiye: Citybay6)</span></div>
+                <div>2.449.994 ₽ Tasarruf</div>
+                <div><span style="color: #f59e0b; font-weight: 700;">32 İndirim</span> / 21 Tedarikçi</div>
+                <div>% 6.5 İskonto</div>
+                <div class="score-badge">79 Puan</div>
+              </div>
+              <div class="lb-row" style="border-left: 4px solid #475569;">
+                <div class="rank-pill" style="background: #334155; color: #fff;">5</div>
+                <div><strong>Halil İbrahim Zengin</strong> <span style="font-size: 11px; color: #94a3b8;">(Satınalma Şefi - Ekip: Yuliya Krivova | Şantiye: PRB2)</span></div>
+                <div>1.512.003 ₽ Tasarruf</div>
+                <div><span style="color: #f59e0b; font-weight: 700;">10 İndirim</span> / 10 Tedarikçi</div>
+                <div>% 5.8 İskonto</div>
+                <div class="score-badge">72 Puan</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-success avoid-break">
+        <div class="callout-title">🏆 0-100 Efor Puanı Hesaplama Ağırlıkları (Matematiksel Model)</div>
+        <table class="styled-table" style="margin: 12px 0 0 0;">
+          <thead>
+            <tr>
+              <th>Metrik</th>
+              <th>Ağırlık</th>
+              <th>Açıklama ve Şefe Katkısı</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Kasaya Giren Reel Hacim (₽)</strong></td>
+              <td><strong>%35</strong></td>
+              <td>Şirketin kasasında fiilen kalan net nakit tasarruf miktarı. 10.000.000 ₽ tasarruf = 100 tam puan.</td>
+            </tr>
+            <tr>
+              <td><strong>Bireysel GOL (Doğrudan İcra)</strong></td>
+              <td><strong>%25</strong></td>
+              <td>Şefin doğrudan masaya oturup tek başına indirim kopardığı işlem sayısı. (45 gol = 100 tam puan).</td>
+            </tr>
+            <tr>
+              <td><strong>İşlem Kapsamı & Süreklilik</strong></td>
+              <td><strong>%15</strong></td>
+              <td>Her satınalmada istisnasız indirim talep etme alışkanlığı. (55 işlem = 100 tam puan).</td>
+            </tr>
+            <tr>
+              <td><strong>Ekip Asistleri</strong></td>
+              <td><strong>%15</strong></td>
+              <td>Başka bir şantiyedeki şefe veya personele pazarlıkta destek verip indirim aldırma katkısı.</td>
+            </tr>
+            <tr>
+              <td><strong>Müzakere Turları</strong></td>
+              <td><strong>%10</strong></td>
+              <td>Birden fazla tur müzakere yürütme ve fiyatı kademe kademe aşağı çekme ısrarı.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="comparison-grid avoid-break">
+        <div class="comparison-card" style="background: #f8fafc; border-color: #cbd5e1;">
+          <h4 style="font-size: 14px; font-weight: 800; color: #0f172a; margin-bottom: 6px;">⚽ "GOL" Nedir?</h4>
+          <p style="font-size: 12px; color: #475569;">
+            Şefin kendi şantiyesindeki bir alımda doğrudan tedarikçiyle görüşüp indirim alması ve faturayı düşürmesidir. 
+            Liderlik tablosunda bireysel gol hanesine yazılır.
+          </p>
+        </div>
+        <div class="comparison-card" style="background: #f8fafc; border-color: #cbd5e1;">
+          <h4 style="font-size: 14px; font-weight: 800; color: #0f172a; margin-bottom: 6px;">🎯 "ASİST" Nedir?</h4>
+          <p style="font-size: 12px; color: #475569;">
+            Bir şefin farklı bir şantiyenin malzemesi için kendi ilişkilerini veya hacmini kullanarak araya girip 
+            ekstra indirim koparmasıdır. Kurumsal dayanışmayı ödüllendirir.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- BÖLÜM 7: ADIM ADIM SİSTEM KULLANIM KILAVUZU                           -->
+    <!-- ===================================================================== -->
+    <div class="guide-section page-break">
+      <div class="section-header">
+        <div class="section-num">7</div>
+        <h2 class="section-title">Adım Adım Kullanım Kılavuzu: Hata Yapmadan Veri Girişi</h2>
+      </div>
+
+      <p class="lead-paragraph">
+        Satınalma şefleri ve personeli için en sık kullanılan 3 ana işlem akışı:
+      </p>
+
+      <div style="margin-bottom: 24px;">
+        <h3 style="font-size: 16px; font-weight: 800; color: #2563eb; margin-bottom: 8px;">
+          📌 İŞLEM 1: AI Fatura Tarayıcı ile Fatura Yükleme (Otomatik OCR)
+        </h3>
+        <ol style="margin-left: 20px; font-size: 13px; line-height: 1.8; color: #334155;">
+          <li>Üst menüden <strong>Satınalma & Giriş &rarr; AI Fatura Tarayıcı</strong> sekmesine tıklayın.</li>
+          <li>Tedarikçiden gelen sevk faturasını (PDF veya net çekilmiş görsel) sürükleyip bırakın.</li>
+          <li><strong>"Yapay Zeka ile Tara"</strong> butonuna basın. Google Gemini AI motoru faturayı analiz eder:
+            <ul style="margin-left: 20px; color: #64748b;">
+              <li>Fatura Numarası ve Tarihi</li>
+              <li>Tedarikçi Adı ve Vergi No (INN)</li>
+              <li>Kalemlerin Adı, Miktarı, Birimi, Birim Fiyatı ve KDV Tutarı otomatik ayrıştırılır.</li>
+            </ul>
+          </li>
+          <li>Şantiye ve Şef bilgisini seçin. Kalemleri gözle kontrol edip <strong>"Faturayı Sisteme Kaydet"</strong> butonuna basın.</li>
+        </ol>
+      </div>
+
+      <div style="margin-bottom: 24px;">
+        <h3 style="font-size: 16px; font-weight: 800; color: #059669; margin-bottom: 8px;">
+          📌 İŞLEM 2: Yeni İndirim & Teklif Girişi Yapma (3 Aşamalı Kayıt)
+        </h3>
+        <ol style="margin-left: 20px; font-size: 13px; line-height: 1.8; color: #334155;">
+          <li>Üst menüdeki yeşil <strong>"+ Yeni İndirim Ekle"</strong> butonuna veya <strong>İndirim & Teklif Girişi</strong> sekmesine tıklayın.</li>
+          <li><strong>Şantiye</strong> ve <strong>Pazarlığı Yürüten Şef</strong> bilgisini seçin. Eğer ekip arkadaşınız destek verdiyse <strong>Asist Yapan Personel</strong> alanını doldurun.</li>
+          <li><strong>Tedarikçi Firma</strong> adını yazın.</li>
+          <li><strong>Aşama 1 (İlk Teklif Tutarı):</strong> Tedarikçinin indirim yapmadan önceki ilk teklif tutarını girin ve ilk teklif PDF'ini ekleyin.</li>
+          <li><strong>Ara Turlar (Varsa):</strong> Eğer 2 veya 3 tur pazarlık yaptıysanız <em>"+ Pazarlık Turu Ekle"</em> butonuna basarak revize tutarları girin.</li>
+          <li><strong>Aşama 2 (Nihai Anlaşılan Fatura Tutarı):</strong> Muhasebeye giden nihai anlaşılan fatura tutarını girin ve faturayı yükleyin.</li>
+          <li>Sistem otomatik olarak <strong>Tasarruf Tutarı (₽)</strong> ve <strong>İskonto Yüzdesini (%)</strong> hesaplar. Kaydı onaylayın.</li>
+        </ol>
+      </div>
+
+      <div style="margin-bottom: 24px;">
+        <h3 style="font-size: 16px; font-weight: 800; color: #d97706; margin-bottom: 8px;">
+          📌 İŞLEM 3: Sipariş Öncesi Fiyat Kontrolü (Pre-Approval Audit)
+        </h3>
+        <ol style="margin-left: 20px; font-size: 13px; line-height: 1.8; color: #334155;">
+          <li>Tedarikçiye sipariş geçmeden önce <strong>Ön Onay Denetimi</strong> sekmesini açın.</li>
+          <li>Satın almayı planladığınız malzemenin adını ve teklif edilen birim fiyatı yazın.</li>
+          <li>Sistem, diğer tüm şantiyelerimizde son 90 günde aynı malzemenin kaça alındığını ekrana getirir.</li>
+          <li>Eğer teklif aldığınız fiyat şirket ortalamasından yüksekse sistem <strong>"KIRMIZI UYARI: Fiyat Şirket Ortalamasının %12 Üzerinde!"</strong> uyarısı verir. Bu durumda siparişi onaylamayıp fiyatı düşürmek için tekrar pazarlık yapmalısınız.</li>
+        </ol>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- BÖLÜM 8: SIK YAPILAN HATALAR VE ÇÖZÜM REHBERİ                         -->
+    <!-- ===================================================================== -->
+    <div class="guide-section avoid-break">
+      <div class="section-header">
+        <div class="section-num">8</div>
+        <h2 class="section-title">Sık Yapılan Hatalar ve Doğru Uygulama Tablosu</h2>
+      </div>
+
+      <table class="styled-table">
+        <thead>
+          <tr>
+            <th>Yapılan Hatalı Davranış</th>
+            <th>Sistemdeki Olumsuz Sonucu</th>
+            <th>Yapılması Gereken Doğru İşlem</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>1M+ siparişte tek firmadan teklif almak.</strong></td>
+            <td>TDF oluşturulamaz, sistem tasarruf puanı üretmez, işlem kilitlenir.</td>
+            <td>Mutlaka en az 3 farklı bağımsız tedarikçiden yazılı teklif toplayıp TDF sekmesine yükleyin.</td>
+          </tr>
+          <tr>
+            <td><strong>Pazarlık yapmadan faturayı sisteme girmek.</strong></td>
+            <td>İndirimsiz fatura uyarısı verir, geçerli açıklama yoksa şef puanı düşer.</td>
+            <td>Önce pazarlık yapın. İndirim alınamadıysa sebebi açıklama alanına detaylıca yazın.</td>
+          </tr>
+          <tr>
+            <td><strong>Tedarikçinin liste fiyatından düşülen indirimi girmek.</strong></td>
+            <td>Diğer firmaların tekliflerinden yüksekse negatif tasarruf uyarısı verir.</td>
+            <td>Kıyas tablosunda tüm firmaların ilk teklifleri içindeki en düşük fiyatı referans alın.</td>
+          </tr>
+          <tr>
+            <td><strong>İnşaat demirinde boy (adet) alıp sisteme ton olarak girmek.</strong></td>
+            <td>Birim fiyat absürt derecede yüksek görünür, anomali radarı kırmızı bayrak kaldırır.</td>
+            <td>Birimi doğru seçin (Metre veya Adet). Yapay zeka motoru GOST standartlarına göre ağırlığı otomatik hesaplayacaktır.</td>
+          </tr>
+          <tr>
+            <td><strong>Kategori olarak "Diğer Malzeme" seçmek.</strong></td>
+            <td>Sistem "Diğer Malzeme" seçimini engeller ve kategorizasyon hatası verir.</td>
+            <td>28 resmi kategoriden ilgili olanı seçin (örn: Ankraj, Kalıp, İskele, Sarf Malzeme).</td>
+          </tr>
+          <tr>
+            <td><strong>Aynı faturayı mükerrer (iki kez) girmek.</strong></td>
+            <td>Yapay zeka fatura numarası ve tutar çakışmasını anında yakalar, mükerrer kayıt reddedilir.</td>
+            <td>Daha önce taranmış faturaları Fatura Kasası (Drive) sekmesinden kontrol edin.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout callout-success avoid-break" style="margin-top: 40px; text-align: center;">
+        <h4 style="font-size: 16px; font-weight: 800; color: #065f46; margin-bottom: 6px;">Sorularınız ve Sistem Desteği</h4>
+        <p style="font-size: 13px; color: #047857;">
+          Sistem kullanımı, kategori eşleştirmeleri veya özel şantiye durumları için GES İnşaat Bilgi İşlem ve Mali Denetim Departmanı ile iletişime geçebilirsiniz.<br>
+          <strong>Dahili Hat:</strong> 3255 | <strong>Portal:</strong> gescons.ai.studio
+        </p>
+      </div>
+    </div>
+
+  </div>
+
+</body>
+</html>

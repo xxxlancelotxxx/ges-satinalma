@@ -21,7 +21,9 @@ import {
   ChevronsLeft,
   ChevronsRight,
   RotateCcw,
-  ShieldCheck
+  ShieldCheck,
+  Database,
+  ArrowRight
 } from 'lucide-react';
 import { formatRuble } from '../utils/format';
 import { getPrizmaBtfUrl, getPrizmaStfUrl } from '../utils/prizmaUrlHelper';
@@ -115,6 +117,14 @@ export const PrizmaInvoicesView: React.FC<Props> = ({ onNavigateToCompare }) => 
   const [attachedFiles, setAttachedFiles] = useState<any[]>([]);
   const [loadingFiles, setLoadingFiles] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [integrating, setIntegrating] = useState<boolean>(false);
+  const [integrationModal, setIntegrationModal] = useState<{
+    addedCount: number;
+    enrichedCount: number;
+    skippedCount: number;
+    totalPrizma: number;
+    message: string;
+  } | null>(null);
 
   // Reset page when filters change
   useEffect(() => {
@@ -214,6 +224,32 @@ export const PrizmaInvoicesView: React.FC<Props> = ({ onNavigateToCompare }) => 
       showToast(`Senkronizasyon hatası: ${err.message}`);
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const handleIntegrateInvoices = async () => {
+    try {
+      setIntegrating(true);
+      showToast('Prizma faturaları taranıyor, mükerrer kayıtlar elenerek sisteme aktarılıyor...');
+      const res = await fetch('/api/prizma/integrate-invoices', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setIntegrationModal({
+          addedCount: data.addedCount,
+          enrichedCount: data.enrichedCount,
+          skippedCount: data.skippedCount,
+          totalPrizma: data.totalPrizma,
+          message: data.message
+        });
+        showToast(`✓ ${data.addedCount} yeni fatura sisteme eklendi, ${data.enrichedCount} fatura mükerrer olmadan zenginleştirildi!`);
+        await loadData();
+      } else {
+        showToast(`Hata: ${data.error || 'Entegrasyon başarısız'}`);
+      }
+    } catch (err: any) {
+      showToast(`Entegrasyon hatası: ${err.message}`);
+    } finally {
+      setIntegrating(false);
     }
   };
 
@@ -346,8 +382,18 @@ export const PrizmaInvoicesView: React.FC<Props> = ({ onNavigateToCompare }) => 
 
           <div className="flex flex-wrap items-center gap-3 shrink-0">
             <button
+              onClick={handleIntegrateInvoices}
+              disabled={integrating || syncing || invoices.length === 0}
+              className="flex items-center space-x-2 px-4 py-2.5 rounded-2xl font-black text-xs sm:text-sm bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white border border-emerald-400/40 transition-all shadow-lg shadow-emerald-950/40 cursor-pointer active:scale-95 disabled:opacity-50"
+              title="Prizma faturalarını çift kayıt yapmadan doğrudan ana sisteme ve malzeme veritabanına entegre et"
+            >
+              <CheckCircle2 className={`w-4 h-4 text-emerald-200 ${integrating ? 'animate-spin' : ''}`} />
+              <span>{integrating ? 'Entegre Ediliyor...' : 'Faturaları Sisteme Entegre Et (Çift Kayıt Korumalı)'}</span>
+            </button>
+
+            <button
               onClick={() => handleSync(1500)}
-              disabled={syncing}
+              disabled={syncing || integrating}
               className="flex items-center space-x-2 px-4 py-2.5 rounded-2xl font-bold text-xs sm:text-sm bg-blue-600 hover:bg-blue-500 text-white border border-blue-400/40 transition-all shadow-lg shadow-blue-950/40 cursor-pointer active:scale-95 disabled:opacity-50"
               title="Son 3 ayın en güncel 1.500 faturasını ve birim fiyatlarını çek"
             >
@@ -357,7 +403,7 @@ export const PrizmaInvoicesView: React.FC<Props> = ({ onNavigateToCompare }) => 
 
             <button
               onClick={() => handleSync(6000)}
-              disabled={syncing}
+              disabled={syncing || integrating}
               className="flex items-center space-x-2 px-4 py-2.5 rounded-2xl font-bold text-xs sm:text-sm bg-indigo-600/80 hover:bg-indigo-600 text-white border border-indigo-400/40 transition-all shadow-lg shadow-indigo-950/40 cursor-pointer active:scale-95 disabled:opacity-50"
               title="Son 3 aya ait tüm ödeme taleplerini (5.000+ fatura) derinlemesine tara ve senkronize et"
             >
@@ -1057,6 +1103,70 @@ export const PrizmaInvoicesView: React.FC<Props> = ({ onNavigateToCompare }) => 
               <button
                 onClick={() => setSelectedInvoice(null)}
                 className="px-5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold transition-all cursor-pointer"
+              >
+                Kapat
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Integration Success & Deduplication Report Modal */}
+      {integrationModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-emerald-500/40 rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl space-y-5 animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+              <div className="flex items-center space-x-3 text-emerald-400">
+                <div className="p-2.5 rounded-2xl bg-emerald-950/80 border border-emerald-500/40">
+                  <ShieldCheck className="w-6 h-6 text-emerald-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-white">Sisteme Entegrasyon Tamamlandı</h3>
+                  <p className="text-xs text-slate-400">Çift Kayıt ve Mükerrer Fatura Koruması Başarılı</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIntegrationModal(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 space-y-1">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Yeni Eklenen Fatura</span>
+                <span className="text-2xl font-black text-emerald-400">+{integrationModal.addedCount}</span>
+                <span className="text-[10px] text-slate-500 block">Sisteme ilk kez kaydedildi</span>
+              </div>
+
+              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 space-y-1">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Mükerrer Engellenen</span>
+                <span className="text-2xl font-black text-blue-400">{integrationModal.enrichedCount}</span>
+                <span className="text-[10px] text-slate-500 block">Çift kayıt yapılmadı, zenginleştirildi</span>
+              </div>
+            </div>
+
+            <div className="bg-emerald-950/30 border border-emerald-500/30 rounded-2xl p-4 text-xs text-slate-300 space-y-2">
+              <div className="flex items-center space-x-2 font-bold text-emerald-300">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>Akıllı Malzeme ve Fatura Eşleştirme Raporu:</span>
+              </div>
+              <p className="text-[11px] text-slate-300 leading-relaxed">
+                {integrationModal.message}
+              </p>
+              <ul className="text-[11px] text-slate-400 space-y-1 pt-1 list-disc list-inside">
+                <li>Önceden yüklenmiş faturalarla aynı numaraya, tedarikçiye ve tutara sahip olanlar çiftlenmedi.</li>
+                <li>Prizma BTF / STF bağlantıları ve süreç kodları ilgili faturalarla birleştirildi.</li>
+                <li>Tüm malzeme kalemleri 28 resmi inşaat kategorisine ve standart ebatlara (Ø8, Ø10, B25 vb.) otomatik kümelendi.</li>
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setIntegrationModal(null)}
+                className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold transition-all cursor-pointer"
               >
                 Kapat
               </button>

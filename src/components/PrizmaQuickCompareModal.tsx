@@ -26,6 +26,7 @@ import {
 import { formatRuble } from '../utils/format';
 import { getPrizmaBtfUrl, getPrizmaStfUrl } from '../utils/prizmaUrlHelper';
 import { PrizmaInvoice } from './PrizmaInvoicesView';
+import { extractRebarDiameter } from '../utils/constructionUnitConverter';
 
 interface Props {
   invoice: PrizmaInvoice;
@@ -82,10 +83,9 @@ export interface BenchmarkItem {
   history: HistoryRecord[];
 }
 
-// Rebar diameter extractor (supports Ø12, ф12, d12, q12, 12mm)
+// Rebar diameter extractor (supports Ø12, ф12, d12, q12, 12mm, Арматура 8, etc.)
 function extractRebarDia(str: string): number | null {
-  const m = str.match(/(?:[øф]|d\s*=?|q\s*=?|диаметр\s*=?|\b)\s*(\d{1,2})\s*(?:мм|mm|\b)/i);
-  return m ? parseInt(m[1], 10) : null;
+  return extractRebarDiameter(str);
 }
 
 // Clean and normalize text (handles Cyrillic / Latin lookalikes)
@@ -113,7 +113,7 @@ function findMatchingBenchmark(item: any, invoice: PrizmaInvoice, benchmarks: Be
 
   // 1. Direct Invoice History Match (100% Deterministic & Guaranteed):
   // If this invoice and item were processed into a benchmark's history by the server, match it directly!
-  const itemDia = extractRebarDia(`${rawItemName} ${rawOrigName}`);
+  const itemDia = extractRebarDiameter(`${rawItemName} ${rawOrigName}`);
   const historyMatch = benchmarks.find(b =>
     b.history?.some(h => {
       const isSameInv = h.invoiceId === invoice.id || (h.invoiceNumber && invoice.invoiceNumber && h.invoiceNumber.trim().toLowerCase() === invoice.invoiceNumber.trim().toLowerCase());
@@ -126,7 +126,7 @@ function findMatchingBenchmark(item: any, invoice: PrizmaInvoice, benchmarks: Be
 
       // If rebar, diameter MUST strictly match
       if (itemDia) {
-        const hDia = extractRebarDia(`${h.originalName || ''} ${b.materialName}`);
+        const hDia = extractRebarDiameter(`${h.originalName || ''} ${b.materialName}`);
         if (hDia && hDia !== itemDia) return false;
       }
 
@@ -149,14 +149,16 @@ function findMatchingBenchmark(item: any, invoice: PrizmaInvoice, benchmarks: Be
   const combined = `${rawItemName} ${rawOrigName}`.toLowerCase();
 
   // 3. Specification-Aware Intelligent Matching:
-  // A. Rebar / İnşaat Demiri: MUST match the exact diameter! (e.g. Ø12 only matches Ø12, never Ø32)
-  if (/арматур|donatı|demir|a500|а500/i.test(combined)) {
-    const dia = extractRebarDia(combined);
+  // A. Rebar / İnşaat Demiri: MUST match the exact diameter! (e.g. Ø8 only matches Ø8, Ø12 only matches Ø12)
+  if (/арматур|donatı|demir|a500|а500|пруток/i.test(combined)) {
+    const dia = extractRebarDiameter(combined);
     if (dia) {
-      const rebarMatch = benchmarks.find(b => 
-        b.category === 'İnşaat Demiri' && 
-        (b.materialName.includes(`Ø${dia}`) || b.materialName.includes(` ${dia} `) || b.id.includes(`ø${dia}`))
-      );
+      const rebarMatch = benchmarks.find(b => {
+        const isRebarCat = b.category === 'İnşaat Demiri' || /demir|арматур/i.test(b.materialName);
+        if (!isRebarCat) return false;
+        const bDia = extractRebarDiameter(b.materialName);
+        return bDia === dia || b.materialName.includes(`Ø${dia}`) || b.id.includes(`ø${dia}`);
+      });
       if (rebarMatch) return rebarMatch;
     }
   }
