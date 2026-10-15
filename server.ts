@@ -5,6 +5,7 @@ import { normalizeStandardUnit, getMaterialBenchmarkUnit, convertMaterialUnit, a
 import { normalizeVendorName, getVendorKey, areVendorsEqual } from './src/utils/vendorNormalizer';
 import { normalizeCategoryName, CANONICAL_28_CATEGORIES, translateRussianMaterialToTurkish, ensureRussianOriginalName } from './src/utils/categoryClassifier';
 import { analyzeMaterialSegment } from './src/utils/materialSegmentIntelligence';
+import { splitGroupBySpec, getProductTypeLabel } from './src/utils/materialGroupIntegrity';
 import { comparativeAnalysesStore, materialSynonymsStore, comparativeConfig, updateComparativeConfig, processComparativeAnalysisBatch, learnApprovedSynonyms, recalculateComparativeAnalysis } from './server/comparativeEngine';
 import { prizmaService } from './server/prizmaService';
 import { prizmaSyncService, cleanRawMaterialName } from './server/prizmaSyncService';
@@ -2640,6 +2641,19 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     combined.includes('hasır') ||
     combined.includes('упаковк');
 
+  // Check learned/approved synonyms store first
+  try {
+    const normKey = name.toLowerCase().replace(/[^a-z0-9а-яğüşıöç]/gi, '');
+    if (materialSynonymsStore && materialSynonymsStore.has(normKey)) {
+      const syn = materialSynonymsStore.get(normKey);
+      if (syn && syn.canonicalName) {
+        return { materialName: syn.canonicalName, category: (syn as any).category || 'Diğer' };
+      }
+    }
+  } catch (synErr) {
+    // Ignore synonym lookup errors
+  }
+
   if (
     !isRebarNegFilter && (
       primaryText.includes('арматур') ||
@@ -2898,7 +2912,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
   }
 
   // 1.975 Keramzit Hafif Agrega / Керамзит (Normal mıcır/çakıldan ayır!)
-  if (/керамзит|keramizit|keramzit/i.test(primaryText) && !/керамзитобетон|блок/i.test(primaryText)) {
+  if (/керамзит|keramizit|keramzit/i.test(primaryText) && !/керамзитобетон|блок|keramzitobeton|\bblok/i.test(primaryText)) {
     const kFrac = primaryText.match(/\b(5\s*[-–]\s*10|10\s*[-–]\s*20|20\s*[-–]\s*40|0\s*[-–]\s*5)\b/);
     const fracStr = kFrac ? ` ${kFrac[1].replace(/\s+/g, '')} mm` : '';
     return {
@@ -6224,6 +6238,37 @@ app.get('/api/materials/compare', async (req, res) => {
         target.entries.push(...preGroup.entries);
       }
     });
+
+    // Pass 1.7: GRUP BÜTÜNLÜĞÜ KORUMASI — Orijinal fatura satırlarında çelişen teknik özellik (ürün tipi, ölçü,
+    // mikron, litre, paket adedi, M diş, harç markası, mukavemet sınıfı, torba kg) varsa grubu kesin olarak böl.
+    const integrityKeys = Array.from(consolidatedPreMap.keys());
+    for (const key of integrityKeys) {
+      const grp = consolidatedPreMap.get(key)!;
+      const parts = splitGroupBySpec(grp.entries, (e: any) => String(e.item?.originalName || e.item?.materialName || ''), (e: any) => String(e.unit || ''));
+      if (parts.length <= 1) continue;
+      consolidatedPreMap.delete(key);
+      const hostType = [...parts].sort((a, b) => b.entries.length - a.entries.length)[0].signature.type;
+      const baseParenRaw = (grp.canonName.match(/\(([^()]*)\)\s*$/) || [])[1];
+      const baseParen = baseParenRaw && /^[\d.,x×хX*\s-]+(?:mm|m|мм)?$/i.test(baseParenRaw.trim()) ? baseParenRaw.trim() : undefined;
+      parts.forEach((part, idx) => {
+        const isForeignType = part.signature.type && part.signature.type !== hostType;
+        let partName = `${grp.canonName} [${part.label}]`;
+        if (part.label === 'Spesifikasyon Belirtilmemiş') {
+          partName = `${grp.canonName.replace(/\s*\(\s*\d+(?:[.,]\d+)?\s*mikron[^)]*\)/i, ' (mikron belirtilmemiş)')} [${part.label}]`;
+        }
+        if (isForeignType) {
+          const typeLabel = getProductTypeLabel(part.signature.type!);
+          const rest = part.label.split(', ').filter(s => s !== typeLabel).join(', ');
+          partName = `${typeLabel}${baseParen ? ` (${baseParen})` : ''}${rest ? ` [${rest}]` : ''}`;
+        }
+        consolidatedPreMap.set(`${key}__spec${idx}`, {
+          canonName: partName,
+          canonCat: grp.canonCat,
+          rawUnits: new Set(part.entries.map((e: any) => e.unit)),
+          entries: part.entries
+        });
+      });
+    }
 
     // Pass 2: Resolve benchmark unit using ALL units seen for that material and split only truly incompatible physical dimensions
     const materialMap = new Map<string, {

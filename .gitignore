@@ -22,3 +22,5 @@ data_backup/
 .env.*
 .env.local
 service-account.json
+
+.audit_tmp/

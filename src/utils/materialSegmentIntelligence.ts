@@ -1,3 +1,5 @@
+import { areSpecSignaturesCompatible } from './materialGroupIntegrity';
+
 export type MaterialComparisonMode = 'COMMODITY_STANDARD' | 'BRAND_SEGMENTED';
 export type MaterialQualitySegment = 'COMMODITY' | 'PREMIUM' | 'STANDARD' | 'ECONOMY';
 
@@ -146,6 +148,32 @@ export function analyzeMaterialSegment(
     };
   }
 
+  // 2a. Normalizasyon motorunun kanonik isme yazdığı açık segment etiketi her şeyden önce gelir
+  const tagMatch = matLower.match(/\[([^\]]*)\]/g) || [];
+  const tagText = tagMatch.join(' ');
+  let explicitTier: MaterialQualitySegment | null = null;
+  if (/premium|profesyonel|orijinal\s*oem|ağır\s*yük/.test(tagText)) explicitTier = 'PREMIUM';
+  else if (/ekonomik/.test(tagText)) explicitTier = 'ECONOMY';
+  else if (/standart/.test(tagText)) explicitTier = 'STANDARD';
+  if (explicitTier) {
+    const segLabelExplicit =
+      explicitTier === 'PREMIUM'
+        ? '👑 Premium / Profesyonel Segment'
+        : explicitTier === 'ECONOMY'
+        ? '📦 Ekonomik / Saha Segmenti'
+        : '⚖️ Standart / Orta Segment';
+    const brandHit = BRAND_DICTIONARY.find(e => e.pattern.test(combined));
+    return {
+      comparisonMode: 'BRAND_SEGMENTED',
+      comparisonModeLabel: '🏷️ Marka & Kalite Segmentli Malzeme',
+      qualitySegment: explicitTier,
+      qualitySegmentLabel: segLabelExplicit,
+      brand: brandHit ? brandHit.brand : 'Belirtilen Seri',
+      productLine: tagText,
+      segmentReason: `Kanonik malzeme adında belirtilen segment (${tagText}) esas alınmıştır; yalnızca aynı segmentteki ürünlerle kıyaslanır.`
+    };
+  }
+
   // 2. Brand & Quality Tier Detection for Brand-Segmented Materials ("Mercedes vs. Lada")
   for (const entry of BRAND_DICTIONARY) {
     if (entry.pattern.test(combined)) {
@@ -221,6 +249,12 @@ export function areMaterialSegmentsCompatible(
 ): boolean {
   const priceA = Number(entryA.normalizedUnitPrice || entryA.unitPrice || 0);
   const priceB = Number(entryB.normalizedUnitPrice || entryB.unitPrice || 0);
+
+  // Orijinal fatura satırlarında çelişen teknik özellik varsa (tip/ölçü/mikron/litre/paket/M/marka) asla kıyaslama
+  if (entryA.originalName && entryB.originalName && !areSpecSignaturesCompatible(entryA.originalName, entryB.originalName)) {
+    return false;
+  }
+
   const segA = analyzeMaterialSegment(materialName, entryA.originalName, category, priceA);
   const segB = analyzeMaterialSegment(materialName, entryB.originalName, category, priceB);
 
