@@ -247,13 +247,13 @@ export function extractMeshSpecs(text: string): { pitchX: number; pitchY: number
 }
 
 /**
- * Profil Boru / Kutu Profil özelliklerini çıkarır (Örn: 40х20х2, 100х100х5)
+ * Profil Boru / Kutu Profil (Örn: 40х20х2, 100х100х5) ve Yuvarlak Çelik Boru (Örn: Ø219x4, Ø108x3.5) özelliklerini çıkarır
  */
 export function extractProfilePipeSpecs(text: string): { width: number; height: number; thickness: number; weightPerM: number } | null {
   if (!text) return null;
   const t = text.replace(/,/g, '.');
 
-  const match = t.match(/(\d{2,3})\s*[*xх]\s*(\d{2,3})\s*[*xх]\s*(\d+(?:\.\d+)?)/);
+  const match = t.match(/(\d{2,3})\s*[*xх×]\s*(\d{2,3})\s*[*xх×]\s*(\d+(?:\.\d+)?)/);
   if (match) {
     const width = parseInt(match[1]);
     const height = parseInt(match[2]);
@@ -263,11 +263,22 @@ export function extractProfilePipeSpecs(text: string): { width: number; height: 
       return { width, height, thickness, weightPerM };
     }
   }
+
+  // Yuvarlak Dikişli Çelik Boru (GOST 10704 / 3262): ØDxT mm -> 0.02466 * T * (D - T) kg/m
+  const roundMatch = t.match(/(?:[øØdдф]\s*|(?:труба|boru)[^0-9]{0,25})(\d{2,3})\s*[*xх×]\s*(\d{1,2}(?:\.\d+)?)(?=\s*(?:мм|mm|\(|gost|гост|$))/i);
+  if (roundMatch) {
+    const diam = parseInt(roundMatch[1]);
+    const thickness = parseFloat(roundMatch[2]);
+    if (diam >= 15 && diam <= 630 && thickness >= 1.2 && thickness <= 25 && thickness < diam / 2) {
+      const weightPerM = Number((0.02466 * thickness * (diam - thickness)).toFixed(2));
+      return { width: diam, height: diam, thickness, weightPerM };
+    }
+  }
   return null;
 }
 
 /**
- * Şveller (U-Profil) özelliklerini çıkarır (Örn: 20P, 16P, 10P)
+ * Şveller (U-Profil) özelliklerini çıkarır (Örn: 20P, 16P, 10P, Şveller 10, Şveller 18)
  */
 export function extractChannelSpecs(text: string): { channelNumber: string; weightPerM: number } | null {
   if (!text) return null;
@@ -277,12 +288,14 @@ export function extractChannelSpecs(text: string): { channelNumber: string; weig
     '27': 27.70, '30': 31.80
   };
 
-  const match = text.match(/(?:швеллер|şveller|u\s*profil)?\s*(\d{1,2}(?:\.\d+)?)\s*([ппууpP])/i) ||
+  const match = text.match(/(?:швеллер|şveller|u[\s-]*profil)\s*(?:№\s*)?(\d{1,2}(?:\.\d+)?)\s*([ппууpP])?/i) ||
                 text.match(/(\d{1,2})\s*([ппууpP])\b/i);
   if (match) {
     const num = match[1];
-    const weightPerM = CHANNEL_MASS[num] || (parseFloat(num) * 0.9);
-    return { channelNumber: `${num}P`, weightPerM };
+    if (CHANNEL_MASS[num] || (parseFloat(num) >= 6 && parseFloat(num) <= 40)) {
+      const weightPerM = CHANNEL_MASS[num] || Number((parseFloat(num) * 0.92).toFixed(2));
+      return { channelNumber: `${num}P`, weightPerM };
+    }
   }
   return null;
 }
@@ -424,7 +437,7 @@ export function extractBoardVolumeM3(text: string): { thicknessMm: number; areaM
     }
   }
 
-  const thickMatch = lower.match(/(?:^|[^0-9xх*])(6|8|9|10|12|12\.5|15|18|20|21|24|27|30)\s*(?:мм|mm)\b/i);
+  const thickMatch = lower.match(/(?:^|[^0-9xх*])(6|8|9|10|12|12\.5|15|18|20|21|24|27|30|35|40|50|60|80|100|120|150|200)\s*(?:мм|mm)\b/i);
   if (thickMatch) {
     thicknessMm = parseFloat(thickMatch[1]);
   } else if (lower.includes('фанер') || lower.includes('kontrplak') || lower.includes('plywood')) {
@@ -432,7 +445,9 @@ export function extractBoardVolumeM3(text: string): { thicknessMm: number; areaM
   }
 
   if (thicknessMm) {
-    const areaM2 = extractBoardAreaM2(lower) || ((lower.includes('1250') || lower.includes('осб') || lower.includes('osb')) ? 3.125 : 2.9768);
+    const isXps = /пеноплэкс|пеноплекс|penoplex|\bxps\b/i.test(lower);
+    const defaultArea = isXps ? 0.6932 : ((lower.includes('1250') || lower.includes('осб') || lower.includes('osb')) ? 3.125 : 2.9768);
+    const areaM2 = extractBoardAreaM2(lower) || defaultArea;
     const volumeM3 = Number((areaM2 * (thicknessMm / 1000)).toFixed(6));
     return { thicknessMm, areaM2, volumeM3 };
   }
@@ -463,9 +478,9 @@ export function extractPackageVolumeOrWeight(text: string): { value: number; uni
 }
 
 /**
- * Gazbeton veya duvar bloğu boyutlarını çıkarıp tek adet hacmini (m³) hesaplar
+ * Gazbeton, duvar bloğu veya kereste boyutlarını çıkarıp tek adet hacmini (m³) hesaplar
  * Örn: "200х250х600 мм" -> 0.2 * 0.25 * 0.6 = 0.03 m³
- *      "390*90*188" -> 0.39 * 0.09 * 0.188 = 0.0066 m³
+ *      "40x200x6000 мм" -> 0.04 * 0.20 * 6.0 = 0.048 m³
  */
 export function extractGazbetonDimensions(text: string): { width: number; height: number; length: number; volumeM3: number } | null {
   if (!text) return null;
@@ -475,7 +490,7 @@ export function extractGazbetonDimensions(text: string): { width: number; height
     const w = parseFloat(match[1]);
     const h = parseFloat(match[2]);
     const l = parseFloat(match[3]);
-    if (w >= 50 && w <= 1000 && h >= 50 && h <= 1000 && l >= 100 && l <= 2000) {
+    if (w >= 20 && w <= 1000 && h >= 20 && h <= 1000 && l >= 100 && l <= 6500) {
       const volumeM3 = Number(((w / 1000) * (h / 1000) * (l / 1000)).toFixed(5));
       return { width: w, height: h, length: l, volumeM3 };
     }
@@ -498,6 +513,7 @@ export function normalizeStandardUnit(rawUnit?: string): string {
   if (['m', 'mt', 'metre', 'метр', 'м', 'пм', 'погм', 'пог.м', 'мп', 'metretül', 'mtul'].includes(u)) return 'metre';
   if (['rulo', 'рулон', 'rul', 'рул', 'roll', 'rolls'].includes(u)) return 'rulo';
   if (['torba', 'bag', 'мешок', 'меш', 'мешков'].includes(u)) return 'torba';
+  if (['palet', 'пал', 'паллет', 'паллета', 'поддон'].includes(u)) return 'palet';
   if (['plaka', 'plk', 'лист', 'лист.', 'листов', 'tabaka', 'panel', 'board'].includes(u)) return 'plaka';
   if (['kova', 'teneke', 'ведро', 'вед', 'canister', 'bidon'].includes(u)) return 'kova';
   if (['lt', 'l', 'litre', 'литр', 'л'].includes(u)) return 'lt';
@@ -527,8 +543,12 @@ export function getMaterialBenchmarkUnit(materialName: string, _category?: strin
   // 0. KESİN ADET KALEMLERİ (Vitrifiye, Fırça, El Aleti, Aydınlatma, Kapak, Manşon, Dübel, Cıvata, Tüp vb.)
   if (
     /fırça|firca|ершик|кисть|щетк|унитаз|klozet|раковин|lavabo|смесител|batarya|무фта|муфта|manşon|manson|дюбел|dübel|dubel|гвозд|çivi|civi|болт|гайк|шайб|анкер|ankraj|کлетка|клетка|тележк|баллон|tüpü|tupu|saati|редуктор|горелк|pürmüz|purmuz|conta|прокладк|хомут|kelepçe|kablo bağı|mandal|kilit|menteşe|петля|ручка|kalem|klasör|dosya|sandalye|koltuk|masa|dolap|ranza|yatak|baret|yelek|gözlük|очки|botu|ayakkabı|ботинк|светильник|прожектор|лампа|aydınlatma|aydinlatma|люк\b|kapak|kapağı|kapagi|рубанок|rende|терка|кельма|шпатель|spatula|ножовка|testere|штроборез|захват|миксер|пистолет|tabanca|герметик|germetik|лента|скотч|bant|валик|rulo|кювета|ванночка|стенд|pano|panosu/i.test(text) &&
-    !/paspas ızgarası|rulo.*membran|rulo.*yalıtım|рулонн/i.test(text)
+    !/paspas ızgarası|membran|мембран|yalıtım|изопласт|izoplast|техноэласт|техноеласт|икопал|icopal|виллатекс|villateks|ультранап|ultranap|биполь|bipol|рулонн|geotekstil|jeotekstil|геотекстил|дорнит|inşaat naylonu|пленка|alçıpan|гипсокартон/i.test(text)
   ) {
+    if (normalizedUnits.includes('adet')) return 'adet';
+    if (normalizedUnits.includes('çift')) return 'çift';
+    if (normalizedUnits.includes('takım')) return 'takım';
+    if (normalizedUnits.includes('paket')) return 'paket';
     return normalizedUnits[0] || 'adet';
   }
 
@@ -565,7 +585,7 @@ export function getMaterialBenchmarkUnit(materialName: string, _category?: strin
 
   // 4. GAZBETON & DUVAR BLOKLARI & KERESTE (Piyasa Standardı: m³)
   if (
-    /газобетон|gazbeton|bonolit|poritep|ytong|istkult|исткульт|шлакоблок|кбб|kereste|kalas|доска обрезн|брус обрезн|брус не строган/i.test(text) &&
+    /газобетон|gazbeton|bonolit|poritep|ytong|istkult|исткульт|шлакоблок|кбб|kereste|kalas|tahta|доска обрезн|брус обрезн|брус не строган/i.test(text) &&
     !/клей|yapıştırıcı|yapistirici|harç|harc|dübel|dubel|анкер|саморез|testere|ножовка/i.test(text)
   ) {
     return 'm³';
@@ -595,9 +615,10 @@ export function getMaterialBenchmarkUnit(materialName: string, _category?: strin
     return 'ton';
   }
 
-  // 6.5. Alçıpan Profilleri (Metre veya Adet — asla m² değil!)
-  if (/alçıpan.*profil|alcipan.*profil|профиль.*(?:knauf|кнауф|пс|пн|пп|пнп|гкл|гипсокартон)|alçıpan\s*takviye\s*profil/i.test(text)) {
-    if (normalizedUnits.includes('metre') && !normalizedUnits.includes('adet')) return 'metre';
+  // 6.5. Alçıpan Profilleri & Sıva Profilleri (Standart: Adet veya Metre)
+  if (/alçıpan.*profil|alcipan.*profil|профиль.*(?:knauf|кнауф|пс|пн|пп|пнп|гкл|гипсокартон|маячков)|alçıpan\s*takviye\s*profil|sıva\s*kılavuz\s*profil/i.test(text)) {
+    if (normalizedUnits.includes('adet')) return 'adet';
+    if (normalizedUnits.includes('metre')) return 'metre';
     return normalizedUnits[0] || 'adet';
   }
 
@@ -611,11 +632,12 @@ export function getMaterialBenchmarkUnit(materialName: string, _category?: strin
     text.includes('изопласт') ||
     text.includes('izoplast') ||
     text.includes('техноэласт') ||
+    text.includes('техноеласт') ||
     text.includes('геотекстил') ||
     text.includes('jeotekstil') ||
     text.includes('geotekstil') ||
     text.includes('дорнит') ||
-    text.includes('битум') ||
+    (text.includes('битум') && !/праймер|astar|мастик|mastik|герметик/i.test(text)) ||
     isDrywallSheet ||
     text.includes('осб') ||
     text.includes('osb') ||
@@ -1451,6 +1473,40 @@ export function convertMaterialUnit(params: {
   const combinedSpecText = `${materialName} ${rawItemName || ''}`;
 
   // --------------------------------------------------------------------------
+  // B6. ALÇIPAN PROFİLLERİ & SIVA PROFİLLERİ (ADET <-> METRE)
+  // --------------------------------------------------------------------------
+  const isDrywallOrPlasterProfile =
+    /alçıpan.*profil|alcipan.*profil|профиль.*(?:knauf|кнауф|пс|пн|пп|пнп|гкл|гипсокартон|маячков)|alçıpan\s*takviye\s*profil|sıva\s*kılavuz\s*profil|köşe\s*profil/i.test(text);
+
+  if (isDrywallOrPlasterProfile) {
+    const profileLen = /3000|3\s*м|3\s*m/i.test(combinedSpecText) ? 3.0 : (extractLengthMeters(combinedSpecText) === 6.0 ? 3.0 : extractLengthMeters(combinedSpecText));
+    if (from === 'adet' && to === 'metre') {
+      return {
+        convertedUnitPrice: Number((unitPrice / profileLen).toFixed(2)),
+        convertedQuantity: Number((quantity * profileLen).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: profileLen,
+        formula: `1 Adet Profil = ${profileLen} metre`,
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
+    if (from === 'metre' && to === 'adet') {
+      return {
+        convertedUnitPrice: Number((unitPrice * profileLen).toFixed(2)),
+        convertedQuantity: Number((quantity / profileLen).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: 1 / profileLen,
+        formula: `1 Adet Profil = ${profileLen} metre`,
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // C. YALITIM, MEMBRAN, NAYLON ÖRTÜ & JEOTEKSTİL (RULO / ADET <-> M² / METRE)
   // --------------------------------------------------------------------------
   const isPolyFilm =
@@ -1463,10 +1519,19 @@ export function convertMaterialUnit(params: {
     text.includes('изопласт') ||
     text.includes('izoplast') ||
     text.includes('техноэласт') ||
+    text.includes('икопал') ||
+    text.includes('icopal') ||
+    text.includes('виллатекс') ||
+    text.includes('villateks') ||
+    text.includes('ультранап') ||
+    text.includes('ultranap') ||
+    text.includes('биполь') ||
+    text.includes('bipol') ||
     text.includes('бикрост') ||
     text.includes('линокром') ||
     text.includes('геотекстил') ||
     text.includes('jeotekstil') ||
+    text.includes('geotekstil') ||
     text.includes('дорнит') ||
     text.includes('рулон') ||
     text.includes('rulo');
@@ -1476,30 +1541,46 @@ export function convertMaterialUnit(params: {
     if (!rollArea) {
       if (isPolyFilm) {
         rollArea = 300; // Teknik polietilen inşaat naylonu standart rulo: 3m x 100m = 300 m²
-      } else if (text.includes('геотекстил') || text.includes('jeotekstil') || text.includes('дорнит')) {
+      } else if (text.includes('геотекстил') || text.includes('jeotekstil') || text.includes('geotekstil') || text.includes('дорнит')) {
         rollArea = 100; // Jeotekstilde 1 rulo genellikle 100 m²'dir (2m x 50m)
       } else {
         rollArea = 10; // Su yalıtım membranında 1 rulo standart 10 m²'dir
       }
     }
 
-    // Rulo (veya Polietilen Filmde Adet=Rulo) -> m²
-    if ((from === 'rulo' || (isPolyFilm && from === 'adet')) && to === 'm²') {
+    // 1m genişliğindeki su yalıtım membranlarında 1 metre tül = 1 m²
+    if (isMembraneOrGeotextile && ((from === 'metre' && to === 'm²') || (from === 'm²' && to === 'metre'))) {
       return {
-        convertedUnitPrice: Number((unitPrice / rollArea).toFixed(2)),
-        convertedQuantity: Number((quantity * rollArea).toFixed(2)),
+        convertedUnitPrice: unitPrice,
+        convertedQuantity: quantity,
         fromUnit: from,
         toUnit: to,
-        factor: rollArea,
-        formula: `1 Rulo = ${rollArea} m²`,
+        factor: 1,
+        formula: '1 Metre Rulo (En: 1m) = 1 m²',
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
+
+    // Rulo (veya Polietilen Filmde/Membranda Adet=Rulo) -> m²
+    if ((from === 'rulo' || (isPolyFilm && from === 'adet') || (isMembraneOrGeotextile && from === 'adet')) && to === 'm²') {
+      // Eğer membranda birim ADET girilmiş ama fiyat zaten 1 m² fiyatıysa (< 800 ₽), 10'a bölme
+      const effectiveFactor = (from === 'adet' && !isPolyFilm && unitPrice > 0 && unitPrice < 800) ? 1 : rollArea;
+      return {
+        convertedUnitPrice: Number((unitPrice / effectiveFactor).toFixed(2)),
+        convertedQuantity: Number((quantity * effectiveFactor).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: effectiveFactor,
+        formula: effectiveFactor === 1 ? '1 Adet (m² bazlı giriş) = 1 m²' : `1 Rulo = ${effectiveFactor} m²`,
         confidence: extractRollAreaM2(combinedSpecText) ? 'EXACT' : 'HIGH',
         conversionApplied: true,
-        notes: `Rulo ebadına (${rollArea} m²) göre normalize edildi.`
+        notes: `Rulo ebadına (${effectiveFactor} m²) göre normalize edildi.`
       };
     }
 
     // m² -> Rulo
-    if (from === 'm²' && (to === 'rulo' || (isPolyFilm && to === 'adet'))) {
+    if (from === 'm²' && (to === 'rulo' || (isPolyFilm && to === 'adet') || (isMembraneOrGeotextile && to === 'adet'))) {
       return {
         convertedUnitPrice: Number((unitPrice * rollArea).toFixed(2)),
         convertedQuantity: Number((quantity / rollArea).toFixed(2)),
@@ -1514,7 +1595,7 @@ export function convertMaterialUnit(params: {
   }
 
   // --------------------------------------------------------------------------
-  // D. PLAKA, LEVHA, KONTRPLAK, BRANDA/TENTE VE IZGARA (ADET / PLAKA <-> M² <-> M³)
+  // D. PLAKA, LEVHA, KONTRPLAK, XPS, TAŞYÜNÜ VE BRANDA (ADET / PLAKA / PAKET <-> M² <-> M³)
   // --------------------------------------------------------------------------
   const isSheetOrBoard =
     (text.includes('гипсокартон') ||
@@ -1527,6 +1608,17 @@ export function convertMaterialUnit(params: {
       text.includes('kontrplak') ||
       text.includes('plywood') ||
       text.includes('аквапанел') ||
+      text.includes('пеноплэкс') ||
+      text.includes('пеноплекс') ||
+      text.includes('penoplex') ||
+      /\bxps\b/i.test(text) ||
+      text.includes('taşyünü') ||
+      text.includes('taş yünü') ||
+      text.includes('минвата') ||
+      text.includes('технофас') ||
+      text.includes('техноблок') ||
+      text.includes('baswool') ||
+      text.includes('logicpir') ||
       text.includes('тент') ||
       text.includes('тарпаулин') ||
       text.includes('branda') ||
@@ -1536,7 +1628,7 @@ export function convertMaterialUnit(params: {
   const explicitBoardArea = extractBoardAreaM2(combinedSpecText);
   const boardVolSpec = extractBoardVolumeM3(combinedSpecText);
 
-  // D1. Kontrplak / OSB / Levha: Adet / Plaka <-> m³ ve m² <-> m³
+  // D1. Kontrplak / OSB / XPS / Taşyünü Levha: Adet / Plaka / Paket <-> m³ ve m² <-> m³
   if (isSheetOrBoard && boardVolSpec) {
     const { thicknessMm, areaM2, volumeM3 } = boardVolSpec;
     const thicknessM = thicknessMm / 1000;
@@ -1564,6 +1656,34 @@ export function convertMaterialUnit(params: {
         factor: 1 / volumeM3,
         formula: `1 m³ = ${(1 / volumeM3).toFixed(2)} Plaka (${thicknessMm}mm)`,
         confidence: 'EXACT',
+        conversionApplied: true
+      };
+    }
+
+    if (from === 'paket' && to === 'm³') {
+      const packVolM3 = 0.288; // Standart XPS / Taşyünü paket hacmi ≈ 0.288 m³
+      return {
+        convertedUnitPrice: Number((unitPrice / packVolM3).toFixed(2)),
+        convertedQuantity: Number((quantity * packVolM3).toFixed(4)),
+        fromUnit: from,
+        toUnit: to,
+        factor: packVolM3,
+        formula: `1 Paket Yalıtım Levhası ≈ ${packVolM3} m³`,
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
+
+    if (from === 'm³' && to === 'paket') {
+      const packVolM3 = 0.288;
+      return {
+        convertedUnitPrice: Number((unitPrice * packVolM3).toFixed(2)),
+        convertedQuantity: Number((quantity / packVolM3).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: 1 / packVolM3,
+        formula: `1 Paket Yalıtım Levhası ≈ ${packVolM3} m³`,
+        confidence: 'HIGH',
         conversionApplied: true
       };
     }
@@ -1728,15 +1848,45 @@ export function convertMaterialUnit(params: {
   }
 
   // --------------------------------------------------------------------------
-  // E2. GAZBETON VE DUVAR BLOKLARI (ADET / ŞT <-> M³)
+  // E2. GAZBETON, DUVAR BLOKLARI VE KERESTE (ADET / PALET <-> M³)
   // --------------------------------------------------------------------------
-  const isGazbetonBlock =
-    /газобетон|gazbeton|bonolit|poritep|ytong|istkult|исткульт|шлакоблок|кбб/i.test(text) &&
+  const isGazbetonOrTimber =
+    /газобетон|gazbeton|bonolit|poritep|ytong|istkult|исткульт|шлакоблок|кбб|kereste|kalas|tahta|доска обрезн|брус обрезн|брус не строган/i.test(text) &&
     !/рубанок|rende|дюбел|dübel|dubel|терка|кельма|шпатель|ножовка|testere|штроборез|захват|клей|yapıştırıcı|yapistirici/i.test(text);
 
-  if (isGazbetonBlock) {
+  if (isGazbetonOrTimber) {
     const gazSpec = extractGazbetonDimensions(combinedSpecText);
     const volPerBlock = gazSpec ? gazSpec.volumeM3 : 0.03; // Standart 200x250x600 = 0.03 m³
+
+    // Palet -> m³ (Standart Gazbeton Paleti = 1.875 m³)
+    if (from === 'palet' && to === 'm³') {
+      const palletVol = 1.875;
+      return {
+        convertedUnitPrice: Number((unitPrice / palletVol).toFixed(2)),
+        convertedQuantity: Number((quantity * palletVol).toFixed(4)),
+        fromUnit: from,
+        toUnit: to,
+        factor: palletVol,
+        formula: `1 Palet Gazbeton = ${palletVol} m³`,
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
+
+    // m³ -> Palet
+    if (from === 'm³' && to === 'palet') {
+      const palletVol = 1.875;
+      return {
+        convertedUnitPrice: Number((unitPrice * palletVol).toFixed(2)),
+        convertedQuantity: Number((quantity / palletVol).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: 1 / palletVol,
+        formula: `1 Palet Gazbeton = ${palletVol} m³`,
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
 
     // Adet -> m³
     if (from === 'adet' && to === 'm³') {
@@ -1746,10 +1896,10 @@ export function convertMaterialUnit(params: {
         fromUnit: from,
         toUnit: to,
         factor: volPerBlock,
-        formula: `1 Adet Blok = ${volPerBlock} m³ (${(1 / volPerBlock).toFixed(1)} adet/m³)`,
+        formula: `1 Adet = ${volPerBlock} m³ (${(1 / volPerBlock).toFixed(1)} adet/m³)`,
         confidence: gazSpec ? 'EXACT' : 'HIGH',
         conversionApplied: true,
-        notes: `Blok boyutlarına (${gazSpec ? `${gazSpec.width}x${gazSpec.height}x${gazSpec.length} mm` : 'Standart 200x250x600'}) göre hesaplandı.`
+        notes: `Boyutlarına (${gazSpec ? `${gazSpec.width}x${gazSpec.height}x${gazSpec.length} mm` : 'Standart 200x250x600'}) göre hesaplandı.`
       };
     }
 
@@ -1761,7 +1911,7 @@ export function convertMaterialUnit(params: {
         fromUnit: from,
         toUnit: to,
         factor: 1 / volPerBlock,
-        formula: `1 m³ = ${(1 / volPerBlock).toFixed(1)} Adet Blok`,
+        formula: `1 m³ = ${(1 / volPerBlock).toFixed(1)} Adet`,
         confidence: gazSpec ? 'EXACT' : 'HIGH',
         conversionApplied: true
       };
@@ -1769,8 +1919,24 @@ export function convertMaterialUnit(params: {
   }
 
   // --------------------------------------------------------------------------
-  // F. ÇİMENTO TORBASI & PAKETLİ AĞIRLIK MALZEMELERİ (TORBA / PAKET <-> KG / TON)
+  // F. ÇİMENTO TORBASI & PAKETLİ AĞIRLIK MALZEMELERİ (TORBA / ADET / PAKET <-> KG / TON)
   // --------------------------------------------------------------------------
+  const isBaggedCementOrMortar =
+    /çimento|cimento|цемент|yapıştırıcı|yapistirici|клей.*газобетон|плиточн.*клей|пескобетон|peskobeton|сухая.*смесь|kuru.*harç|kuru.*karışım|tamir\s*harcı|tamir\s*harci|ремонтн.*состав|ротбанд|rotband|штукатурк|шпаклевк/i.test(text);
+
+  if (isBaggedCementOrMortar && ((from === 'adet' && to === 'torba') || (from === 'torba' && to === 'adet'))) {
+    return {
+      convertedUnitPrice: unitPrice,
+      convertedQuantity: quantity,
+      fromUnit: from,
+      toUnit: to,
+      factor: 1,
+      formula: '1 Torba = 1 Adet',
+      confidence: 'EXACT',
+      conversionApplied: true
+    };
+  }
+
   if (from === 'torba' || to === 'torba' || ((from === 'paket' || from === 'kutu' || to === 'paket' || to === 'kutu') && extractPackageVolumeOrWeight(combinedSpecText)?.unit === 'kg')) {
     const pkg = extractPackageVolumeOrWeight(combinedSpecText);
     const bagKg = pkg && pkg.unit === 'kg' ? pkg.value : (text.includes('25') ? 25 : 50); // Varsayılan 50 kg veya 25 kg
@@ -1887,6 +2053,220 @@ export function convertMaterialUnit(params: {
         conversionApplied: true
       };
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // G2. ÇELİK I-KİRİŞ (ДВУТАВР GOST 57837) & SİYAH ÇELİK SAC LEVHA (METRE / ADET / M² <-> TON)
+  // --------------------------------------------------------------------------
+  if (/двутавр|i-kiriş|ipe\/heb\s*kiriş|çelik\s*kiriş\s*profil|profil\s*çelik\s*kiriş/i.test(text) && !/деревян|ahşap|h20/i.test(text)) {
+    const IBEAM_MASS: Record<string, number> = {
+      '20b1': 21.3, '25b1': 25.7, '30b1': 32.9, '35b1': 43.3, '40b1': 56.6, '40s1': 88.6, '40ş1': 88.6, '45b1': 66.5, '50b1': 73.0, '55b2': 97.9
+    };
+    const bm = combinedSpecText.match(/\b(20|25|30|35|40|45|50|55|60)\s*([бbшsşкk])\s*([123])\b/i);
+    const profKey = bm ? `${bm[1]}${/[шsş]/i.test(bm[2]) ? 's' : 'b'}${bm[3]}` : '40b1';
+    const kgPerM = IBEAM_MASS[profKey] || 56.6;
+    const tonsPerM = kgPerM / 1000;
+    if (from === 'metre' && to === 'ton') {
+      return {
+        convertedUnitPrice: Number((unitPrice / tonsPerM).toFixed(2)),
+        convertedQuantity: Number((quantity * tonsPerM).toFixed(4)),
+        fromUnit: from,
+        toUnit: to,
+        factor: tonsPerM,
+        formula: `Çelik Kiriş: 1 metre = ${kgPerM} kg (${tonsPerM} ton)`,
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
+    if (from === 'ton' && to === 'metre') {
+      return {
+        convertedUnitPrice: Number((unitPrice * tonsPerM).toFixed(2)),
+        convertedQuantity: Number((quantity / tonsPerM).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: 1 / tonsPerM,
+        formula: `Çelik Kiriş: 1 ton = ${(1 / tonsPerM).toFixed(2)} metre`,
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // G3. STANDART 1NF DOLU TUĞLA 250x120x65 MM (ADET <-> M³: 1 Adet = 0.00195 m³)
+  // --------------------------------------------------------------------------
+  if (/tuğla|tugla|кирпич/i.test(text) && /250\s*[*xх×]\s*120\s*[*xх×]\s*65|1\s*нф|1\s*nf/i.test(combinedSpecText)) {
+    const brickVol = 0.00195;
+    if (from === 'adet' && to === 'm³') {
+      return {
+        convertedUnitPrice: Number((unitPrice / brickVol).toFixed(2)),
+        convertedQuantity: Number((quantity * brickVol).toFixed(4)),
+        fromUnit: from,
+        toUnit: to,
+        factor: brickVol,
+        formula: '1 Adet 1NF Tuğla (250x120x65) = 0.00195 m³ (512.8 adet/m³)',
+        confidence: 'EXACT',
+        conversionApplied: true
+      };
+    }
+    if (from === 'm³' && to === 'adet') {
+      return {
+        convertedUnitPrice: Number((unitPrice * brickVol).toFixed(2)),
+        convertedQuantity: Number((quantity / brickVol).toFixed(1)),
+        fromUnit: from,
+        toUnit: to,
+        factor: 1 / brickVol,
+        formula: '1 m³ = 512.8 Adet 1NF Tuğla (250x120x65)',
+        confidence: 'EXACT',
+        conversionApplied: true
+      };
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // G4. BOYU BELİRTİLEN BORULAR, HORTUMLAR VE KANALLAR (ADET <-> METRE)
+  // --------------------------------------------------------------------------
+  if (/boru|труб|воздуховод|yangın\s*hortumu|рукав\s*пожарн/i.test(text) && ((from === 'adet' && to === 'metre') || (from === 'metre' && to === 'adet'))) {
+    const lenMatch =
+      combinedSpecText.match(/(?:[xх*×]|l\s*=|\()\s*(\d+(?:[.,]\d+)?)\s*(?:м|m)(?![a-zа-яё0-9²³])/i) ||
+      combinedSpecText.match(/\b(1000|1250|2000|3000|6000)\s*(?:мм|mm)\b/i) ||
+      (/yangın\s*hortumu|рукав\s*пожарн/i.test(text) ? [null, '20'] : null);
+    if (lenMatch && lenMatch[1]) {
+      const rawVal = parseFloat(lenMatch[1].replace(',', '.'));
+      const pipeLenM = rawVal >= 500 ? rawVal / 1000 : rawVal;
+      if (pipeLenM >= 0.5 && pipeLenM <= 50) {
+        if (from === 'adet' && to === 'metre') {
+          return {
+            convertedUnitPrice: Number((unitPrice / pipeLenM).toFixed(2)),
+            convertedQuantity: Number((quantity * pipeLenM).toFixed(2)),
+            fromUnit: from,
+            toUnit: to,
+            factor: pipeLenM,
+            formula: `1 Adet = ${pipeLenM} metre`,
+            confidence: 'EXACT',
+            conversionApplied: true
+          };
+        }
+        if (from === 'metre' && to === 'adet') {
+          return {
+            convertedUnitPrice: Number((unitPrice * pipeLenM).toFixed(2)),
+            convertedQuantity: Number((quantity / pipeLenM).toFixed(2)),
+            fromUnit: from,
+            toUnit: to,
+            factor: 1 / pipeLenM,
+            formula: `1 Adet = ${pipeLenM} metre`,
+            confidence: 'EXACT',
+            conversionApplied: true
+          };
+        }
+      }
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // G5. A4 / A3 FOTOKOPİ KAĞIDI (500 YAPRAK PAKET: ADET / RULO <-> PAKET 1:1, KUTU <-> PAKET 1:5)
+  // --------------------------------------------------------------------------
+  if (/fotokopi.*kağıd|yazıcı.*kağıd|бумага.*офисн|svetocopy|светокопи|500\s*yaprak/i.test(text)) {
+    if ((from === 'kutu' || (from === 'adet' && unitPrice >= 1100)) && to === 'paket') {
+      return {
+        convertedUnitPrice: Number((unitPrice / 5).toFixed(2)),
+        convertedQuantity: Number((quantity * 5).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: 5,
+        formula: '1 Koli/Kutu = 5 Paket (500 Yaprak)',
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
+    if (from === 'paket' && to === 'kutu') {
+      return {
+        convertedUnitPrice: Number((unitPrice * 5).toFixed(2)),
+        convertedQuantity: Number((quantity / 5).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: 0.2,
+        formula: '1 Koli/Kutu = 5 Paket (500 Yaprak)',
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
+    if (['adet', 'paket', 'rulo'].includes(from) && ['adet', 'paket', 'rulo'].includes(to)) {
+      return {
+        convertedUnitPrice: unitPrice,
+        convertedQuantity: quantity,
+        fromUnit: from,
+        toUnit: to,
+        factor: 1,
+        formula: '1 Paket (500 Yaprak) = 1 Adet',
+        confidence: 'EXACT',
+        conversionApplied: true
+      };
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // G6. PAKETLİ PASPAYI, DÜBEL, VİDA, SOMUN, PUL, KABLO BAĞI & SARF (PAKET / KUTU <-> ADET)
+  // --------------------------------------------------------------------------
+  const explicitPackMatch =
+    combinedSpecText.match(/(\d+)\s*(?:шт|adet|пар|çift|cift|рул|rulo)\s*(?:\/|\s*в\s*|\s*-\s*|\s*)(?:уп|пакет|кор|короб|пач|paket|kutu|koli)/i) ||
+    combinedSpecText.match(/\(\s*(\d+)\s*(?:шт|adet|пар|çift)\b/i);
+  const isSpacerItem = /paspay|фиксатор|конус|звездочк|стульчик/i.test(text);
+  const isFastenerOrTie = /дюбел|dübel|dubel|саморез|vida|гайк|somun|шайб|pul\b|анкер|ankraj|хомут|kablo\s*bağ|cırt\s*kelepçe|клемм|wago|скоб|клипс/i.test(text);
+
+  if ((explicitPackMatch || isSpacerItem || isFastenerOrTie) && ((from === 'paket' || from === 'kutu') && to === 'adet' || (from === 'adet' && (to === 'paket' || to === 'kutu')))) {
+    const rawCount = explicitPackMatch ? parseInt(explicitPackMatch[1], 10) : (isSpacerItem ? 500 : 100);
+    const packCount = (rawCount >= 2 && rawCount <= 5000) ? rawCount : 100;
+    if ((from === 'paket' || from === 'kutu') && to === 'adet') {
+      // Eğer birim paket yazılmış ama fiyat zaten tekil adet fiyatıysa (< 15 ₽), bölme!
+      const effFactor = unitPrice >= 25 ? packCount : 1;
+      return {
+        convertedUnitPrice: Number((unitPrice / effFactor).toFixed(2)),
+        convertedQuantity: Number((quantity * effFactor).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: effFactor,
+        formula: effFactor === 1 ? '1 Adet = 1 Adet' : `1 Paket = ${effFactor} Adet`,
+        confidence: explicitPackMatch ? 'EXACT' : 'HIGH',
+        conversionApplied: true
+      };
+    }
+    if (from === 'adet' && (to === 'paket' || to === 'kutu')) {
+      // Eğer birim adet yazılmış ama fiyat zaten paket fiyatıysa (>= 150 ₽), 1:1 kabul et
+      const effFactor = unitPrice >= 150 ? 1 : (1 / packCount);
+      return {
+        convertedUnitPrice: Number((unitPrice / effFactor).toFixed(2)),
+        convertedQuantity: Number((quantity * effFactor).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: effFactor,
+        formula: effFactor === 1 ? '1 Paket = 1 Adet (Paket bazlı giriş)' : `1 Paket = ${packCount} Adet`,
+        confidence: explicitPackMatch ? 'EXACT' : 'HIGH',
+        conversionApplied: true
+      };
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // G7. TEKİL SAYILABİLİR ÜRÜNLERDE BİRİM EŞDEĞERLİĞİ (ADET <-> ÇİFT / TAKIM / PAKET / RULO 1:1)
+  // İş botu, eldiven, iş elbisesi, fırça, lazer işaretçi vb. kalemlerde faturada "1 Adet" vs "1 Çift" / "1 Takım" yazılması
+  // --------------------------------------------------------------------------
+  const discreteUnits = ['adet', 'çift', 'takım', 'paket', 'kutu', 'rulo'];
+  if (
+    discreteUnits.includes(from) &&
+    discreteUnits.includes(to) &&
+    !/арматур|inşaat\s*demir|газобетон|gazbeton|kereste|доска|брус|фанер|kontrplak|plywood|мембран|membran|геотекстил|geotekstil|пеноплэкс|penoplex|xps|taşyünü|минвата|гипсокартон|alçıpan|бетон|beton|цемент|çimento|песок|щебень|труба|boru|уголок|köşebent|швеллер|şveller|сетка|hasır|кабель|kablo|провод/i.test(text)
+  ) {
+    return {
+      convertedUnitPrice: unitPrice,
+      convertedQuantity: quantity,
+      fromUnit: from,
+      toUnit: to,
+      factor: 1,
+      formula: `1 ${params.fromUnit} = 1 ${params.toUnit}`,
+      confidence: 'HIGH',
+      conversionApplied: true
+    };
   }
 
   // --------------------------------------------------------------------------

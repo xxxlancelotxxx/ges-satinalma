@@ -93,13 +93,38 @@ const isReadyMixConcreteText = (text: string): boolean => {
   return /бетон\s*(?:в\s*\d|b\s*\d|м\s*\d|m\s*\d|товарн|бсг|бст|мелкозерн|гидротехнич)|товарный\s*бетон|hazır\s*beton|hazir\s*beton|\bbeton\s+c\d|\bc\d{2}\/\d{2}\s*beton|grobeton|гробетон|керамзитобетон|бетолюкс|betolux|eurobeton|евробетон|мосбетон|раствор\s+(?:м\s*\d|кладочн|штукатурн|товарн|монтажн|цементн)/i.test(t);
 };
 
+const isAuthenticRussianText = (s?: string): boolean => {
+  const t = (s || '').trim();
+  if (!t || t.length < 4) return false;
+  if (/\[[^\]]+\]$/.test(t) && /Гидроизоляция рулонная наплавляемая|Утеплитель теплоизоляционный|Хозяйственно-бытовое обеспечение|Диск отрезной \/ круг шлифовальный|Труба полипропиленовая \/ ПВХ/i.test(t)) {
+    return false;
+  }
+  if (/^(?:demir\s+nervurlu|inşaat\s+demir|insaat\s+demir|kosebent|köşebent|membran|gaz\s*beton|kontrplak|kereste|profil\s+demir|boru\s+demir|hasir\s+celik|cimento|çimento|ugolok|kutu\s+profil|is\s+elbisesi|ayakabi|cizme|eldiven|baret)\b/i.test(t)) {
+    return false;
+  }
+  const stripped = t
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/(?:гост|ту)\s*[\d.-]*/gi, ' ')
+    .replace(/[аa]400|[аa]500[сc]?|[аa]240/gi, ' ');
+  return /[а-яА-ЯёЁ]{4,}/.test(stripped);
+};
+
 const isShortNoteOrSpecFragment = (s: string): boolean => {
   const t = (s || '').trim();
   if (!t || t.length < 4) return true;
   if (/^(?:\d+(?:[.,]\d+)?\s*(?:шт|м|мм|см|кг|г|л|мл|уп|упак|кор|рул|пл|мпа|м2|м3)\.?|\d+\s*[xх*×]\s*\d+.*)$/i.test(t)) return true;
   if (/^(?:кж\s*[\d.,-]|к\d\b|корпус|стилобат|блок|вжк|офис|склад|этаж|секция|ось|оси|отм\.|схем|арт\.?\s*\d|спайка|осина|гсп(?:-df)?|тип\s*\d|вид\s*\d|сорт\s*\d|мешок|однодверный|съемный|стандартный|etap|blok|kat)\b/i.test(t)) return true;
-  if (!/[а-яА-ЯёЁ]{4,}/.test(t)) return true;
+  if (!isAuthenticRussianText(t)) return true;
   return false;
+};
+
+const extractShortSpecNote = (s?: string): string => {
+  const t = (s || '').trim();
+  if (!t || t.length > 35) return '';
+  if (/^(?:[aа]500[cс]?|[aа]240|[aа]400|[dд]\s*(?:300|350|400|500|600)|\d+(?:[.,]\d+)?\s*(?:мм|mm|м|m|кг|kg|л|l)|эпп|экп|ткп|хпп|epp|ekp)$/i.test(t)) {
+    return t;
+  }
+  return '';
 };
 
 export function isCleanMaterialRecord(inv: any): boolean {
@@ -268,7 +293,11 @@ class PrizmaSyncService {
             : undefined;
           const pdfDesc = matchedRow?.pdfExtractedName ? cleanRawMaterialName(matchedRow.pdfExtractedName) : '';
           const rowDesc = matchedRow?.description ? cleanRawMaterialName(matchedRow.description) : '';
-          const rowMatRu = matchedRow?.materialName2 ? cleanRawMaterialName(matchedRow.materialName2) : '';
+          const rowMat1 = matchedRow?.materialName ? cleanRawMaterialName(matchedRow.materialName) : '';
+          const rowMat2 = matchedRow?.materialName2 ? cleanRawMaterialName(matchedRow.materialName2) : '';
+          // Bazı Prizma stok kartlarında Rusça isim materialName alanında, Türkçe isim materialName2 alanında olabiliyor
+          const rowMatRu = isAuthenticRussianText(rowMat2) ? rowMat2 : (isAuthenticRussianText(rowMat1) ? rowMat1 : '');
+          const shortSpec = extractShortSpecNote(rowDesc);
           const origRaw = cleanRawMaterialName(it.originalName || it.materialName || '');
           const matRaw = cleanRawMaterialName(it.materialName || origRaw);
           const isGenericStockCard = /muhtelif|diğer|diger|sarf\s*malzemeler.*ozel/i.test(matRaw);
@@ -279,22 +308,22 @@ class PrizmaSyncService {
             : '';
           const effectiveRowDesc = pdfDesc || rowDesc || fallbackParenDesc;
           const hasMeaningfulRowDesc = !isShortNoteOrSpecFragment(effectiveRowDesc);
-          const isFullRussianRowDesc = Boolean(pdfDesc) || (hasMeaningfulRowDesc && effectiveRowDesc.length >= 12 && /[а-яА-ЯёЁ]{4,}/.test(effectiveRowDesc));
+          const isFullRussianRowDesc = Boolean(pdfDesc) || (hasMeaningfulRowDesc && effectiveRowDesc.length >= 10 && isAuthenticRussianText(effectiveRowDesc));
 
           let russianOrig = '';
           if (isFullRussianRowDesc) {
             russianOrig = effectiveRowDesc;
-          } else if (!isShortNoteOrSpecFragment(origRaw) && origRaw.length >= 12 && !origRaw.includes('[') && !/^Строительно-монтажный материал/i.test(origRaw)) {
-            russianOrig = origRaw;
           } else if (rowMatRu && !isShortNoteOrSpecFragment(rowMatRu)) {
-            russianOrig = hasMeaningfulRowDesc && !effectiveRowDesc.toLowerCase().includes(rowMatRu.toLowerCase().slice(0, 6))
-              ? `${rowMatRu} (${effectiveRowDesc})`
-              : rowMatRu;
-          } else if (isGenericStockCard && hasMeaningfulRowDesc) {
-            russianOrig = effectiveRowDesc;
-          } else if (!isShortNoteOrSpecFragment(origRaw) && origRaw.length >= 10) {
+            if (hasMeaningfulRowDesc && !effectiveRowDesc.toLowerCase().includes(rowMatRu.toLowerCase().slice(0, 6))) {
+              russianOrig = `${rowMatRu} (${effectiveRowDesc})`;
+            } else if (shortSpec && !rowMatRu.toLowerCase().includes(shortSpec.toLowerCase())) {
+              russianOrig = `${rowMatRu} (${shortSpec.toUpperCase()})`;
+            } else {
+              russianOrig = rowMatRu;
+            }
+          } else if (!isShortNoteOrSpecFragment(origRaw) && origRaw.length >= 10 && !origRaw.includes('[') && !/^Строительно-монтажный материал/i.test(origRaw)) {
             russianOrig = origRaw;
-          } else if (hasMeaningfulRowDesc && effectiveRowDesc.length >= 15) {
+          } else if (isGenericStockCard && hasMeaningfulRowDesc) {
             russianOrig = effectiveRowDesc;
           } else {
             russianOrig = ensureRussianOriginalName(matRaw || origRaw, !isShortNoteOrSpecFragment(origRaw) ? origRaw : '');
@@ -303,10 +332,15 @@ class PrizmaSyncService {
           let effectiveTrSource = matRaw || origRaw;
           if (isFullRussianRowDesc) {
             effectiveTrSource = translateRussianMaterialToTurkish(effectiveRowDesc) || matRaw;
+          } else if (rowMatRu) {
+            const translatedRu = translateRussianMaterialToTurkish(russianOrig);
+            effectiveTrSource = isGenericStockCard
+              ? (translatedRu || `${matRaw} (${russianOrig})`)
+              : (shortSpec ? `${matRaw} (${shortSpec.toUpperCase()})` : (translatedRu || matRaw));
           } else if (isGenericStockCard && hasMeaningfulRowDesc) {
             effectiveTrSource = translateRussianMaterialToTurkish(effectiveRowDesc) || `${matRaw} (${effectiveRowDesc})`;
           } else if (/[а-яА-ЯёЁ]/.test(matRaw)) {
-            effectiveTrSource = translateRussianMaterialToTurkish(origRaw || matRaw);
+            effectiveTrSource = translateRussianMaterialToTurkish(russianOrig || origRaw || matRaw);
           }
 
           const itemCat = normalizeCategoryName(
@@ -590,8 +624,11 @@ class PrizmaSyncService {
             for (let idx = 0; idx < rows.length; idx++) {
               const r = rows[idx];
               const rawName = r.materialName || d.description || '';
-              const rawRu = cleanRawMaterialName(r.materialName2 || '');
+              const rawMat1 = cleanRawMaterialName(r.materialName || '');
+              const rawMat2 = cleanRawMaterialName(r.materialName2 || '');
+              const rawRu = isAuthenticRussianText(rawMat2) ? rawMat2 : (isAuthenticRussianText(rawMat1) ? rawMat1 : '');
               const rawDesc = cleanRawMaterialName(r.description || '');
+              const shortSpec = extractShortSpecNote(rawDesc);
               const cleaned = cleanRawMaterialName(rawName);
 
               // Beton kalemlerini filtrele (Yalnızca hazır beton / grobeton)
@@ -607,21 +644,19 @@ class PrizmaSyncService {
               const pdfDesc = r.pdfExtractedName ? cleanRawMaterialName(r.pdfExtractedName) : '';
               const effectiveDesc = pdfDesc || rawDesc;
               const hasUsefulDesc = !isShortNoteOrSpecFragment(effectiveDesc);
-              const isFullRuDesc = Boolean(pdfDesc) || (hasUsefulDesc && effectiveDesc.length >= 12 && /[а-яА-ЯёЁ]{4,}/.test(effectiveDesc));
-
-              const translatedTr = isFullRuDesc
-                ? (translateRussianMaterialToTurkish(effectiveDesc) || cleaned)
-                : (isGenericCard && hasUsefulDesc)
-                  ? (translateRussianMaterialToTurkish(effectiveDesc) || `${cleaned} (${effectiveDesc})`)
-                  : translateRussianMaterialToTurkish(cleaned || effectiveDesc || rawName);
+              const isFullRuDesc = Boolean(pdfDesc) || (hasUsefulDesc && effectiveDesc.length >= 10 && isAuthenticRussianText(effectiveDesc));
 
               let russianOrig = '';
               if (isFullRuDesc) {
                 russianOrig = effectiveDesc;
               } else if (rawRu && !isShortNoteOrSpecFragment(rawRu)) {
-                russianOrig = hasUsefulDesc && !effectiveDesc.toLowerCase().includes(rawRu.toLowerCase().slice(0, 6))
-                  ? `${rawRu} (${effectiveDesc})`
-                  : rawRu;
+                if (hasUsefulDesc && !effectiveDesc.toLowerCase().includes(rawRu.toLowerCase().slice(0, 6))) {
+                  russianOrig = `${rawRu} (${effectiveDesc})`;
+                } else if (shortSpec && !rawRu.toLowerCase().includes(shortSpec.toLowerCase())) {
+                  russianOrig = `${rawRu} (${shortSpec.toUpperCase()})`;
+                } else {
+                  russianOrig = rawRu;
+                }
               } else if (isGenericCard && hasUsefulDesc) {
                 russianOrig = effectiveDesc;
               } else if (!isShortNoteOrSpecFragment(cleaned) && cleaned.length >= 10) {
@@ -629,8 +664,16 @@ class PrizmaSyncService {
               } else if (hasUsefulDesc && effectiveDesc.length >= 15) {
                 russianOrig = effectiveDesc;
               } else {
-                russianOrig = ensureRussianOriginalName(translatedTr || cleaned, !isShortNoteOrSpecFragment(effectiveDesc) ? effectiveDesc : '');
+                russianOrig = ensureRussianOriginalName(cleaned, !isShortNoteOrSpecFragment(effectiveDesc) ? effectiveDesc : '');
               }
+
+              const translatedTr = isFullRuDesc
+                ? (translateRussianMaterialToTurkish(effectiveDesc) || cleaned)
+                : rawRu
+                  ? (isGenericCard ? (translateRussianMaterialToTurkish(russianOrig) || `${cleaned} (${russianOrig})`) : (shortSpec ? `${cleaned} (${shortSpec.toUpperCase()})` : (translateRussianMaterialToTurkish(russianOrig) || cleaned)))
+                  : (isGenericCard && hasUsefulDesc)
+                    ? (translateRussianMaterialToTurkish(effectiveDesc) || `${cleaned} (${effectiveDesc})`)
+                    : translateRussianMaterialToTurkish(cleaned || effectiveDesc || rawName);
 
               const itemCategory = normalizeCategoryName('', `${russianOrig} ${cleaned} ${translatedTr}`);
 
