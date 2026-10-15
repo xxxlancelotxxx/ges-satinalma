@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { LanguageProvider } from './context/LanguageContext';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
@@ -14,46 +14,11 @@ import { SupervisorPerformanceReport } from './components/SupervisorPerformanceR
 import { DiscountEntryForm } from './components/DiscountEntryForm';
 import { JobsitesAndSupervisors } from './components/JobsitesAndSupervisors';
 import { ProcurementAnomalyAlerts } from './components/ProcurementAnomalyAlerts';
-
-// Resilient dynamic chunk loader with auto-retry and cache busting
-function lazyWithRetry<T extends React.ComponentType<any>>(
-  factory: () => Promise<{ default: T } | { [key: string]: T }>,
-  key?: string
-) {
-  return lazy(async () => {
-    try {
-      const module = await factory();
-      if ('default' in module && module.default) {
-        return { default: module.default as T };
-      }
-      return { default: Object.values(module)[0] as T };
-    } catch (err: any) {
-      console.warn('[LAZY LOAD RETRY] Dynamic chunk import failed, retrying once...', err);
-      try {
-        const retryModule = await factory();
-        if ('default' in retryModule && retryModule.default) {
-          return { default: retryModule.default as T };
-        }
-        return { default: Object.values(retryModule)[0] as T };
-      } catch (retryErr) {
-        const reloadKey = 'chunk_reload_' + (key || 'lazy');
-        const hasReloaded = window.sessionStorage.getItem(reloadKey);
-        if (!hasReloaded) {
-          window.sessionStorage.setItem(reloadKey, 'true');
-          window.location.reload();
-        }
-        throw retryErr;
-      }
-    }
-  });
-}
-
-// Lazy loaded auxiliary components
-const InvoiceScannerAI = lazyWithRetry(() => import('./components/InvoiceScannerAI').then(m => ({ default: m.InvoiceScannerAI })), 'InvoiceScannerAI');
-const InvoiceDriveVault = lazyWithRetry(() => import('./components/InvoiceDriveVault').then(m => ({ default: m.InvoiceDriveVault })), 'InvoiceDriveVault');
-const TrashCanModal = lazyWithRetry(() => import('./components/TrashCanModal').then(m => ({ default: m.TrashCanModal })), 'TrashCanModal');
-const DataBackupCenterModal = lazyWithRetry(() => import('./components/DataBackupCenterModal').then(m => ({ default: m.DataBackupCenterModal })), 'DataBackupCenterModal');
-const ComparativeOffersView = lazyWithRetry(() => import('./components/ComparativeOffersView').then(m => ({ default: m.ComparativeOffersView })), 'ComparativeOffersView');
+import { InvoiceScannerAI } from './components/InvoiceScannerAI';
+import { InvoiceDriveVault } from './components/InvoiceDriveVault';
+import { TrashCanModal } from './components/TrashCanModal';
+import { DataBackupCenterModal } from './components/DataBackupCenterModal';
+import { ComparativeOffersView } from './components/ComparativeOffersView';
 
 import { Coins } from 'lucide-react';
 import { evaluateDiscountAudit } from './utils/auditRiskEngine';
