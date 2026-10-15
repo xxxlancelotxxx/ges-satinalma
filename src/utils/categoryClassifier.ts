@@ -963,10 +963,38 @@ const WORD_TRANSLATIONS: Array<[RegExp, string]> = [
   [/\bпроявочный\s+свет\b/gi, 'Yüzey Kontrol Aydınlatması']
 ];
 
+const translateMemoCache = new Map<string, string>();
+const normalizeCatMemoCache = new Map<string, string>();
+const ensureRuMemoCache = new Map<string, string>();
+const kwAsciiCache = new Map<string, { kTr: string; kAscii: string }>();
+
+const toTrLowerFast = (s?: string) =>
+  (s || '')
+    .replace(/İ/g, 'i')
+    .replace(/I/g, 'ı')
+    .replace(/Ğ/g, 'ğ')
+    .replace(/Ü/g, 'ü')
+    .replace(/Ş/g, 'ş')
+    .replace(/Ö/g, 'ö')
+    .replace(/Ç/g, 'ç')
+    .toLowerCase();
+
+const toAsciiLowerFast = (s?: string) =>
+  toTrLowerFast(s)
+    .replace(/ğ/g, 'g')
+    .replace(/ü/g, 'u')
+    .replace(/ş/g, 's')
+    .replace(/ı/g, 'i')
+    .replace(/ö/g, 'o')
+    .replace(/ç/g, 'c');
+
 export function translateRussianMaterialToTurkish(rawName?: string): string {
   if (!rawName) return '';
   let text = String(rawName).trim();
   if (!/[а-яё]/i.test(text)) return text;
+
+  const cached = translateMemoCache.get(text);
+  if (cached !== undefined) return cached;
 
   for (const [pattern, replacement] of PHRASE_TRANSLATIONS) {
     text = text.replace(pattern, replacement);
@@ -975,31 +1003,20 @@ export function translateRussianMaterialToTurkish(rawName?: string): string {
     text = text.replace(pattern, replacement);
   }
 
-  return text.replace(/\s{2,}/g, ' ').trim();
+  const res = text.replace(/\s{2,}/g, ' ').trim();
+  if (translateMemoCache.size > 15000) translateMemoCache.clear();
+  translateMemoCache.set(String(rawName).trim(), res);
+  return res;
 }
 
 // Helper: Normalize any raw category string into one canonical Turkish name
 export function normalizeCategoryName(rawCategory?: string, materialName?: string): string {
-  // IMPORTANT: Do NOT call .trim() inside toTrLower/toAsciiLower so intentional leading/trailing spaces in keywords (e.g. 'узо ', 'моп ', 'alçı ') are preserved!
-  const toTrLower = (s?: string) =>
-    (s || '')
-      .replace(/İ/g, 'i')
-      .replace(/I/g, 'ı')
-      .replace(/Ğ/g, 'ğ')
-      .replace(/Ü/g, 'ü')
-      .replace(/Ş/g, 'ş')
-      .replace(/Ö/g, 'ö')
-      .replace(/Ç/g, 'ç')
-      .toLowerCase();
+  const memoKey = `${rawCategory || ''}|||${materialName || ''}`;
+  const memoHit = normalizeCatMemoCache.get(memoKey);
+  if (memoHit !== undefined) return memoHit;
 
-  const toAsciiLower = (s?: string) =>
-    toTrLower(s)
-      .replace(/ğ/g, 'g')
-      .replace(/ü/g, 'u')
-      .replace(/ş/g, 's')
-      .replace(/ı/g, 'i')
-      .replace(/ö/g, 'o')
-      .replace(/ç/g, 'c');
+  const toTrLower = toTrLowerFast;
+  const toAsciiLower = toAsciiLowerFast;
 
   const cleanRaw = (rawCategory || '').trim();
   const rawTr = toTrLower(cleanRaw);
@@ -1033,15 +1050,21 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   const matTr = toTrLower(cleanMatInput);
   const matAscii = toAsciiLower(cleanMatInput);
 
+  const cacheAndReturn = (result: string): string => {
+    if (normalizeCatMemoCache.size > 20000) normalizeCatMemoCache.clear();
+    normalizeCatMemoCache.set(memoKey, result);
+    return result;
+  };
+
   // 1. Direct exact or alias match if NO material name is given
   if (!matTr && !isGenericCatchAll) {
     for (const cat of CANONICAL_CATEGORIES) {
       if (toAsciiLower(cat.nameTr.trim()) === rawAscii || toTrLower(cat.nameRu.trim()) === rawTr) {
-        return cat.nameTr;
+        return cacheAndReturn(cat.nameTr);
       }
       for (const alias of cat.aliases) {
         if (toAsciiLower(alias.trim()) === rawAscii) {
-          return cat.nameTr;
+          return cacheAndReturn(cat.nameTr);
         }
       }
     }
@@ -1052,13 +1075,17 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   const evalAscii = ` ${matAscii || rawAscii} `;
 
   const has = (kw: string): boolean => {
-    const kTr = toTrLower(kw);
-    const kAscii = toAsciiLower(kw);
-    return evalTr.includes(kTr) || evalAscii.includes(kAscii);
+    let pair = kwAsciiCache.get(kw);
+    if (!pair) {
+      pair = { kTr: toTrLower(kw), kAscii: toAsciiLower(kw) };
+      kwAsciiCache.set(kw, pair);
+    }
+    return evalTr.includes(pair.kTr) || (pair.kAscii !== pair.kTr && evalAscii.includes(pair.kAscii));
   };
 
   const hasRx = (rx: RegExp): boolean => rx.test(evalTr) || rx.test(evalAscii);
 
+  const resultCategory = ((): string => {
   // 2. High-precision context-aware rule-based categorization
 
   // 2.1 Bilgi İşlem & IT (Exclude air freshener/gas/anchor/silicone/faucet cartridges, voltage monitoring relays, and wide-format plotter paper rolls!)
@@ -1629,6 +1656,8 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   }
 
   return 'Sarf Malzeme & Hırdavat';
+  })();
+  return cacheAndReturn(resultCategory);
 }
 
 // Get display name based on language
@@ -1663,6 +1692,66 @@ export function getCategoryColor(canonicalName: string): string {
   }
 }
 
+const TR_TO_RU_TECH_DICT: Array<[RegExp, string]> = [
+  [/\byazı\s*tahtas|\bbeyaz\s*tahta\b|\btahta\s*silgi/i, 'Доска магнитно-маркерная офисная / аксессуары'],
+  [/\bsu\s*terazi|\bterazi\b|\bşerit\s*metre|\bserit\s*metre|\blazer\b|\bnivo\b/i, 'Рулетка измерительная / уровень строительный'],
+  [/\bkombine\s*anahtar|\banahtar\s*kombine|\btork\s*anahtar|\bt\s*anahtar|\ballen\s*anahtar|\bboru\s*anahtar|\blokma\b|\bcırcır\b|\bcircir\b/i, 'Ключ гаечный комбинированный / слесарный инструмент'],
+  [/\bkereste\b|\bçam\b|\btahta\b|\bkalas\b/i, 'Пиломатериал обрезной (брус / доска) ГОСТ 8486'],
+  [/\bosb\b/i, 'Плита ориентированно-стружечная ОСП-3 (OSB-3)'],
+  [/\bbeton\b|\bgrobeton\b/i, 'Бетон товарный БСГ ГОСТ 7473'],
+  [/\bçimento\b|\bcimento\b/i, 'Цемент портландцемент ЦЕМ I 42,5Н (М500)'],
+  [/\bkum\b/i, 'Песок строительный карьерный / мытый'],
+  [/\bmıcır\b|\bmicir\b|\bçakıl\b|\bcakil\b/i, 'Щебень гранитный / гравийный фракционный'],
+  [/\btuğla\b|\btugla\b/i, 'Кирпич строительный полнотелый / пустотелый'],
+  [/\btamir harcı\b|\btamir harci\b|\balçı\b|\balci\b|\bsıva\b|\bsiva\b/i, 'Смесь сухая ремонтная / штукатурная строительная'],
+  [/\byapıştırıcı\b|\byapistirici\b|\bfayans\b|\bseramik\b/i, 'Клей плиточный цементный усиленный'],
+  [/\bastar\b|\bbetonokontakt\b/i, 'Грунтовка строительная глубокого проникновения / Бетоноконтакт'],
+  [/\btiner\b|\bsolvent\b|\bwhite spirit\b/i, 'Растворитель технический (Уайт-спирит / 646)'],
+  [/\bboya\b/i, 'Краска строительная водно-дисперсионная / эмаль'],
+  [/\brulo\b/i, 'Валик малярный строительный'],
+  [/\bspatula\b|\bispula\b/i, 'Шпатель малярный из нержавеющей стали'],
+  [/\bmala\b/i, 'Кельма / гладилка штукатурная'],
+  [/\bsilikon\b|\bmastik\b|\bakrilik\b/i, 'Герметик силиконовый / акриловый строительный'],
+  [/\bköpük\b|\bkopuk\b/i, 'Пена монтажная полиуретановая профессиональная'],
+  [/\bmembran\b|\bbitüm\b|\bbitum\b|\bizolasyon\b|\byalıtım\b|\byalitim\b/i, 'Гидроизоляция рулонная наплавляемая / мембрана'],
+  [/\byangın\s*hortum|\byangin\s*hortum/i, 'Рукав пожарный напорный с головками'],
+  [/\byangın\s*vana|\byangin\s*vana/i, 'Клапан (вентиль) пожарный запорный'],
+  [/\bboru\b|\bppr\b|\bpvc\b|\bkoruge\b|\bpnd\b/i, 'Труба полипропиленовая / ПВХ / ПНД инженерная'],
+  [/\bvana\b|\bvalf\b|\bmusluk\b|\bbatarya\b/i, 'Кран шаровой латунный / запорная арматура'],
+  [/\bdirsek\b|\bmanşon\b|\bmanson\b|\bte\b|\brekor\b|\bnipel\b|\bfitting\b/i, 'Фитинг соединительный (муфта / отвод / тройник)'],
+  [/\bkelepçe\b|\bkelepce\b/i, 'Хомут трубный стальной с резиновым уплотнителем'],
+  [/\bconta\b/i, 'Прокладка уплотнительная сантехническая'],
+  [/\bsigorta\b|\botomat\b|\bşalter\b|\bsalter\b|\bkaçak akım\b|\bkacak akim\b/i, 'Выключатель автоматический модульный / УЗО'],
+  [/\bpano\b|\bkutu\b|\bbuat\b/i, 'Щит распределительный / коробка монтажная'],
+  [/\bpriz\b|\belektrik\s*anahtar|\bfiş\b|\bfis\b|\buzatma\b/i, 'Розетка электрическая / вилка силовая / удлинитель'],
+  [/\blamba\b|\bprojektör\b|\bprojektor\b|\barmatür\b|\barmatur\b|\bled\b|\bampul\b|\bfener\b/i, 'Светильник светодиодный строительный / прожектор LED'],
+  [/\bmatkap\b|\bdelici\b|\bkırıcı\b|\bkirici\b|\btaşlama\b|\btaslama\b|\bspiral\b/i, 'Электроинструмент / оснастка (бур SDS-Plus / сверло / УШМ)'],
+  [/\bdisk\b|\bkesici\s*taş|\bkesici\s*tas|\bkesme\s*taş|\bkesme\s*tas|\bzımpara\b|\bzimpara\b/i, 'Диск отрезной / круг шлифовальный абразивный'],
+  [/\btestere\b|\bbıçak\b|\bbicak\b|\bmisina\b/i, 'Полотно пильное / диск пильный / нож строительный'],
+  [/\bçekiç\b|\bcekic\b|\bkeser\b|\balyans\b|\btornavida\b|\bpense\b|\bkerpeten\b|\banahtar\b/i, 'Инструмент слесарно-монтажный ручной'],
+  [/\bkürek\b|\bkurek\b|\bkazma\b|\bbalyoz\b|\bmanivela\b|\bel arabası\b|\bel arabasi\b/i, 'Инвентарь строительный (лопата / кувалда / тачка строительная)'],
+  [/\bkova\b|\bvaril\b|\bbidon\b|\bleğen\b|\blegen\b/i, 'Емкость / ведро строительное ударопрочное'],
+  [/\bmetre\b|\bşerit\b|\bserit\b/i, 'Рулетка измерительная / уровень строительный'],
+  [/\bdübel\b|\bdubel\b/i, 'Дюбель строительный распорный / фасадный'],
+  [/\bvida\b|\bsamorez\b/i, 'Саморезы строительные оцинкованные'],
+  [/\bçivi\b|\bcivi\b/i, 'Гвозди строительные / монтажные'],
+  [/\bkilit\b|\bmenteşe\b|\bmentese\b|\bkapı\b|\bkapi\b|\bpencere\b|\bkol\b/i, 'Фурнитура дверная / замок навесной / петли стальные'],
+  [/\bhalat\b|\bsapan\b|\bzincir\b|\bkanca\b|\bmapa\b|\bgerdirme\b/i, 'Строп грузоподъемный / канат стальной / такелаж'],
+  [/\biskele\b|\bkalıp\b|\bkalip\b|\btij\b|\bpayanda\b|\bkriko\b|\bkamalı\b|\bbaşlangıç\s*ayağ|\bbaslangic\s*ayag/i, 'Комплектующие опалубки и строительных лесов'],
+  [/\byelek\b|\breflektör\b|\breflektor\b/i, 'Жилет сигнальный светоотражающий ГОСТ'],
+  [/\bayakkabı\b|\bayakkabi\b|\bbot\b|\bçizme\b|\bcizme\b/i, 'Спецобувь защитная рабочая с металлоподноском / сапоги'],
+  [/\bmont\b|\bparka\b|\btulum\b|\bpantolon\b|\byağmurluk\b|\byagmurluk\b|\bkıyafet\b|\bkiyafet\b/i, 'Спецодежда рабочая защитная (костюм / куртка утепленная)'],
+  [/\bgözlük\b|\bgozluk\b|\bmaske\b|\bsiperlik\b|\bkulaklık\b|\bkulaklik\b|\bemniyet kemeri\b/i, 'Средства индивидуальной защиты (СИЗ: очки / респиратор / привязь)'],
+  [/\byangın\b|\byangin\b|\btüp\b|\btup\b/i, 'Огнетушитель порошковый (ОП) / противопожарный инвентарь'],
+  [/\bklavye\b|\bmouse\b|\bfare\b|\bwebcam\b|\bmonitör\b|\bmonitor\b|\blogitech\b/i, 'Компьютерная периферия и оргтехника (клавиатура / мышь)'],
+  [/\btoner\b|\bkartuş\b|\bkartus\b|\byazıcı\b|\byazici\b/i, 'Картридж лазерный / тонер для оргтехники'],
+  [/\bkağıt\b|\bkagit\b|\ba4\b|\ba3\b|\bklasör\b|\bklasor\b|\bkalem\b|\bzımba\b|\bzimba\b|\bnot\b|\bpoşet\b|\bposet\b|\bzarf\b|\bdosya\b/i, 'Канцелярские товары и бумага офисная'],
+  [/\btemizlik\b|\bdeterjan\b|\bsabun\b|\bçamaşır\b|\bcamasir\b|\bpeçete\b|\bpecete\b|\bhavlu\b|\bçöp\b|\bcop\b|\btorba\b|\bsüpürge\b|\bsupurge\b|\bpaspas\b|\bbez\b/i, 'Хозяйственные товары и средства профессиональной уборки'],
+  [/\biçme\s*suyu|\bçay\b|\bcay\b|\bkahve\b|\bşeker\b|\bseker\b|\bbardak\b|\bgıda\b|\bgida\b/i, 'Хозяйственно-бытовое обеспечение офиса и площадки'],
+  [/\bmazot\b|\bdizel\b|\byakıt\b|\byakit\b|\byağ\b|\byag\b|\bhidrolik\b|\bfilltre\b|\bfiltre\b|\bakü\b|\baku\b|\blastik\b|\bcam\s*suyu\b/i, 'ГСМ, дизельное топливо и расходные материалы для спецтехники'],
+  [/\bkonteyner\b|\bkabin\b|\bturnike\b|\bçit\b|\bcit\b|\bbariyer\b|\btabela\b|\bızgara\b|\bizgara\b|\bdolap\b|\bmasa\b|\bşemsiye\b|\bsemsiye\b/i, 'Оборудование стройплощадки, мебель и бытовые модули']
+];
+
 /**
  * Fatura ve Prizma kalemlerinde Türkçe malzeme adının altında her zaman
  * orijinal Rusça karşılığının gösterilmesini sağlayan akıllı yardımcı fonksiyon.
@@ -1670,276 +1759,223 @@ export function getCategoryColor(canonicalName: string): string {
  * yalnızca Türkçe stok kartı adı geldiyse teknik Rusça karşılığını üretir.
  */
 export function ensureRussianOriginalName(materialName?: string, rawOriginalName?: string): string {
-  let orig = (rawOriginalName || '').trim();
-  // Unwrap previous generic ТМЦ fallback so it can be properly resolved to specific Russian technical name
-  const tmcMatch = orig.match(/^Строительно-монтажный материал\s*\/\s*ТМЦ\s*\((.+)\)$/i);
-  if (tmcMatch && tmcMatch[1]) {
-    orig = tmcMatch[1].trim();
-  }
-  const isShortNoteOrDrawingCode = /^(?:\d+\s*(?:шт|м|кг|л|уп|кор|рул|пл|мпа)|кж\s*\d|к\d\s*схем|корпус|стилобат|арт\.?\s*\d|спайка|осина\b)/i.test(orig);
-  const isStaleCableOnWireless = /^Кабель силовой медный/i.test(orig) && /kablosuz|klavye|mouse|fare/i.test(materialName || '');
-  if (orig && /[а-яА-ЯёЁ]{4,}/.test(orig) && !isShortNoteOrDrawingCode && !isStaleCableOnWireless) {
-    return orig;
-  }
-  const src = (materialName || orig || '').trim();
-  if (!src) return '';
-  if (/[а-яА-ЯёЁ]{4,}/.test(src) && !/^(?:кж\s*\d|корпус|стилобат)/i.test(src)) return src;
+  const memoKey = `${materialName || ''}\u0000${rawOriginalName || ''}`;
+  const cachedRu = ensureRuMemoCache.get(memoKey);
+  if (cachedRu !== undefined) return cachedRu;
 
-  const lower = src
-    .replace(/İ/g, 'i')
-    .replace(/I/g, 'ı')
-    .toLowerCase();
+  const res = ((): string => {
+    let orig = (rawOriginalName || '').trim();
+    // Unwrap previous generic ТМЦ fallback so it can be properly resolved to specific Russian technical name
+    const tmcMatch = orig.match(/^Строительно-монтажный материал\s*\/\s*ТМЦ\s*\((.+)\)$/i);
+    if (tmcMatch && tmcMatch[1]) {
+      orig = tmcMatch[1].trim();
+    }
+    const isShortNoteOrDrawingCode = /^(?:\d+\s*(?:шт|м|кг|л|уп|кор|рул|пл|мпа)|кж\s*\d|к\d\s*схем|корпус|стилобат|арт\.?\s*\d|спайка|осина\b)/i.test(orig);
+    const isStaleCableOnWireless = /^Кабель силовой медный/i.test(orig) && /kablosuz|klavye|mouse|fare/i.test(materialName || '');
+    if (orig && /[а-яА-ЯёЁ]{4,}/.test(orig) && !isShortNoteOrDrawingCode && !isStaleCableOnWireless) {
+      return orig;
+    }
+    const src = (materialName || orig || '').trim();
+    if (!src) return '';
+    if (/[а-яА-ЯёЁ]{4,}/.test(src) && !/^(?:кж\s*\d|корпус|стилобат)/i.test(src)) return src;
 
-  // Ölçü ve teknik değerleri koru
-  const dims = src.match(/(?:Ø\s*\d+(?:[.,]\d+)?|\b\d+(?:[.,]\d+)?\s*(?:x|х|\*|×)\s*\d+(?:[.,]\d+)?(?:\s*(?:x|х|\*|×)\s*\d+(?:[.,]\d+)?)?|\b\d+(?:[.,]\d+)?\s*(?:mm|cm|m|kg|lt|l|m2|m²|m3|m³|ton|adet|w|kw|v|a)\b)/gi);
-  const dimSuffix = dims && dims.length > 0 ? ` (${Array.from(new Set(dims.map(d => d.trim()))).join(', ')})` : '';
+    const lower = src
+      .replace(/İ/g, 'i')
+      .replace(/I/g, 'ı')
+      .toLowerCase();
 
-  if (lower.includes('inşaat demiri') || lower.includes('insaat demiri') || lower.includes('nervürlü demir') || lower.includes('demir nervürlü') || lower.includes('demir nervurlu')) {
-    return `Арматура рифленая А500С ГОСТ 34028${dimSuffix}`;
-  }
-  if (lower.includes('çelik hasır') || lower.includes('celik hasir') || lower.includes('hasır çelik')) {
-    return `Сетка сварная арматурная Вр-1${dimSuffix}`;
-  }
-  if ((lower.includes('tavlı') && lower.includes('tel')) || lower.includes('bağ teli') || lower.includes('bag teli')) {
-    return `Проволока стальная вязальная ТОЧ${dimSuffix}`;
-  }
-  if (lower.includes('donatı kafesi') || lower.includes('donati kafesi') || lower.includes('armatür karkas')) {
-    return `Каркас арматурный сварной (${src})`;
-  }
-  if (lower.includes('karkas metal') || lower.includes('metal karkas')) {
-    return `Каркас металлический (${src})`;
-  }
-  if (lower.includes('köşebent') || lower.includes('kosebent')) {
-    return `Уголок стальной равнополочный ГОСТ 8509${dimSuffix}`;
-  }
-  if (lower.includes('kutu profil') || lower.includes('profil kutu') || lower.includes('profil boru') || lower.includes('profil demir')) {
-    return `Труба стальная профильная ГОСТ 8639/8645${dimSuffix}`;
-  }
-  if ((lower.includes('dikişli') && lower.includes('boru')) || (lower.includes('dikisli') && lower.includes('boru')) || lower.includes('boru demir')) {
-    return `Труба стальная электросварная ГОСТ 10704${dimSuffix}`;
-  }
-  if (lower.includes('gazbeton') || lower.includes('ytong') || lower.includes('bonolit')) {
-    if (lower.includes('yapıştırıcı') || lower.includes('yapistirici') || lower.includes('harç') || lower.includes('harc') || lower.includes('клей')) {
-      return `Клей для газобетона (${src})`;
-    }
-    if (lower.includes('rende') || lower.includes('рубанок') || lower.includes('testere') || lower.includes('mala') || lower.includes('dübel') || lower.includes('dubel')) {
-      return `Инструмент / крепеж для газобетона (${src})`;
-    }
-    const dMatch = src.match(/\b[dд]\s*(300|350|400|500|600)\b/i);
-    const dGrade = dMatch ? `D${dMatch[1]}` : 'D500';
-    return `Блок газобетонный стеновой ${dGrade}${dimSuffix}`;
-  }
-  if (lower.includes('kontrplak') || lower.includes('plywood') || lower.includes('pleyvud')) {
-    return `Фанера ламинированная ФОФ для опалубки${dimSuffix}`;
-  }
-  if (lower.includes('taşyünü') || lower.includes('tasyunu') || lower.includes('kaya yünü')) {
-    return `Утеплитель каменная вата (базальтовая)${dimSuffix}`;
-  }
-  if (lower.includes('xps') || lower.includes('penoplex') || lower.includes('köpük levha')) {
-    return `Экструдированный пенополистирол (ЭППС / Пеноплэкс)${dimSuffix}`;
-  }
-  if (lower.includes('alçıpan') || lower.includes('alcipan')) {
-    if (lower.includes('vida')) return `Саморезы по гипсокартону фосфатированные${dimSuffix}`;
-    if (lower.includes('testere') || lower.includes('bıçak') || lower.includes('bicak')) return `Ножовка по гипсокартону (${src})`;
-    if (lower.includes('agraf') || lower.includes('profil')) return `Профиль / подвес для гипсокартона (${src})`;
-    return `Гипсокартонный лист (ГКЛ / ГКЛВ)${dimSuffix}`;
-  }
-  if (lower.includes('kompresör') || lower.includes('kompresor')) {
-    return `Компрессор воздушный электрический (${src})`;
-  }
-  if (lower.includes('boya') && (lower.includes('pf-115') || lower.includes('emal') || lower.includes('yağlı') || lower.includes('yagli'))) {
-    const colorRu = lower.includes('beyaz') ? 'белая' : lower.includes('sarı') || lower.includes('sari') ? 'желтая' : lower.includes('gri') ? 'серая' : lower.includes('siyah') ? 'черная' : lower.includes('yeşil') || lower.includes('yesil') ? 'зеленая' : lower.includes('kırmızı') || lower.includes('kirmizi') ? 'красная' : lower.includes('mavi') ? 'синяя' : '';
-    return `Эмаль алкидная ПФ-115 ${colorRu}${dimSuffix}`.replace(/\s+/g, ' ').trim();
-  }
-  if (lower.includes('rulo') && (lower.includes('boya') || lower.includes('parmak') || lower.includes('kadife'))) {
-    return `Валик малярный с бюгелем${dimSuffix}`;
-  }
-  if (lower.includes('fırça') || lower.includes('firca') || lower.includes('fırca') || lower.includes('fircasi') || lower.includes('fırçası')) {
-    if (lower.includes('tuvalet') || lower.includes('klozet') || lower.includes('wc')) {
-      return `Ершик для унитаза с подставкой`;
-    }
-    if (lower.includes('tel')) {
-      return `Щетка металлическая зачистная (корщетка)${dimSuffix}`;
-    }
-    if (lower.includes('sapı') || lower.includes('sapi')) {
-      return `Черенок деревянный для щетки с резьбой${dimSuffix}`;
-    }
-    if (lower.includes('temizlik') || lower.includes('yer') || lower.includes('süpürge') || lower.includes('supurge')) {
-      return `Щетка для уборки помещений / подметальная${dimSuffix}`;
-    }
-    if (lower.includes('radyatör') || lower.includes('radyator')) {
-      return `Кисть малярная радиаторная${dimSuffix}`;
-    }
-    return `Кисть малярная плоская${dimSuffix}`;
-  }
-  if (lower.includes('streç') || lower.includes('strec') || lower.includes('stretch')) {
-    return `Пленка стрейч упаковочная 500 мм${dimSuffix}`;
-  }
-  if (lower.includes('naylon') || lower.includes('polietilen')) {
-    if (lower.includes('500 mm') && lower.includes('23')) {
-      return `Пленка стрейч упаковочная 500 мм 23 мкм`;
-    }
-    return `Пленка полиэтиленовая техническая ГОСТ 10354${dimSuffix}`;
-  }
-  if (lower.includes('branda') || lower.includes('tarpaulin') || lower.includes('tente')) {
-    return `Тент строительный защитный (Тарпаулин / ПВХ)${dimSuffix}`;
-  }
-  if (lower.includes('elektrod') || lower.includes('elektrot')) {
-    return `Электроды сварочные покрытые${dimSuffix}`;
-  }
-  if (lower.includes('propan') && (lower.includes('tüp') || lower.includes('tup'))) {
-    return `Пропан технический в баллонах 50 л`;
-  }
-  if (lower.includes('kesici taş') || lower.includes('kesici tas') || lower.includes('kesme tasi') || lower.includes('kesme taşı') || lower.includes('kesme diski')) {
-    return `Круг (диск) отрезной по металлу${dimSuffix}`;
-  }
-  if (lower.includes('köpük') || lower.includes('kopuk')) {
-    if (lower.includes('temizleyici')) {
-      return `Очиститель монтажной пены профессиональный (${src})`;
-    }
-    if (lower.includes('tabanca') && !lower.includes('poliüretan')) {
-      return `Пистолет для монтажной пены профессиональный (${src})`;
-    }
-    if (lower.includes('poliüretan') || lower.includes('montaj')) {
-      return `Пена монтажная профессиональная под пистолет${dimSuffix}`;
-    }
-  }
-  if (lower.includes('koli bandı') || lower.includes('bant koli')) {
-    if (lower.includes('dispensa') || lower.includes('aparat') || lower.includes('makine')) {
-      return `Диспенсер для упаковочного скотча (${src})`;
-    }
-    return `Скотч упаковочный клейкий${dimSuffix}`;
-  }
-  if (lower.includes('maskeleme bandı') || lower.includes('kağıt bant')) {
-    return `Лента малярная креппированная (бумажная)${dimSuffix}`;
-  }
-  if (lower.includes('eldiven')) {
-    return `Перчатки рабочие защитные${dimSuffix}`;
-  }
-  if (lower.includes('baret')) {
-    return `Каска строительная защитная`;
-  }
-  if (lower.includes('çivi') || lower.includes('civi') || lower.includes('cıvı')) {
-    if (lower.includes('kroşe') || lower.includes('krose') || lower.includes('tabanca')) {
-      return `Клипса (держатель) для монтажного пистолета${dimSuffix}`;
-    }
-    return `Гвозди строительные ГОСТ 4028${dimSuffix}`;
-  }
-  if (lower.includes('vida') || lower.includes('samorez')) {
-    return `Саморезы строительные оцинкованные / фосфатированные${dimSuffix}`;
-  }
-  if (lower.includes('cıvata') || lower.includes('civata') || lower.includes('bolt') || lower.includes('aybolt')) {
-    if (lower.includes('aybolt')) return `Рым-болт оцинкованный DIN 580 (${src})`;
-    return `Болт оцинкованный с шестигранной головкой DIN 933${dimSuffix}`;
-  }
-  if (lower.includes('somun')) {
-    return `Гайка шестигранная оцинкованная DIN 934${dimSuffix}`;
-  }
-  if (lower.includes('pul') || lower.includes('rondela')) {
-    return `Шайба плоская / пружинная оцинкованная DIN 125/127 (${src})`;
-  }
-  if (lower.includes('ankraj') || lower.includes('saplama') || lower.includes('tij')) {
-    return `Анкерный болт / шпилька резьбовая DIN 975${dimSuffix}`;
-  }
-  if (lower.includes('kablo bağı') || lower.includes('kablo bagi') || lower.includes('klips')) {
-    return `Хомут кабельный нейлоновый (стяжка)${dimSuffix}`;
-  }
-  if (lower.includes('kablo papucu') || lower.includes('kablo ek borusu')) {
-    return `Наконечник / гильза кабельная соединительная (${src})`;
-  }
-  if (lower.includes('kablo') && !lower.includes('kablosuz')) {
-    return `Кабель силовой медный ВВГнг(А)-LS${dimSuffix}`;
-  }
-  if (lower.includes('kırıcı') || lower.includes('kirici') || lower.includes('kırıcı uç') || lower.includes('uc kirici') || lower.includes('kırıcı uc') || lower.includes('keski')) {
-    return `Зубило плоское / пика по бетону SDS-Plus / SDS-Max (${src})`;
-  }
-  if (lower.includes('maket bıçağı') || lower.includes('maket bicagi') || lower.includes('falçata') || lower.includes('falcata')) {
-    return `Нож строительный сегментный 18 мм / лезвия (${src})`;
-  }
-  if (lower.includes('master isimak') || lower.includes('master ısımak')) {
-    return `Запчасть для тепловой пушки Master (${src})`;
-  }
-  if (lower.includes('panc') || lower.includes('panç')) {
-    return `Коронка биметаллическая по металлу HSS (${src})`;
-  }
-  if (lower.includes('japon arabasi') || lower.includes('japon arabası') || lower.includes('el arabasi') || lower.includes('el arabası')) {
-    return `Тачка строительная усиленная / бадья (${src})`;
-  }
-  if (lower.includes('klor')) {
-    return `Известь хлорная / средство дезинфицирующее (${src})`;
-  }
-  if (lower.includes('cam yünü') || lower.includes('cam yunu') || lower.includes('ursa') || lower.includes('taşyünü') || lower.includes('tasyunu') || lower.includes('taş yünü') || lower.includes('tas yunu')) {
-    return `Утеплитель теплоизоляционный минераловатный${dimSuffix} [${src}]`;
-  }
+    // Ölçü ve teknik değerleri koru
+    const dims = src.match(/(?:Ø\s*\d+(?:[.,]\d+)?|\b\d+(?:[.,]\d+)?\s*(?:x|х|\*|×)\s*\d+(?:[.,]\d+)?(?:\s*(?:x|х|\*|×)\s*\d+(?:[.,]\d+)?)?|\b\d+(?:[.,]\d+)?\s*(?:mm|cm|m|kg|lt|l|m2|m²|m3|m³|ton|adet|w|kw|v|a)\b)/gi);
+    const dimSuffix = dims && dims.length > 0 ? ` (${Array.from(new Set(dims.map(d => d.trim()))).join(', ')})` : '';
 
-  // Kapsamlı Türkçe -> Rusça Teknik Sözlük Dönüşümü (Prizma Türkçe Stok Kartları İçin)
-  const trToRuDict: Array<[RegExp, string]> = [
-    [/\byazı\s*tahtas|\bbeyaz\s*tahta\b|\btahta\s*silgi/gi, 'Доска магнитно-маркерная офисная / аксессуары'],
-    [/\bsu\s*terazi|\bterazi\b|\bşerit\s*metre|\bserit\s*metre|\blazer\b|\bnivo\b/gi, 'Рулетка измерительная / уровень строительный'],
-    [/\bkombine\s*anahtar|\banahtar\s*kombine|\btork\s*anahtar|\bt\s*anahtar|\ballen\s*anahtar|\bboru\s*anahtar|\blokma\b|\bcırcır\b|\bcircir\b/gi, 'Ключ гаечный комбинированный / слесарный инструмент'],
-    [/\bkereste\b|\bçam\b|\btahta\b|\bkalas\b/gi, 'Пиломатериал обрезной (брус / доска) ГОСТ 8486'],
-    [/\bosb\b/gi, 'Плита ориентированно-стружечная ОСП-3 (OSB-3)'],
-    [/\bbeton\b|\bgrobeton\b/gi, 'Бетон товарный БСГ ГОСТ 7473'],
-    [/\bçimento\b|\bcimento\b/gi, 'Цемент портландцемент ЦЕМ I 42,5Н (М500)'],
-    [/\bkum\b/gi, 'Песок строительный карьерный / мытый'],
-    [/\bmıcır\b|\bmicir\b|\bçakıl\b|\bcakil\b/gi, 'Щебень гранитный / гравийный фракционный'],
-    [/\btuğla\b|\btugla\b/gi, 'Кирпич строительный полнотелый / пустотелый'],
-    [/\btamir harcı\b|\btamir harci\b|\balçı\b|\balci\b|\bsıva\b|\bsiva\b/gi, 'Смесь сухая ремонтная / штукатурная строительная'],
-    [/\byapıştırıcı\b|\byapistirici\b|\bfayans\b|\bseramik\b/gi, 'Клей плиточный цементный усиленный'],
-    [/\bastar\b|\bbetonokontakt\b/gi, 'Грунтовка строительная глубокого проникновения / Бетоноконтакт'],
-    [/\btiner\b|\bsolvent\b|\bwhite spirit\b/gi, 'Растворитель технический (Уайт-спирит / 646)'],
-    [/\bboya\b/gi, 'Краска строительная водно-дисперсионная / эмаль'],
-    [/\brulo\b/gi, 'Валик малярный строительный'],
-    [/\bspatula\b|\bispula\b/gi, 'Шпатель малярный из нержавеющей стали'],
-    [/\bmala\b/gi, 'Кельма / гладилка штукатурная'],
-    [/\bsilikon\b|\bmastik\b|\bakrilik\b/gi, 'Герметик силиконовый / акриловый строительный'],
-    [/\bköpük\b|\bkopuk\b/gi, 'Пена монтажная полиуретановая профессиональная'],
-    [/\bmembran\b|\bbitüm\b|\bbitum\b|\bizolasyon\b|\byalıtım\b|\byalitim\b/gi, 'Гидроизоляция рулонная наплавляемая / мембрана'],
-    [/\byangın\s*hortum|\byangin\s*hortum/gi, 'Рукав пожарный напорный с головками'],
-    [/\byangın\s*vana|\byangin\s*vana/gi, 'Клапан (вентиль) пожарный запорный'],
-    [/\bboru\b|\bppr\b|\bpvc\b|\bkoruge\b|\bpnd\b/gi, 'Труба полипропиленовая / ПВХ / ПНД инженерная'],
-    [/\bvana\b|\bvalf\b|\bmusluk\b|\bbatarya\b/gi, 'Кран шаровой латунный / запорная арматура'],
-    [/\bdirsek\b|\bmanşon\b|\bmanson\b|\bte\b|\brekor\b|\bnipel\b|\bfitting\b/gi, 'Фитинг соединительный (муфта / отвод / тройник)'],
-    [/\bkelepçe\b|\bkelepce\b/gi, 'Хомут трубный стальной с резиновым уплотнителем'],
-    [/\bconta\b/gi, 'Прокладка уплотнительная сантехническая'],
-    [/\bsigorta\b|\botomat\b|\bşalter\b|\bsalter\b|\bkaçak akım\b|\bkacak akim\b/gi, 'Выключатель автоматический модульный / УЗО'],
-    [/\bpano\b|\bkutu\b|\bbuat\b/gi, 'Щит распределительный / коробка монтажная'],
-    [/\bpriz\b|\belektrik\s*anahtar|\bfiş\b|\bfis\b|\buzatma\b/gi, 'Розетка электрическая / вилка силовая / удлинитель'],
-    [/\blamba\b|\bprojektör\b|\bprojektor\b|\barmatür\b|\barmatur\b|\bled\b|\bampul\b|\bfener\b/gi, 'Светильник светодиодный строительный / прожектор LED'],
-    [/\bmatkap\b|\bdelici\b|\bkırıcı\b|\bkirici\b|\btaşlama\b|\btaslama\b|\bspiral\b/gi, 'Электроинструмент / оснастка (бур SDS-Plus / сверло / УШМ)'],
-    [/\bdisk\b|\bkesici\s*taş|\bkesici\s*tas|\bkesme\s*taş|\bkesme\s*tas|\bzımpara\b|\bzimpara\b/gi, 'Диск отрезной / круг шлифовальный абразивный'],
-    [/\btestere\b|\bbıçak\b|\bbicak\b|\bmisina\b/gi, 'Полотно пильное / диск пильный / нож строительный'],
-    [/\bçekiç\b|\bcekic\b|\bkeser\b|\balyans\b|\btornavida\b|\bpense\b|\bkerpeten\b|\banahtar\b/gi, 'Инструмент слесарно-монтажный ручной'],
-    [/\bkürek\b|\bkurek\b|\bkazma\b|\bbalyoz\b|\bmanivela\b|\bel arabası\b|\bel arabasi\b/gi, 'Инвентарь строительный (лопата / кувалда / тачка строительная)'],
-    [/\bkova\b|\bvaril\b|\bbidon\b|\bleğen\b|\blegen\b/gi, 'Емкость / ведро строительное ударопрочное'],
-    [/\bmetre\b|\bşerit\b|\bserit\b/gi, 'Рулетка измерительная / уровень строительный'],
-    [/\bdübel\b|\bdubel\b/gi, 'Дюбель строительный распорный / фасадный'],
-    [/\bvida\b|\bsamorez\b/gi, 'Саморезы строительные оцинкованные'],
-    [/\bçivi\b|\bcivi\b/gi, 'Гвозди строительные / монтажные'],
-    [/\bkilit\b|\bmenteşe\b|\bmentese\b|\bkapı\b|\bkapi\b|\bpencere\b|\bkol\b/gi, 'Фурнитура дверная / замок навесной / петли стальные'],
-    [/\bhalat\b|\bsapan\b|\bzincir\b|\bkanca\b|\bmapa\b|\bgerdirme\b/gi, 'Строп грузоподъемный / канат стальной / такелаж'],
-    [/\biskele\b|\bkalıp\b|\bkalip\b|\btij\b|\bpayanda\b|\bkriko\b|\bkamalı\b|\bbaşlangıç\s*ayağ|\bbaslangic\s*ayag/gi, 'Комплектующие опалубки и строительных лесов'],
-    [/\byelek\b|\breflektör\b|\breflektor\b/gi, 'Жилет сигнальный светоотражающий ГОСТ'],
-    [/\bayakkabı\b|\bayakkabi\b|\bbot\b|\bçizme\b|\bcizme\b/gi, 'Спецобувь защитная рабочая с металлоподноском / сапоги'],
-    [/\bmont\b|\bparka\b|\btulum\b|\bpantolon\b|\byağmurluk\b|\byagmurluk\b|\bkıyafet\b|\bkiyafet\b/gi, 'Спецодежда рабочая защитная (костюм / куртка утепленная)'],
-    [/\bgözlük\b|\bgozluk\b|\bmaske\b|\bsiperlik\b|\bkulaklık\b|\bkulaklik\b|\bemniyet kemeri\b/gi, 'Средства индивидуальной защиты (СИЗ: очки / респиратор / привязь)'],
-    [/\byangın\b|\byangin\b|\btüp\b|\btup\b/gi, 'Огнетушитель порошковый (ОП) / противопожарный инвентарь'],
-    [/\bklavye\b|\bmouse\b|\bfare\b|\bwebcam\b|\bmonitör\b|\bmonitor\b|\blogitech\b/gi, 'Компьютерная периферия и оргтехника (клавиатура / мышь)'],
-    [/\btoner\b|\bkartuş\b|\bkartus\b|\byazıcı\b|\byazici\b/gi, 'Картридж лазерный / тонер для оргтехники'],
-    [/\bkağıt\b|\bkagit\b|\ba4\b|\ba3\b|\bklasör\b|\bklasor\b|\bkalem\b|\bzımba\b|\bzimba\b|\bnot\b|\bpoşet\b|\bposet\b|\bzarf\b|\bdosya\b/gi, 'Канцелярские товары и бумага офисная'],
-    [/\btemizlik\b|\bdeterjan\b|\bsabun\b|\bçamaşır\b|\bcamasir\b|\bpeçete\b|\bpecete\b|\bhavlu\b|\bçöp\b|\bcop\b|\btorba\b|\bsüpürge\b|\bsupurge\b|\bpaspas\b|\bbez\b/gi, 'Хозяйственные товары и средства профессиональной уборки'],
-    [/\biçme\s*suyu|\bçay\b|\bcay\b|\bkahve\b|\bşeker\b|\bseker\b|\bbardak\b|\bgıda\b|\bgida\b/gi, 'Хозяйственно-бытовое обеспечение офиса и площадки'],
-    [/\bmazot\b|\bdizel\b|\byakıt\b|\byakit\b|\byağ\b|\byag\b|\bhidrolik\b|\bfilltre\b|\bfiltre\b|\bakü\b|\baku\b|\blastik\b|\bcam\s*suyu\b/gi, 'ГСМ, дизельное топливо и расходные материалы для спецтехники'],
-    [/\bkonteyner\b|\bkabin\b|\bturnike\b|\bçit\b|\bcit\b|\bbariyer\b|\btabela\b|\bızgara\b|\bizgara\b|\bdolap\b|\bmasa\b|\bşemsiye\b|\bsemsiye\b/gi, 'Оборудование стройплощадки, мебель и бытовые модули']
-  ];
-
-  for (const [regex, ruDesc] of trToRuDict) {
-    if (regex.test(lower)) {
-      return `${ruDesc}${dimSuffix} [${src}]`;
+    if (lower.includes('inşaat demiri') || lower.includes('insaat demiri') || lower.includes('nervürlü demir') || lower.includes('demir nervürlü') || lower.includes('demir nervurlu')) {
+      return `Арматура рифленая А500С ГОСТ 34028${dimSuffix}`;
     }
-  }
+    if (lower.includes('çelik hasır') || lower.includes('celik hasir') || lower.includes('hasır çelik')) {
+      return `Сетка сварная арматурная Вр-1${dimSuffix}`;
+    }
+    if ((lower.includes('tavlı') && lower.includes('tel')) || lower.includes('bağ teli') || lower.includes('bag teli')) {
+      return `Проволока стальная вязальная ТОЧ${dimSuffix}`;
+    }
+    if (lower.includes('donatı kafesi') || lower.includes('donati kafesi') || lower.includes('armatür karkas')) {
+      return `Каркас арматурный сварной (${src})`;
+    }
+    if (lower.includes('karkas metal') || lower.includes('metal karkas')) {
+      return `Каркас металлический (${src})`;
+    }
+    if (lower.includes('köşebent') || lower.includes('kosebent')) {
+      return `Уголок стальной равнополочный ГОСТ 8509${dimSuffix}`;
+    }
+    if (lower.includes('kutu profil') || lower.includes('profil kutu') || lower.includes('profil boru') || lower.includes('profil demir')) {
+      return `Труба стальная профильная ГОСТ 8639/8645${dimSuffix}`;
+    }
+    if ((lower.includes('dikişli') && lower.includes('boru')) || (lower.includes('dikisli') && lower.includes('boru')) || lower.includes('boru demir')) {
+      return `Труба стальная электросварная ГОСТ 10704${dimSuffix}`;
+    }
+    if (lower.includes('gazbeton') || lower.includes('ytong') || lower.includes('bonolit')) {
+      if (lower.includes('yapıştırıcı') || lower.includes('yapistirici') || lower.includes('harç') || lower.includes('harc') || lower.includes('клей')) {
+        return `Клей для газобетона (${src})`;
+      }
+      if (lower.includes('rende') || lower.includes('рубанок') || lower.includes('testere') || lower.includes('mala') || lower.includes('dübel') || lower.includes('dubel')) {
+        return `Инструмент / крепеж для газобетона (${src})`;
+      }
+      const dMatch = src.match(/\b[dд]\s*(300|350|400|500|600)\b/i);
+      const dGrade = dMatch ? `D${dMatch[1]}` : 'D500';
+      return `Блок газобетонный стеновой ${dGrade}${dimSuffix}`;
+    }
+    if (lower.includes('kontrplak') || lower.includes('plywood') || lower.includes('pleyvud')) {
+      return `Фанера ламинированная ФОФ для опалубки${dimSuffix}`;
+    }
+    if (lower.includes('taşyünü') || lower.includes('tasyunu') || lower.includes('kaya yünü')) {
+      return `Утеплитель каменная вата (базальтовая)${dimSuffix}`;
+    }
+    if (lower.includes('xps') || lower.includes('penoplex') || lower.includes('köpük levha')) {
+      return `Экструдированный пенополистирол (ЭППС / Пеноплэкс)${dimSuffix}`;
+    }
+    if (lower.includes('alçıpan') || lower.includes('alcipan')) {
+      if (lower.includes('vida')) return `Саморезы по гипсокартону фосфатированные${dimSuffix}`;
+      if (lower.includes('testere') || lower.includes('bıçak') || lower.includes('bicak')) return `Ножовка по гипсокартону (${src})`;
+      if (lower.includes('agraf') || lower.includes('profil')) return `Профиль / подвес для гипсокартона (${src})`;
+      return `Гипсокартонный лист (ГКЛ / ГКЛВ)${dimSuffix}`;
+    }
+    if (lower.includes('kompresör') || lower.includes('kompresor')) {
+      return `Компрессор воздушный электрический (${src})`;
+    }
+    if (lower.includes('boya') && (lower.includes('pf-115') || lower.includes('emal') || lower.includes('yağlı') || lower.includes('yagli'))) {
+      const colorRu = lower.includes('beyaz') ? 'белая' : lower.includes('sarı') || lower.includes('sari') ? 'желтая' : lower.includes('gri') ? 'серая' : lower.includes('siyah') ? 'черная' : lower.includes('yeşil') || lower.includes('yesil') ? 'зеленая' : lower.includes('kırmızı') || lower.includes('kirmizi') ? 'красная' : lower.includes('mavi') ? 'синяя' : '';
+      return `Эмаль алкидная ПФ-115 ${colorRu}${dimSuffix}`.replace(/\s+/g, ' ').trim();
+    }
+    if (lower.includes('rulo') && (lower.includes('boya') || lower.includes('parmak') || lower.includes('kadife'))) {
+      return `Валик малярный с бюгелем${dimSuffix}`;
+    }
+    if (lower.includes('fırça') || lower.includes('firca') || lower.includes('fırca') || lower.includes('fircasi') || lower.includes('fırçası')) {
+      if (lower.includes('tuvalet') || lower.includes('klozet') || lower.includes('wc')) {
+        return `Ершик для унитаза с подставкой`;
+      }
+      if (lower.includes('tel')) {
+        return `Щетка металлическая зачистная (корщетка)${dimSuffix}`;
+      }
+      if (lower.includes('sapı') || lower.includes('sapi')) {
+        return `Черенок деревянный для щетки с резьбой${dimSuffix}`;
+      }
+      if (lower.includes('temizlik') || lower.includes('yer') || lower.includes('süpürge') || lower.includes('supurge')) {
+        return `Щетка для уборки помещений / подметальная${dimSuffix}`;
+      }
+      if (lower.includes('radyatör') || lower.includes('radyator')) {
+        return `Кисть малярная радиаторная${dimSuffix}`;
+      }
+      return `Кисть малярная плоская${dimSuffix}`;
+    }
+    if (lower.includes('streç') || lower.includes('strec') || lower.includes('stretch')) {
+      return `Пленка стрейч упаковочная 500 мм${dimSuffix}`;
+    }
+    if (lower.includes('naylon') || lower.includes('polietilen')) {
+      if (lower.includes('500 mm') && lower.includes('23')) {
+        return `Пленка стрейч упаковочная 500 мм 23 мкм`;
+      }
+      return `Пленка полиэтиленовая техническая ГОСТ 10354${dimSuffix}`;
+    }
+    if (lower.includes('branda') || lower.includes('tarpaulin') || lower.includes('tente')) {
+      return `Тент строительный защитный (Тарпаулин / ПВХ)${dimSuffix}`;
+    }
+    if (lower.includes('elektrod') || lower.includes('elektrot')) {
+      return `Электроды сварочные покрытые${dimSuffix}`;
+    }
+    if (lower.includes('propan') && (lower.includes('tüp') || lower.includes('tup'))) {
+      return `Пропан технический в баллонах 50 л`;
+    }
+    if (lower.includes('kesici taş') || lower.includes('kesici tas') || lower.includes('kesme tasi') || lower.includes('kesme taşı') || lower.includes('kesme diski')) {
+      return `Круг (диск) отрезной по металлу${dimSuffix}`;
+    }
+    if (lower.includes('köpük') || lower.includes('kopuk')) {
+      if (lower.includes('temizleyici')) {
+        return `Очиститель монтажной пены профессиональный (${src})`;
+      }
+      if (lower.includes('tabanca') && !lower.includes('poliüretan')) {
+        return `Пистолет для монтажной пены профессиональный (${src})`;
+      }
+      if (lower.includes('poliüretan') || lower.includes('montaj')) {
+        return `Пена монтажная профессиональная под пистолет${dimSuffix}`;
+      }
+    }
+    if (lower.includes('koli bandı') || lower.includes('bant koli')) {
+      if (lower.includes('dispensa') || lower.includes('aparat') || lower.includes('makine')) {
+        return `Диспенсер для упаковочного скотча (${src})`;
+      }
+      return `Скотч упаковочный клейкий${dimSuffix}`;
+    }
+    if (lower.includes('maskeleme bandı') || lower.includes('kağıt bant')) {
+      return `Лента малярная креппированная (бумажная)${dimSuffix}`;
+    }
+    if (lower.includes('eldiven')) {
+      return `Перчатки рабочие защитные${dimSuffix}`;
+    }
+    if (lower.includes('baret')) {
+      return `Каска строительная защитная`;
+    }
+    if (lower.includes('çivi') || lower.includes('civi') || lower.includes('cıvı')) {
+      if (lower.includes('kroşe') || lower.includes('krose') || lower.includes('tabanca')) {
+        return `Клипса (держатель) для монтажного пистолета${dimSuffix}`;
+      }
+      return `Гвозди строительные ГОСТ 4028${dimSuffix}`;
+    }
+    if (lower.includes('vida') || lower.includes('samorez')) {
+      return `Саморезы строительные оцинкованные / фосфатированные${dimSuffix}`;
+    }
+    if (lower.includes('cıvata') || lower.includes('civata') || lower.includes('bolt') || lower.includes('aybolt')) {
+      if (lower.includes('aybolt')) return `Рым-болт оцинкованный DIN 580 (${src})`;
+      return `Болт оцинкованный с шестигранной головкой DIN 933${dimSuffix}`;
+    }
+    if (lower.includes('somun')) {
+      return `Гайка шестигранная оцинкованная DIN 934${dimSuffix}`;
+    }
+    if (lower.includes('pul') || lower.includes('rondela')) {
+      return `Шайба плоская / пружинная оцинкованная DIN 125/127 (${src})`;
+    }
+    if (lower.includes('ankraj') || lower.includes('saplama') || lower.includes('tij')) {
+      return `Анкерный болт / шпилька резьбовая DIN 975${dimSuffix}`;
+    }
+    if (lower.includes('kablo bağı') || lower.includes('kablo bagi') || lower.includes('klips')) {
+      return `Хомут кабельный нейлоновый (стяжка)${dimSuffix}`;
+    }
+    if (lower.includes('kablo papucu') || lower.includes('kablo ek borusu')) {
+      return `Наконечник / гильза кабельная соединительная (${src})`;
+    }
+    if (lower.includes('kablo') && !lower.includes('kablosuz')) {
+      return `Кабель силовой медный ВВГнг(А)-LS${dimSuffix}`;
+    }
+    if (lower.includes('kırıcı') || lower.includes('kirici') || lower.includes('kırıcı uç') || lower.includes('uc kirici') || lower.includes('kırıcı uc') || lower.includes('keski')) {
+      return `Зубило плоское / пика по бетону SDS-Plus / SDS-Max (${src})`;
+    }
+    if (lower.includes('maket bıçağı') || lower.includes('maket bicagi') || lower.includes('falçata') || lower.includes('falcata')) {
+      return `Нож строительный сегментный 18 мм / лезвия (${src})`;
+    }
+    if (lower.includes('master isimak') || lower.includes('master ısımak')) {
+      return `Запчасть для тепловой пушки Master (${src})`;
+    }
+    if (lower.includes('panc') || lower.includes('panç')) {
+      return `Коронка биметаллическая по металлу HSS (${src})`;
+    }
+    if (lower.includes('japon arabasi') || lower.includes('japon arabası') || lower.includes('el arabasi') || lower.includes('el arabası')) {
+      return `Тачка строительная усиленная / бадья (${src})`;
+    }
+    if (lower.includes('klor')) {
+      return `Известь хлорная / средство дезинфицирующее (${src})`;
+    }
+    if (lower.includes('cam yünü') || lower.includes('cam yunu') || lower.includes('ursa') || lower.includes('taşyünü') || lower.includes('tasyunu') || lower.includes('taş yünü') || lower.includes('tas yunu')) {
+      return `Утеплитель теплоизоляционный минераловатный${dimSuffix} [${src}]`;
+    }
 
-  return `Строительно-монтажный материал / ТМЦ (${src})`;
+    for (const [regex, ruDesc] of TR_TO_RU_TECH_DICT) {
+      if (regex.test(lower)) {
+        return `${ruDesc}${dimSuffix} [${src}]`;
+      }
+    }
+
+    return `Строительно-монтажный материал / ТМЦ (${src})`;
+  })();
+
+  if (ensureRuMemoCache.size > 12000) ensureRuMemoCache.clear();
+  ensureRuMemoCache.set(memoKey, res);
+  return res;
 }
-
-

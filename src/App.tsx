@@ -165,15 +165,16 @@ function AppContent() {
       if (showSpinner) {
         setIsLoading(true);
       }
-      const [sups, pers, jobs, dscs, invs, trashInvs, trashDscs, mats, perfs] = await Promise.all([
+      const matsPromise = safeFetchJson('/api/materials/compare');
+      const trashInvsPromise = safeFetchJson('/api/invoices/trash');
+      const trashDscsPromise = safeFetchJson('/api/discounts/trash');
+
+      const [sups, pers, jobs, dscs, invs, perfs] = await Promise.all([
         safeFetchJson('/api/supervisors'),
         safeFetchJson('/api/personnel'),
         safeFetchJson('/api/jobsites'),
         safeFetchJson('/api/discounts'),
         safeFetchJson('/api/invoices'),
-        safeFetchJson('/api/invoices/trash'),
-        safeFetchJson('/api/discounts/trash'),
-        safeFetchJson('/api/materials/compare'),
         safeFetchJson('/api/reports/supervisor-performance')
       ]);
 
@@ -182,10 +183,17 @@ function AppContent() {
       if (Array.isArray(jobs)) setJobsites(jobs);
       if (Array.isArray(dscs)) setDiscounts(dscs);
       if (Array.isArray(invs)) setInvoices(invs);
+      if (Array.isArray(perfs) && perfs.length > 0) setPerformances(perfs);
+      setIsLoading(false);
+
+      const [mats, trashInvs, trashDscs] = await Promise.all([
+        matsPromise,
+        trashInvsPromise,
+        trashDscsPromise
+      ]);
+      if (Array.isArray(mats)) setMaterialComparisons(mats);
       if (Array.isArray(trashInvs)) setTrashInvoices(trashInvs);
       if (Array.isArray(trashDscs)) setTrashDiscounts(trashDscs);
-      if (Array.isArray(mats)) setMaterialComparisons(mats);
-      if (Array.isArray(perfs) && perfs.length > 0) setPerformances(perfs);
     } catch (err) {
       console.error('Data loading error:', err);
     } finally {
@@ -198,10 +206,24 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
-    const sync = () => { void loadData(false); };
-    window.addEventListener('focus', sync);
-    window.addEventListener('gescons-data-sync', sync);
-    return () => { window.removeEventListener('focus', sync); window.removeEventListener('gescons-data-sync', sync); };
+    let lastFocusSync = Date.now();
+    const onFocus = () => {
+      const now = Date.now();
+      if (now - lastFocusSync > 60000) {
+        lastFocusSync = now;
+        void loadData(false);
+      }
+    };
+    const onDataSync = () => {
+      lastFocusSync = Date.now();
+      void loadData(false);
+    };
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('gescons-data-sync', onDataSync);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('gescons-data-sync', onDataSync);
+    };
   }, [user?.token]);
 
   // Handlers

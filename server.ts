@@ -950,7 +950,7 @@ if (!fs.existsSync(path.join(BACKUP_DIR, 'jobsites.json'))) saveLocalBackup('job
 if (!fs.existsSync(path.join(BACKUP_DIR, 'discounts.json'))) saveLocalBackup('discounts.json', INITIAL_DISCOUNTS);
 if (!fs.existsSync(path.join(BACKUP_DIR, 'invoices.json'))) saveLocalBackup('invoices.json', INITIAL_INVOICES);
 
-const CACHE_TTL_MS = 60 * 1000; // 60 seconds memory cache TTL
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes memory cache TTL
 
 interface CacheStore<T> {
   data: T;
@@ -965,6 +965,7 @@ const memoryStore: {
   jobsites?: CacheStore<any[]>;
   discounts?: CacheStore<any[]>;
   invoices?: CacheStore<any[]>;
+  materialComparisons?: { data: any[]; timestamp: number; sourceStamp: string };
   deletionLedger?: CacheStore<{ ids: Set<string>; prizmaIds: Set<number>; invoiceKeys: Set<string> }>;
 } = {};
 
@@ -2384,8 +2385,17 @@ function isShortDrawingOrSpecNote(s: string): boolean {
   return false;
 }
 
+const smartNormalizeMemoCache = new Map<string, { materialName: string; category?: string }>();
+
 function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materialName: string; category?: string } {
   if (!item || (!item.materialName && !item.originalName)) return item;
+  const canMemo = !existingCatalog || existingCatalog.length === 0;
+  const memoKey = canMemo ? `${item.materialName || ''}\u0000${item.originalName || item.originalMaterialName || ''}\u0000${item.category || ''}` : '';
+  if (canMemo) {
+    const cached = smartNormalizeMemoCache.get(memoKey);
+    if (cached) return cached;
+  }
+  const result = ((): { materialName: string; category?: string } => {
   let rawName = unwrapSyntheticPrefixes(String(item.materialName || '').trim());
   let name = cleanRawMaterialName(rawName) || rawName;
   const rawOrig = unwrapSyntheticPrefixes(String(item.originalName || item.originalMaterialName || '').trim());
@@ -3707,6 +3717,12 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
   }
 
   return { materialName: finalDisplayName, category: resolvedCategory };
+  })();
+  if (canMemo) {
+    if (smartNormalizeMemoCache.size > 15000) smartNormalizeMemoCache.clear();
+    smartNormalizeMemoCache.set(memoKey, result);
+  }
+  return result;
 }
 
 function validateAndProcessNegotiationData(body: any, sups: any[], personnelList: any[]): { error?: string; data?: any } {
@@ -4826,6 +4842,16 @@ app.get('/api/materials/compare', async (req, res) => {
     const { data: dscs, quotaExceeded: q2 } = await getDiscountsCached();
     if (q1 || q2) res.setHeader('X-Quota-Exceeded', 'true');
 
+    const prizmaInvsForCompare = await prizmaSyncService.getInvoicesCached().catch(() => []);
+    const sourceStamp = `${invs.length}_${memoryStore.invoices?.timestamp || 0}_${dscs.length}_${memoryStore.discounts?.timestamp || 0}_${prizmaInvsForCompare.length}`;
+    if (
+      memoryStore.materialComparisons &&
+      memoryStore.materialComparisons.sourceStamp === sourceStamp &&
+      Date.now() - memoryStore.materialComparisons.timestamp < CACHE_TTL_MS
+    ) {
+      return res.json(memoryStore.materialComparisons.data);
+    }
+
     const allInvoices = [...invs];
     const knownDiscountIds = new Set(allInvoices.map(i => i.discountId).filter(Boolean));
     allInvoices.forEach(i => {
@@ -4886,7 +4912,7 @@ app.get('/api/materials/compare', async (req, res) => {
 
     // Incorporate synchronized Prizma invoices from the last 3 months with smart deduplication
     try {
-      const prizmaInvs = await prizmaSyncService.getInvoicesCached();
+      const prizmaInvs = prizmaInvsForCompare;
       for (const pInv of prizmaInvs) {
         if (!pInv.isDeleted && pInv.items && pInv.items.length > 0) {
           const pCleanNo = (pInv.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
@@ -5296,7 +5322,13 @@ app.get('/api/materials/compare', async (req, res) => {
       });
     });
 
-    res.json(comparisons.sort((a, b) => b.priceDifferencePercentage - a.priceDifferencePercentage));
+    const sortedComparisons = comparisons.sort((a, b) => b.priceDifferencePercentage - a.priceDifferencePercentage);
+    memoryStore.materialComparisons = {
+      data: sortedComparisons,
+      timestamp: Date.now(),
+      sourceStamp
+    };
+    res.json(sortedComparisons);
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
@@ -5332,6 +5364,9 @@ app.put('/api/materials/update-category', async (req, res) => {
         }
       }
     }
+    memoryStore.invoices = undefined;
+    memoryStore.materialComparisons = undefined;
+    smartNormalizeMemoCache.clear();
     res.json({ success: true, message: `Malzeme kategorisi güncellendi. (${totalUpdatedItems} fatura kalemi)` });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -9295,6 +9330,21 @@ async function startServer() {
   app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server listening on port ${PORT}`);
     console.log(`🔥 Veritabanı: FIRESTORE (Web SDK) | Dosya Sunucusu: GCS (${PRIMARY_GCS_BUCKET}) + FIRESTORE`);
+
+    // Sunucu başlangıcında önbellekleri arka planda ısıt (ilk açılış hızını maksimuma çıkarır)
+    setTimeout(async () => {
+      try {
+        await Promise.all([
+          getSupervisorsCached(),
+          getPersonnelCached(),
+          getJobsitesCached(),
+          getDiscountsCached(),
+          getInvoicesCached(),
+          prizmaSyncService.getInvoicesCached().catch(() => [])
+        ]);
+        await fetch(`http://127.0.0.1:${PORT}/api/materials/compare`).catch(() => {});
+      } catch (_) {}
+    }, 100);
 
     // Sunucu başlangıcında bugünün bulut yedeği yoksa arka planda otomatik yedek al ve doğrula
     setTimeout(async () => {

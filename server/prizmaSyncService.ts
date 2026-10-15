@@ -149,6 +149,7 @@ export function isCleanMaterialRecord(inv: any): boolean {
 class PrizmaSyncService {
   private dbInstance: any = defaultDb;
   private memoryCache: PrizmaInvoiceRecord[] | null = null;
+  private cleanListCache: PrizmaInvoiceRecord[] | null = null;
   private cacheTimestamp: number = 0;
   private isSyncing: boolean = false;
   private syncProgress: { percent: number; message: string } = { percent: 0, message: '' };
@@ -197,6 +198,7 @@ class PrizmaSyncService {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length > 0) {
           this.memoryCache = parsed;
+          this.cleanListCache = null;
           this.cacheTimestamp = Date.now();
           if (parsed[0]?.syncedAt) {
             this.lastSyncAt = parsed[0].syncedAt;
@@ -222,6 +224,9 @@ class PrizmaSyncService {
     let rawList: PrizmaInvoiceRecord[] = [];
 
     if (this.memoryCache && (now - this.cacheTimestamp < 300000)) { // 5 mins cache
+      if (this.cleanListCache) {
+        return this.cleanListCache;
+      }
       rawList = this.memoryCache;
     } else if (this.dbInstance) {
       try {
@@ -230,6 +235,7 @@ class PrizmaSyncService {
           const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as PrizmaInvoiceRecord));
           list.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
           this.memoryCache = list;
+          this.cleanListCache = null;
           this.cacheTimestamp = now;
           this.saveToDisk(list);
           rawList = list;
@@ -333,6 +339,7 @@ class PrizmaSyncService {
       };
     }).filter(inv => inv.items && inv.items.length > 0);
 
+    this.cleanListCache = cleanList;
     return cleanList;
   }
 
@@ -696,6 +703,7 @@ class PrizmaSyncService {
 
       // Persist to memory & disk
       this.memoryCache = syncedInvoices;
+      this.cleanListCache = null;
       this.cacheTimestamp = Date.now();
       this.lastSyncAt = new Date().toISOString();
       this.saveToDisk(syncedInvoices);
