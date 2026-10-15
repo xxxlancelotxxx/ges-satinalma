@@ -940,7 +940,27 @@ const WORD_TRANSLATIONS: Array<[RegExp, string]> = [
   [/(\d+(?:[.,]\d+)?)\s*атм\b/gi, '$1 Atm'],
   [/(\d+(?:[.,]\d+)?)\s*мкр\b|\bмкм\b/gi, '$1 Mikron'],
   [/(\d+(?:[.,]\d+)?)\s*шт\.?\b|\bштук\b/gi, '$1 Adet'],
-  [/(\d+)\s*[хХ]\s*(\d+)/g, '$1x$2']
+  [/(\d+)\s*[хХ]\s*(\d+)/g, '$1x$2'],
+  [/\bвиллатекс\b/gi, 'Villateks'],
+  [/\bикопал\b/gi, 'Icopal'],
+  [/\bультранап\b/gi, 'Ultranap'],
+  [/\bтехноэласт\b/gi, 'Technoelast'],
+  [/\bунифлекс\b/gi, 'Unifleks'],
+  [/\bлинокром\b/gi, 'Linokrom'],
+  [/\bбиполь\b/gi, 'Bipol'],
+  [/\bизопласт\b/gi, 'İzoplast'],
+  [/\bн\s+эпп\b/gi, 'H EPP'],
+  [/\bв\s+экп\b/gi, 'V EKP'],
+  [/\bэпп\b/gi, 'EPP'],
+  [/\bэкп\b/gi, 'EKP'],
+  [/\bткп\b/gi, 'TKP'],
+  [/\bхпп\b/gi, 'HPP'],
+  [/\bклеевая\s+смесь\b/gi, 'Yapıştırıcı Harç'],
+  [/\bпраймер\s+битумный\b/gi, 'Bitüm Astarı'],
+  [/\bпиканте\s+стоп\b/gi, 'Picante Stop'],
+  [/\bлюк\s+под\s+покраску\b/gi, 'Boyanabilir Müdahale Kapağı'],
+  [/\bсветильник\s+маляра\b/gi, 'Boyacı Aydınlatması'],
+  [/\bпроявочный\s+свет\b/gi, 'Yüzey Kontrol Aydınlatması']
 ];
 
 export function translateRussianMaterialToTurkish(rawName?: string): string {
@@ -1042,7 +1062,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   // 2. High-precision context-aware rule-based categorization
 
   // 2.1 Bilgi İşlem & IT (Exclude air freshener/gas/anchor/silicone/faucet cartridges, voltage monitoring relays, and wide-format plotter paper rolls!)
-  const isNonItCartridge = hasRx(/oda\s*kokusu|air\s*wick|first\s*fresh|gaz\s*kartu|toua|ankraj|химанкер|silikon|герметик|filtre|аквафор|гейзер|барьер|pürmüz|горелк|смесител|керам.*картридж|кран|душ|batarya|musluk|респиратор|противогаз/i);
+  const isNonItCartridge = hasRx(/oda\s*kokusu|air\s*wick|first\s*fresh|gaz\s*kartu|toua|ankraj|химанкер|хим\.\s*анкер|хим\s*анкер|kimyasal\s*dübel|kimyasal\s*dubel|hit-hy|hit-re|hilti|fischer|mungo|silikon|герметик|epoksi|эпоксид|mastik|мастик|filtre|аквафор|гейзер|барьер|pürmüz|горелк|смесител|керам.*картридж|кран|душ|batarya|musluk|респиратор|противогаз/i);
   const isVoltageMonitorRelay = hasRx(/gerilim\s*monit|реле\s*контрол|meandr|меандр|фаз/i);
   const isPlotterPaperRoll = hasRx(/бумага\s*широкоформатн|plotter\s*kağıd/i) || ((has('plotter') || has('плоттер')) && (has('бумага') || has('kağıd') || has('kağıt')) && !has('кассета') && !has('kaset'));
   if (
@@ -1219,8 +1239,10 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
 
   // 2.10 Ankraj Sistemleri
   if (
-    has('ankraj') || has('анкер') || has('химанкер') ||
-    has('fischer faz') || has('hilti hit') || has('kimyasal ankraj') || has('himtex') || has('elementa ear') || has('erx 585')
+    has('ankraj') || has('анкер') || has('химанкер') || has('kimyasal dübel') || has('kimyasal dubel') ||
+    has('fischer faz') || has('fischer fis') || has('fis v') || has('fis sb') || has('fis em') ||
+    has('hilti hit') || has('hit-hy') || has('hit-re') || has('hilti hst') || has('hilti hda') || has('hilti hsa') ||
+    has('kimyasal ankraj') || has('himtex') || has('elementa ear') || has('erx 585') || has('mungo m2')
   ) {
     return 'Ankraj Sistemleri';
   }
@@ -1420,8 +1442,9 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
 
   // 2.22 Kimyasallar & Boya (Run BEFORE Hazır Beton so epoxy putty "Шпатлевка эпоксидная", primers "Бетоноконтакт / Ceresit CT 19", rust converters, and linoleum glue are properly classified!)
   const isPaintMachineOrTool = hasRx(/компрессор|kompresör|миксер|karıştırıcı\s*uç|краскопульт|boya\s*tabancası|пистолет\s*для\s*пены|köpük\s*tabancası|пистолет\s*для\s*герметик|silikon\s*tabancası|фен\s*строительн|термопистолет/i);
+  const isCementitiousGroutOrMortar = hasRx(/grout|граут|akıcı\s*harç|tamir\s*harc|шпаклевк.*цемент|штукатурк.*цемент|стяжк|наливной\s*пол|tesviye\s*şap/i);
   if (
-    !isPaintMachineOrTool && (
+    !isPaintMachineOrTool && !isCementitiousGroutOrMortar && (
       has('boya') || has('краск') || has('эмаль') || has('пф-115') || has('pf-115') || has('лак ') || has('vernik') || has('холодного цинкован') ||
       has('грунтовк') || has('astar') || has('бетоноконтакт') || has('betonokontakt') || has('ceresit ct 17') || has('ceresit ct 19') ||
       has('герметик') || has('silikon') || has('mastik') || has('sikaflex') || has('sika ') ||
@@ -1519,7 +1542,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
       has('калькулятор') || has('hesap makinesi') || has('пленка для ламинирован') || has('laminasyon') || has('ламинатор') || has('брошюровщик') || has('переплет') ||
       has('лоток для бумаг') || has('evrak rafı') || has('органайзер настольн') || has('корзина для бумаг') ||
       has('бейдж') || has('yaka kartı') || has('брелок для ключей') || has('ключница') || has('anahtarlık') ||
-      has('комус') || has('attache') || has('koli bandı') || has('скотч прозрачн') || has('скотч упаковочн') || has('диспенсер для скотча')
+      has('комус') || has('attache') || has('диспенсер для скотча')
     )
   ) {
     return 'Ofis & Kırtasiye';
@@ -1537,6 +1560,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
     has('çelik halat') || has('zincir') || has('gerdirme') || has('klemens halat') || has('radansa') || has('kanca') || has('karabina') || has('aybolt') ||
     has('хомут кабельн') || has('стяжка кабельн') || has('kablo bağı') || has('cırt kelepçe') || has('хомут сантехнич') || has('boru kelepçesi') ||
     has('скотч малярн') || has('лента малярн') || has('maskeleme bandı') || has('kağıt bant') || has('лента армирован') || has('серпянк') ||
+    has('koli bandı') || has('скотч прозрачн') || has('скотч упаковочн') ||
     has('стрейч') || has('streç film') || has('мешки полипропилен') || has('moloz çuvalı') || has('çuval') ||
     has('колесо для тачки') || has('колесо промышленн') || has('tekerlek')
   ) {
@@ -1695,7 +1719,15 @@ export function ensureRussianOriginalName(materialName?: string, rawOriginalName
     return `Труба стальная электросварная ГОСТ 10704${dimSuffix}`;
   }
   if (lower.includes('gazbeton') || lower.includes('ytong') || lower.includes('bonolit')) {
-    return `Блок газобетонный стеновой D500${dimSuffix}`;
+    if (lower.includes('yapıştırıcı') || lower.includes('yapistirici') || lower.includes('harç') || lower.includes('harc') || lower.includes('клей')) {
+      return `Клей для газобетона (${src})`;
+    }
+    if (lower.includes('rende') || lower.includes('рубанок') || lower.includes('testere') || lower.includes('mala') || lower.includes('dübel') || lower.includes('dubel')) {
+      return `Инструмент / крепеж для газобетона (${src})`;
+    }
+    const dMatch = src.match(/\b[dд]\s*(300|350|400|500|600)\b/i);
+    const dGrade = dMatch ? `D${dMatch[1]}` : 'D500';
+    return `Блок газобетонный стеновой ${dGrade}${dimSuffix}`;
   }
   if (lower.includes('kontrplak') || lower.includes('plywood') || lower.includes('pleyvud')) {
     return `Фанера ламинированная ФОФ для опалубки${dimSuffix}`;

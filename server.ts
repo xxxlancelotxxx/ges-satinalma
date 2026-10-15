@@ -2527,6 +2527,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
   if (
     !isRebarNegFilter && (
       primaryText.includes('арматур') ||
+      primaryText.includes('катанка') ||
       primaryText.includes('inşaat demir') ||
       primaryText.includes('insaat demir') ||
       primaryText.includes('nervür') ||
@@ -2537,11 +2538,20 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       primaryText.includes('а500') ||
       primaryText.includes('b500') ||
       primaryText.includes('a240') ||
-      primaryText.includes('а240')
+      primaryText.includes('а240') ||
+      primaryText.includes('a400') ||
+      primaryText.includes('а400')
     )
   ) {
     const d = extractRebarDiameter(primaryText);
     if (d && STANDARD_REBAR_MAP[d]) {
+      const checkGradeText = (effectiveOrig || primaryText).toLowerCase();
+      if (/катанка|а240|a240|гладк|düz\s*demir/i.test(checkGradeText) && !/а500|a500/i.test(checkGradeText)) {
+        return { materialName: `Düz İnşaat Demiri / Filmaşin A240 (Ø${d}mm)`, category: 'İnşaat Demiri' };
+      }
+      if (/а400|a400|а-iii\b/i.test(checkGradeText) && !/а500|a500/i.test(checkGradeText)) {
+        return { materialName: `Nervürlü İnşaat Demiri A400 (Ø${d}mm)`, category: 'İnşaat Demiri' };
+      }
       return { materialName: STANDARD_REBAR_MAP[d], category: 'İnşaat Demiri' };
     }
   }
@@ -2690,7 +2700,8 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       else if (/ок[\s-]*46|ok[\s-]*46/i.test(primaryText)) brand = 'ESAB OK 46.00';
       else if (/озл[\s-]*8|ozl[\s-]*8/i.test(primaryText)) brand = 'OZL-8';
       else if (/ано[\s-]*21|ano[\s-]*21/i.test(primaryText)) brand = 'ANO-21';
-      else if (/as\s*r[\s-]*143|askaynak/i.test(primaryText)) brand = 'Askaynak AS R-143';
+      else if (/as\s*b[\s-]*248|b[\s-]*248|базик|bazik/i.test(primaryText)) brand = 'Askaynak AS B-248 (Bazik)';
+      else if (/as\s*r[\s-]*143|r[\s-]*143|askaynak|рутил|rutil/i.test(primaryText)) brand = 'Askaynak AS R-143 (Rutil)';
 
       const dMatch = primaryText.match(/(?:[dдфøØ]\s*[:=]?\s*)?\b(2[.,]0|2[.,]5|2[.,]6|3[.,]0|3[.,]2|3[.,]25|4[.,]0|5[.,]0)\s*(?:[xх*×]\s*\d+|\s*(?:мм|mm))(?![a-zа-яё])/i);
       const dia = dMatch ? ` Ø${dMatch[1].replace(',', '.').replace('3.25', '3.2')} mm` : '';
@@ -2751,17 +2762,36 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 1.97 Kum / Песок
-  if (primaryText.includes('песок') || (/\bkum\b/i.test(primaryText) && !primaryText.includes('kumaş') && !primaryText.includes('kumanda') && !primaryText.includes('kumlama'))) {
+  // 1.97 Kum / Песок (Kum tutucu/пескоуловитель, ЦПС, пескобетон, mikser ve yangın panosu hariç!)
+  if (
+    (primaryText.includes('песок') || (/\bkum\b/i.test(primaryText) && !primaryText.includes('kumaş') && !primaryText.includes('kumanda') && !primaryText.includes('kumlama'))) &&
+    !/пескоуловител|пескобетон|цементно-песчан|\bцпс\b|миксер|стенд.*пожарн|ящик.*песк|kum\s*hazneli|kum\s*tutucu/i.test(primaryText)
+  ) {
     const isQuartz = /кварц|kuvars/i.test(primaryText);
+    const isBagged = /мешк|мешок|torba|\b25\s*кг|\b40\s*кг|\b50\s*кг/i.test(primaryText);
     return {
-      materialName: isQuartz ? 'Kuvars Kumu' : 'İnşaat Kumu (Sıva / Şap Kumu)',
+      materialName: isQuartz
+        ? `Kuvars Kumu${isBagged ? ' (Torbalı)' : ''}`
+        : `İnşaat Kumu (Sıva / Şap Kumu)${isBagged ? ' (Torbalı)' : ''}`,
+      category: 'Hazır Beton, Çimento & Agrega'
+    };
+  }
+
+  // 1.975 Keramzit Hafif Agrega / Керамзит (Normal mıcır/çakıldan ayır!)
+  if (/керамзит|keramizit|keramzit/i.test(primaryText) && !/керамзитобетон|блок/i.test(primaryText)) {
+    const kFrac = primaryText.match(/\b(5\s*[-–]\s*10|10\s*[-–]\s*20|20\s*[-–]\s*40|0\s*[-–]\s*5)\b/);
+    const fracStr = kFrac ? ` ${kFrac[1].replace(/\s+/g, '')} mm` : '';
+    return {
+      materialName: `Keramzit Hafif Yalıtım Agregası (Керамзит)${fracStr}`,
       category: 'Hazır Beton, Çimento & Agrega'
     };
   }
 
   // 1.98 Çakıl / Mıcır / Щебень / Гравий (Fraksiyonunu Koru!)
-  if (primaryText.includes('щебень') || primaryText.includes('гравий') || primaryText.includes('çakıl') || primaryText.includes('cakil') || primaryText.includes('mıcır')) {
+  if (
+    (primaryText.includes('щебень') || primaryText.includes('гравий') || primaryText.includes('çakıl') || primaryText.includes('cakil') || primaryText.includes('mıcır')) &&
+    !/керамзит|keramizit|keramzit/i.test(primaryText)
+  ) {
     const fracMatch = primaryText.match(/\b(5\s*[-–]\s*20|20\s*[-–]\s*40|40\s*[-–]\s*70|0\s*[-–]\s*5|3\s*[-–]\s*10|5\s*[-–]\s*10)\b/);
     const frac = fracMatch ? fracMatch[1].replace(/\s+/g, '') + 'mm' : '5-20mm';
     const isGranite = /гранит|granit/i.test(primaryText);
@@ -2778,14 +2808,20 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     return { materialName: 'Kalıp Ayırıcı Yağ (Endüstriyel Beton Kalıp Yağı)', category: 'Kalıp & İskele Sistemleri' };
   }
 
-  // 1.994 Yalıtımlı PVC Branda / Tente vs Yalıtımsız Tarpaulin Branda (без утеплителя ayır!)
+  // 1.994 Yalıtımlı PVC Branda / Tente vs Yalıtımsız Ağır Hizmet PVC Branda vs Yalıtımsız Tarpaulin Branda (без утеплителя ayır!)
   if (primaryText.includes('тент') || primaryText.includes('полог') || primaryText.includes('тарпаулин') || (primaryText.includes('branda') && !primaryText.includes('пленка'))) {
     const dimMatch = primaryText.match(/\b(\d{1,2}\s*[xх*×]\s*\d{1,2})\s*(?:м|m)?(?![a-zа-яё0-9])/i);
     const dim = dimMatch ? ` ${dimMatch[1].replace(/\s+/g, '').replace(/[х*×]/gi, 'x')} m` : '';
-    const isUninsulated = /без\s*утепл|yalıtımsız|yalitimsiz|180\s*гр/i.test(primaryText);
+    const isUninsulated = /без\s*утепл|б\/\s*\d|yalıtımsız|yalitimsiz|180\s*гр/i.test(primaryText);
     const isInsulated = !isUninsulated && /утепл|негорюч|огнестойк|yalıtımlı|yanmaz|400\s*г|450-500/i.test(primaryText);
+    const isPvc = /пвх|pvc/i.test(primaryText) && !/тарпаулин|tarpaulin/i.test(primaryText);
+    const baseTarpName = isInsulated
+      ? 'Yanmaz Yalıtımlı PVC Branda / Tente'
+      : isPvc
+        ? 'Su Geçirmez Ağır Hizmet PVC Branda / Tente (Yalıtımsız)'
+        : 'Su Geçirmez Tarpaulin Branda / Tente (Yalıtımsız)';
     return {
-      materialName: `${isInsulated ? 'Yanmaz Yalıtımlı PVC Branda / Tente' : 'Su Geçirmez Tarpaulin Branda / Tente (Yalıtımsız)'}${dim}`.trim(),
+      materialName: `${baseTarpName}${dim}`.trim(),
       category: 'Yalıtım & Alçıpan'
     };
   }
@@ -2826,20 +2862,25 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     };
   }
 
-  // 1.995b Donatı Kafesi (Кр-1 / Кр-2) vs Çelik Karkas (КР-1 / КП-1) vs Çivi Tabancası Klipsi vs Yağlı Emal Boya PF-115
-  if (/каркас\s+кр-\d|donatı\s*kafes/i.test(combined) && (Number(item.unitPrice) || 0) >= 2000) {
-    const krMatch = combined.match(/(?:кр|kr)[\s-]*(\d+)/i);
-    const krCode = krMatch ? `КР-${krMatch[1]}` : 'КР-1';
-    return {
-      materialName: `Ağır Yapısal Donatı Karkası ${krCode} (Özel İmalat)`,
-      category: 'Donatı Malzemeleri'
-    };
-  }
-  if (/каркас\s+арматур|donatı\s*kafes/i.test(combined) || (/каркас\s+кр-\d/i.test(combined) && (Number(item.unitPrice) || 0) < 2000)) {
-    const krMatch = combined.match(/(?:кр|kr|kp)[\s-]*(\d+)/i);
+  // 1.995b Donatı Kafesi (Кр-1..Кр-8) vs Çelik Karkas (КР-1 / КП-1) vs Çivi Tabancası Klipsi vs Yağlı Emal Boya PF-115
+  // Özel imalat donatı kafeslerinde alt poz (Фр-1..11, -25), ebat (L=675x330, 650x900) ve ağırlık/birim fiyat kademesini koru!
+  if (/каркас\s+арматур|каркас\s+кр-\d|donatı\s*kafes/i.test(combined)) {
+    const cageText = effectiveOrig || combined;
+    const krMatch = cageText.match(/(?:кр|kr|kp)[\s-]*(\d+(?:-\d+)?)/i);
     const krCode = krMatch ? `Kr-${krMatch[1]}` : 'Kr-1';
+    const frMatch = cageText.match(/(?:фр|fr)[\s-]*(\d+)/i);
+    const frSuffix = frMatch ? ` Fr-${frMatch[1]}` : '';
+    const dimMatch = cageText.match(/(?:l\s*=\s*)?(\d{2,4}\s*[*xх×]\s*\d{2,4}(?:\s*[*xх×]\s*\d{2,4})?)/i);
+    const dimSuffix = dimMatch ? ` (${dimMatch[1].replace(/\s+/g, '').replace(/[х*×]/gi, 'x')} mm)` : '';
+    const priceVal = Number(item.unitPrice) || 0;
+    let tierSuffix = '';
+    if (!frSuffix && !dimSuffix && priceVal > 0) {
+      // Farklı projelerde aynı "Кр-1" pozuyla üretilen farklı ağırlıktaki özel imalat kafesleri birbirine karıştırma
+      const approxKg = Math.round(priceVal / 100);
+      tierSuffix = priceVal >= 2000 ? ` [Ağır Tip ~${approxKg * 100}₽]` : ` [Tip ~${Math.round(priceVal / 50) * 50}₽]`;
+    }
     return {
-      materialName: `Donatı Kafesi ${krCode} (Özel İmalat)`,
+      materialName: `Donatı Kafesi ${krCode}${frSuffix}${dimSuffix}${tierSuffix} (Özel İmalat)`,
       category: 'Donatı Malzemeleri'
     };
   }
@@ -2852,10 +2893,21 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
     const kpMatch = combined.match(/(?:кр|kp|kr)[\s-]*(\d+)/i);
     const kpCode = kpMatch ? `KP-${kpMatch[1]}` : 'KP-1';
+    const priceVal = Number(item.unitPrice) || 0;
+    const tierSuffix = priceVal > 0 ? ` [Tip ~${Math.round(priceVal / 50) * 50}₽]` : '';
     return {
-      materialName: `Karkas Metal ${kpCode} (Özel İmalat)`,
+      materialName: `Karkas Metal ${kpCode}${tierSuffix} (Özel İmalat)`,
       category: 'Donatı Malzemeleri'
     };
+  }
+  if (/пиканте\s*стоп|picante\s*stop/i.test(combined)) {
+    if (/грунтовк|astar/i.test(combined)) {
+      return { materialName: 'Yangın Geciktirici Astar Boya Picante Stop KM0 (Грунтовка)', category: 'Kimyasallar & Boya' };
+    }
+    if (/эластичн|elastik/i.test(combined)) {
+      return { materialName: 'Elastik Yangın Geciktirici Boya Picante Stop KM0', category: 'Kimyasallar & Boya' };
+    }
+    return { materialName: 'Yangın Geciktirici Boya Picante Stop KM0', category: 'Kimyasallar & Boya' };
   }
   if (/пф[\s-]*115|pf[\s-]*115/i.test(combined)) {
     let color = 'Beyaz';
@@ -2911,13 +2963,49 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       category: 'Sıhhi Tesisat & Isıtma'
     };
   }
-  // Koli Bandı 50mm x 50m vs 50mm x 100m ayrımı
-  if (/bant\s*koli|скотч\s+прозрачн/i.test(combined)) {
-    const lenMatch = combined.match(/50\s*(?:мм|mm)\s*[xх*×]\s*(50|66|100|150)\s*(?:м|mt|m)/i);
-    const len = lenMatch ? lenMatch[1] : '50';
+  // Koli Bandı 48mm x 66m vs 50mm x 50m vs 50mm x 100m ayrımı
+  if (/bant\s*koli|скотч\s+прозрачн|клейкая\s+лента\s+упаковочн/i.test(combined)) {
+    const dimMatch = combined.match(/\b(48|50)\s*(?:мм|mm)?\s*[xх*×]\s*(50|66|100|150)\s*(?:м|mt|m)?/i);
+    const w = dimMatch ? dimMatch[1] : '50';
+    const len = dimMatch ? dimMatch[2] : '50';
     return {
-      materialName: `Şeffaf Koli Bandı 50 mm x ${len} m`,
+      materialName: `Şeffaf Koli Bandı ${w} mm x ${len} m`,
       category: 'Ofis & Kırtasiye'
+    };
+  }
+  // Genel Prizma Stok Kartı "ELDIVEN TEMIZLIK ICIN" / "Перчатки резиновые": tek kullanımlık nitril/lateks vs kalın kauçuk ev tipi eldiven ayrımı
+  if (/eldiven\s*temizlik\s*icin|^перчатки\s+резиновые\b/i.test(primaryText)) {
+    const uPrice = Number(item.unitPrice) || 0;
+    const uNorm = String(item.unit || '').toLowerCase();
+    if (/paket|уп/i.test(uNorm) || uPrice > 250) {
+      return {
+        materialName: 'Tek Kullanımlık Nitril/Lateks Temizlik Eldiveni (Paket)',
+        category: 'İş Güvenliği & KKD'
+      };
+    }
+    if (uPrice > 0 && uPrice <= 25) {
+      return {
+        materialName: 'Tek Kullanımlık Nitril/Lateks Temizlik Eldiveni (Adet/Çift)',
+        category: 'İş Güvenliği & KKD'
+      };
+    }
+    return {
+      materialName: 'Kalın Kauçuk Ev / Temizlik Eldiveni (Перчатки резиновые)',
+      category: 'İş Güvenliği & KKD'
+    };
+  }
+  // Genel Prizma Stok Kartı "COP POSETI 140 LT": 24 ₽ standart rulo vs 370 ₽ ağır hizmet rulo ayrımı
+  if (/cop\s*poseti\s*140\s*lt/i.test(primaryText)) {
+    const uPrice = Number(item.unitPrice) || 0;
+    if (uPrice > 0 && uPrice < 60) {
+      return {
+        materialName: 'Çöp Poşeti 140 L (Standart İnce Rulo)',
+        category: 'Temizlik & Hijyen Malzemeleri'
+      };
+    }
+    return {
+      materialName: 'Endüstriyel Ağır Hizmet Çöp Poşeti 140 L (Rulo)',
+      category: 'Temizlik & Hijyen Malzemeleri'
     };
   }
   // Lehim Teli 100g vs 200g ayrımı
@@ -2938,6 +3026,23 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     return {
       materialName: `Bi-Metal Delik Testeresi / Panç HSS Ø${dia} mm`,
       category: 'El Aletleri & Hırdavat'
+    };
+  }
+
+  // Trapez Sac / Профнастил (Profil C8/C20/C21/H60/H75, kalınlık, ebat ve Boyalı RAL vs Galvaniz ayrımı)
+  if (/профнастил|профлист|trapez\s*sac/i.test(combined)) {
+    const sacSrc = (effectiveOrig && /профнастил|профлист|\d{3,4}\s*[*xх×]\s*\d{3,4}/i.test(effectiveOrig)) ? effectiveOrig : primaryText;
+    const profM = sacSrc.match(/(?:^|[\s-])[cсhнмpмп]{1,2}[\s-]*(8|10|18|20|21|35|44|57|60|75|114)\b/i);
+    const profCode = profM ? `C${profM[1]}` : 'C8';
+    const dim3 = sacSrc.match(/\b(0[.,]\d{1,2})\s*[*xх×-]\s*(\d{3,4})\s*[*xх×-]\s*(\d{3,4})\b/);
+    const thM = dim3 ? dim3[1].replace(',', '.') : (sacSrc.match(/\b(0[.,]4|0[.,]45|0[.,]5|0[.,]55|0[.,]65|0[.,]7|0[.,]8)\b/)?.[1]?.replace(',', '.') || '0.45');
+    const wM = dim3 ? dim3[2] : (sacSrc.match(/\b(1000|1100|1150|1200)\b/)?.[1] || '1150');
+    const lM = dim3 ? dim3[3] : (sacSrc.match(/\b(2000|2100|2500|3000|6000)\b/)?.[1] || '2000');
+    const ralM = sacSrc.match(/ral\s*(\d{4})/i);
+    const coat = ralM ? `Boyalı RAL ${ralM[1]}` : (/оцинк|galvaniz/i.test(sacSrc) ? 'Galvanizli' : '');
+    return {
+      materialName: `Trapez Sac ${profCode} ${thM}x${wM}x${lM} mm${coat ? ` (${coat})` : ''}`,
+      category: 'Çelik Malzemeler'
     };
   }
 
@@ -3024,8 +3129,11 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 1.996 Propan Gaz Tüpü vs Propan Ekipmanları (Saati, Pürmüz, Conta, Kafes, Araba, Hortum kesinlikle ayır!)
+  // 1.996 Propan Gaz Tüpü vs Propan Ekipmanları (Conta, Saati, Pürmüz, Kafes, Araba, Hortum kesinlikle ayır!)
   if (primaryText.includes('пропан') || primaryText.includes('propan')) {
+    if (/прокладк|conta/i.test(primaryText)) {
+      return { materialName: 'Propan Regülatör / Tüp Contası', category: 'Kaynak Malzemeleri' };
+    }
     if (/клетка|kafes/i.test(primaryText)) {
       return { materialName: 'Propan Tüpü Taşıma ve Depolama Kafesi (9 Adetlik)', category: 'Şantiye Tesis & Konteyner' };
     }
@@ -3037,9 +3145,6 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
     if (/горелк|pürmüz|purmuz|şaloma|резак/i.test(primaryText)) {
       return { materialName: 'Propan Pürmüz / Şaloma Başlığı', category: 'Kaynak Malzemeleri' };
-    }
-    if (/прокладк|conta/i.test(primaryText)) {
-      return { materialName: 'Propan Tüp Contası', category: 'Kaynak Malzemeleri' };
     }
     if (!/рукав|шланг|hortum/i.test(primaryText)) {
       const priceVal = Number(item.unitPrice) || 0;
@@ -3089,11 +3194,22 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 3. Timber / Kereste / Брус / Доска (Ölçüsünü Koru, брусчатка/cam yünü/yazı tahtası/sehpa/vida/testere hariç!)
+  // 3. Timber / Kereste / Брус / Доска (Ölçüsünü, Ağaç Cinsini [Çam vs Kavak/Осина] ve Sınıfını [1. Sınıf GOST vs 2. Sınıf vs TU] Koru!)
   if (
     (primaryText.includes('брус') || primaryText.includes('kereste') || primaryText.includes('kalas') || primaryText.includes('доска обрезн') || primaryText.includes('kenarlı kereste')) &&
     !/брусчатк|cam\s*yun|cam\s*yün|ursa|шлифовальн|магнитн|для\s*досок|yazı\s*tahtası|sehpa|statif|tripod|şemsiye|kilit|vida|саморез|testere|диск/i.test(combined)
   ) {
+    const isOsina = /осина|\b09о\b|\b01-09о\b/i.test(combined);
+    const isSort2 = /сорт[\s-]*(?:2|1-2)|\b102г\b/i.test(combined);
+    const isTU = /\bту\b/i.test(combined) && !isOsina && !isSort2 && !/гост/i.test(combined);
+    const gradeTag = isOsina
+      ? '(Kavak / Осина)'
+      : isSort2
+        ? '(2. Sınıf GOST)'
+        : isTU
+          ? '(TU Sınıfı)'
+          : '(1. Sınıf GOST)';
+
     // mm cinsinden 3 boyut: 50*200*6000, 100*100*6000, 50*100*6000, 50*150*6100
     const mmDim = primaryText.match(/\b(\d{2,3})\s*[*xх×]\s*(\d{2,3})\s*[*xх×]\s*(\d{3,4})\b/);
     if (mmDim) {
@@ -3105,7 +3221,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       const dStr = `${d1}x${d2}x${d3}`;
       const isBoard = primaryText.includes('доска') || primaryText.includes('tahta') || primaryText.includes('kalas') || d1 <= 50;
       return {
-        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${dStr} (1. Sınıf GOST)`,
+        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${dStr} ${gradeTag}`,
         category: 'Ahşap & Kereste'
       };
     }
@@ -3122,7 +3238,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       const dStr = `${d1}x${d2}x${d3}`;
       const isBoard = d1 <= 50;
       return {
-        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${dStr} (1. Sınıf GOST)`,
+        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${dStr} ${gradeTag}`,
         category: 'Ahşap & Kereste'
       };
     }
@@ -3133,11 +3249,11 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       const d2 = parseInt(twoDim[2], 10);
       const isBoard = d1 <= 50;
       return {
-        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${d1}x${d2}x6000 (1. Sınıf GOST)`,
+        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${d1}x${d2}x6000 ${gradeTag}`,
         category: 'Ahşap & Kereste'
       };
     }
-    return { materialName: 'İnşaatlık Çam Kereste (1. Sınıf GOST 8486)', category: 'Ahşap & Kereste' };
+    return { materialName: `İnşaatlık Çam Kereste ${gradeTag}`, category: 'Ahşap & Kereste' };
   }
 
   // 3.1 L-KÖŞEBENT DEMİR (Уголок стальной / KOSEBENT SIYAH)
@@ -3185,9 +3301,10 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 3.3 DİKİŞLİ ÇELİK BORU & SU/GAZ BORUSU (Труба электросварная / ВГП / BORU DEMIR DIKISLI)
+  // 3.3 DİKİŞLİ ÇELİK BORU & SU/GAZ BORUSU (Труба электросварная / ВГП / BORU DEMIR DIKISLI / ТРУБА 48Х3)
   if (
-    /труба\s*(?:стальная\s*)?(?:электросварн|вгп|водогазопровод)|электросварные\s*стальные\s*трубы|boru\s*demir\s*dikişli|boru\s*demir\s*dikisli|dikişli\s*çelik\s*boru|çelik\s*su\/gaz\s*borusu/i.test(primaryText)
+    (/труба\s*(?:стальная\s*)?(?:э\/с|электросварн|вгп|водогазопровод)|электросварные\s*стальные\s*трубы|boru\s*demir\s*dikişli|boru\s*demir\s*dikisli|dikişli\s*çelik\s*boru|çelik\s*su\/gaz\s*borusu|(?:^|\s)(?:труба|boru)\s+\d{2,3}\s*[*xх×]\s*\d{1,2}(?:[.,]\d+)?\s*(?:мм|mm|гост|l=)/i.test(primaryText)) &&
+    !/профильн|ппр|ppr|пнд|pnd|пвх|pvc|гофрирован|koruge/i.test(primaryText)
   ) {
     const roundMatch = primaryText.match(/(?:[dдqфøØ]\s*)?\b(\d{2,3})\s*[*xх×]\s*(\d{1,2}(?:[.,]\d+)?)\b/);
     if (roundMatch) {
@@ -3228,7 +3345,14 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 3.6 GAZBETON BLOK & GAZBETON YAPIŞTIRICISI
+  // 3.6 GAZBETON BLOK & GAZBETON YAPIŞTIRICISI (Rende/Рубанок, Dübel, Mala ve Testere hariç!)
+  if (/рубанок|rende\b/i.test(primaryText) && /газобетон|gazbeton|гипсокартон|alçıpan|alcipan|гкл/i.test(primaryText)) {
+    const isGypsumRasp = /гипсокартон|alçıpan|alcipan|гкл|кромочн/i.test(primaryText);
+    return {
+      materialName: isGypsumRasp ? 'Alçıpan Kenar Rendesi (Рубанок обдирочный / кромочный)' : 'Gazbeton Rendesi (Рубанок для газобетона)',
+      category: 'El Aletleri & Hırdavat'
+    };
+  }
   if (/газобетон|gazbeton|gaz\s*blok|bonolit|poritep|ytong|istkult|исткульт/i.test(primaryText)) {
     if (/клей|yapıştırıcı|yapistirici|harç|harc/i.test(primaryText)) {
       return {
@@ -3236,8 +3360,10 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
         category: 'Hazır Beton, Çimento & Agrega'
       };
     }
-    if (!/перемычка|lento|dübel|dubel|анкер|саморез|testere|ножовка/i.test(primaryText)) {
-      const density = primaryText.includes('d500') ? 'D500' : 'D600';
+    if (!/перемычка|lento|дюбел|dübel|dubel|анкер|саморез|testere|ножовка|рубанок|rende|терка|кельма|штроборез|захват/i.test(primaryText)) {
+      const gazSrc = (effectiveOrig && /\b[dд]\s*(300|350|400|500|600)\b/i.test(effectiveOrig)) ? effectiveOrig : primaryText;
+      const dMatch = gazSrc.match(/\b[dд]\s*(300|350|400|500|600)\b/i);
+      const density = dMatch ? `D${dMatch[1]}` : (primaryText.includes('d500') ? 'D500' : 'D600');
       const gDim = primaryText.match(/\b(600|625)\s*[*xх×]\s*(200|250)\s*[*xх×]\s*(75|100|125|150|200|250|300|375|400)\b/)
         || primaryText.match(/\b(75|100|125|150|200|250|300|375|400)\s*[*xх×]\s*(200|250)\s*[*xх×]\s*(600|625)\b/);
       if (gDim) {
@@ -3254,7 +3380,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 3.7 ALÇIPAN LEVHA, ALÇIPAN PROFİLİ & AGRAF
+  // 3.7 ALÇIPAN LEVHA, ALÇIPAN PROFİLİ & AGRAF (Rende, Mastik/Герметик, Vida, Kapak hariç!)
   if (/agraf|подвес\s+прямой/i.test(primaryText) && /60\s*[*xх×]\s*27|alçıpan|alcipan|гкл|кнауф|knauf/i.test(primaryText)) {
     return {
       materialName: 'Alçıpan Tavan U-Agraf / Doğrudan Askı Maşası (60x27 mm)',
@@ -3279,32 +3405,121 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
   if (
-    /гипсокартон|alçıpan|alcipan|\bгкл(?:в|о)?\b|\bgkl(?:v|o)?\b|\bгсп-df\b/i.test(primaryText) &&
-    !/саморез|vida|dübel|dubel|болт|профил|profil|karkas|agraf|подвес|соединител|краб|bant|лента|серпянк|testere|ножовка|bıçak|bicak|фрез|пила|люк|kapağ|kapak|işleri|isleri|islerı|mockup/i.test(primaryText)
+    /гипсокартон|alçıpan|alcipan|\bгкл(?:в|о)?\b|\bgkl(?:v|o)?\b|\bгсп[\s-]*df|\bсапфир\b/i.test(primaryText) &&
+    !/саморез|vida|dübel|dubel|болт|профил|profil|karkas|agraf|подвес|соединител|краб|bant|лента|серпянк|testere|ножовка|bıçak|bicak|фрез|пила|люк|kapağ|kapak|рубанок|rende|герметик|germetik|шпаклевк|macun|işleri|isleri|islerı|mockup/i.test(primaryText)
   ) {
-    const isFire = /огнестой|kırmızı|kirmizi|yangın|yangin|гкло|gklo|гсп-df/i.test(primaryText);
-    const isMoisture = /влагостой|yeşil|yesil|suya|gklv|гклв/i.test(primaryText);
+    const isSapfir = /сапфир|sapfir|dfh3ir/i.test(primaryText);
+    const isVetonit = /ветонит|vetonit|мультикомфорт/i.test(primaryText);
+    const isFire = /огнестой|kırmızı|kirmizi|yangın|yangin|гкло|gklo|гсп-df(?!h3ir)/i.test(primaryText);
+    const isMoisture = /влагостой|yeşil|yesil|suya|gklv|гклв|гсп-h2/i.test(primaryText);
+    const thMatch = primaryText.match(/\b(9[.,]5|12[.,]5|15)\s*(?:мм|mm|\*|[xх×])/i);
+    const thStr = thMatch ? `${thMatch[1].replace(',', '.')} mm` : '12.5 mm';
+    if (isSapfir) {
+      return {
+        materialName: `Knauf Sapfir Darbe/Yangın/Suya Dayanıklı Alçıpan DFH3IR ${thStr} (1.2x2.5 m)`,
+        category: 'Yalıtım & Alçıpan'
+      };
+    }
+    if (isVetonit) {
+      return {
+        materialName: `Vetonit Multikomfort Alçıpan Levha ${thStr} (1.2x2.5 m)`,
+        category: 'Yalıtım & Alçıpan'
+      };
+    }
     return {
       materialName: isFire
-        ? 'Knauf Yangına Dayanıklı Alçıpan GKLO 12.5 mm (1.2x2.5 m)'
+        ? `Knauf Yangına Dayanıklı Alçıpan GKLO ${thStr} (1.2x2.5 m)`
         : isMoisture
-          ? 'Knauf Suya Dayanıklı Alçıpan GKLV 12.5 mm (1.2x2.5 m)'
-          : 'Knauf Standart Alçıpan GKL 12.5 mm (1.2x2.5 m)',
+          ? `Knauf Suya Dayanıklı Alçıpan GKLV ${thStr} (1.2x2.5 m)`
+          : `Knauf Standart Alçıpan GKL ${thStr} (1.2x2.5 m)`,
       category: 'Yalıtım & Alçıpan'
     };
   }
 
-  // 3.8 SU YALITIM MEMBRANI (Technoelast / Izoplast / Planter) & GEOTEKSTİL & XPS PENOPLEX
-  if (/техноэласт|изопласт|teknoelast|tehnoelast|technoelast|izoplast/i.test(primaryText) && !/праймер|primer|мастик/i.test(primaryText)) {
-    const brand = /изопласт|izoplast/i.test(primaryText) ? 'İzoplast' : 'Technoelast';
-    if (/фундамент|fundament/i.test(primaryText)) {
-      return { materialName: `${brand} Fundament Su Yalıtım Membranı (Rulo)`, category: 'Yalıtım & Alçıpan' };
+  // 3.8 SU YALITIM MEMBRANI (Villateks / Icopal / Ultranap / Technoelast / Unifleks / Linokrom / Bipol / İzoplast), BİTÜM ASTARI, PLANTER & XPS PENOPLEX
+  if (/праймер\s*битумн|битумн.*праймер|icopal.*primer|bitüm.*astar/i.test(primaryText)) {
+    const volMatch = primaryText.match(/\b(20|21[.,]5|16|18|30)\s*(?:л|lt|l|кг|kg)\b/i);
+    const volStr = volMatch ? ` (${volMatch[0].replace(',', '.')})` : '';
+    return {
+      materialName: `Bitüm Esaslı Su Yalıtım Astarı (Праймер битумный)${volStr}`,
+      category: 'Kimyasallar & Boya'
+    };
+  }
+  if (/жгут.*icopal|icopal.*кордон|жгут.*кордон/i.test(primaryText)) {
+    return {
+      materialName: 'Icopal Kordon Derz Yalıtım Fitili (Жгут КОРДОН)',
+      category: 'Yalıtım & Alçıpan'
+    };
+  }
+  if (/бандажн.*лент.*icopal|icopal.*бандажн/i.test(primaryText)) {
+    return {
+      materialName: 'Icopal Pah / Ek Yeri Yalıtım Bandı (Бандажная лента)',
+      category: 'Yalıtım & Alçıpan'
+    };
+  }
+  if (
+    /техноэласт|изопласт|teknoelast|tehnoelast|technoelast|izoplast|икопал|icopal|виллатекс|villateks|villatex|ультранап|ultranap|унифлекс|unifleks|uniflex|линокром|linokrom|биполь|bipol|бикрост|bikrost|гидроизол.*рулон|мембран.*(?:эпп|экп|ткп|хпп|icopal|икопал|виллатекс|ультранап)/i.test(primaryText) &&
+    !/праймер|primer|мастик|buhar\s*kesici|пароизоляц|ветрозащит|изоспан|planter|плантер|жгут|бандажн/i.test(primaryText)
+  ) {
+    // Orijinal Rusça fatura açıklaması varsa (örn. ВИЛЛАТЕКС Н ЭПП 3,0 veya УЛЬТРАНАП), Prizma'nın yanlış stok kartını (MEMBRAN ICOPAL 4MM) ezmesi için önce effectiveOrig'e bak!
+    const memSrc = (effectiveOrig && /техноэласт|изопласт|икопал|icopal|виллатекс|villateks|ультранап|ultranap|унифлекс|линокром|биполь|бикрост|эпп|экп|ткп|хпп/i.test(effectiveOrig))
+      ? effectiveOrig
+      : primaryText;
+
+    let brand = 'Bitümlü';
+    if (/ультранап|ultranap/i.test(memSrc)) brand = 'Ultranap';
+    else if (/виллатекс|villateks|villatex/i.test(memSrc)) brand = 'Villateks';
+    else if (/икопал|icopal/i.test(memSrc)) brand = 'Icopal';
+    else if (/техноэласт|teknoelast|tehnoelast|technoelast/i.test(memSrc)) brand = 'Technoelast';
+    else if (/изопласт|izoplast/i.test(memSrc)) brand = 'İzoplast';
+    else if (/унифлекс|unifleks|uniflex/i.test(memSrc)) brand = 'Unifleks';
+    else if (/линокром|linokrom/i.test(memSrc)) brand = 'Linokrom';
+    else if (/биполь|bipol/i.test(memSrc)) brand = 'Bipol';
+    else if (/бикрост|bikrost/i.test(memSrc)) brand = 'Bikrost';
+
+    let layerType = '';
+    if (/фундамент|fundament/i.test(memSrc)) layerType = 'Fundament';
+    else if (/альфа|alfa/i.test(memSrc)) layerType = 'Alfa';
+    else if (/мост\s*б|most\s*b/i.test(memSrc)) layerType = 'Most B';
+    else if (/\b[нh]\s*(?:эпп|epp)\b/i.test(memSrc)) layerType = 'H EPP';
+    else if (/\b[вv]\s*(?:экп|ekp)\b/i.test(memSrc)) layerType = 'V EKP';
+    else if (/эпп|epp/i.test(memSrc)) layerType = 'EPP';
+    else if (/экп|ekp/i.test(memSrc)) layerType = 'EKP';
+    else if (/ткп|tkp/i.test(memSrc)) layerType = 'TKP';
+    else if (/хпп|hpp/i.test(memSrc)) layerType = 'HPP';
+
+    // Kalınlık: 3,0 / 3.0 / 3.5 / 4,0 / 4.0 / 4.5 / 5.0 / 3мм / 4мм
+    const thMatch =
+      memSrc.match(/(?:эпп|экп|ткп|хпп|epp|ekp|tkp|hpp)[\s-]*(2[.,]5|3[.,]0|3[.,]5|4[.,]0|4[.,]2|4[.,]5|5[.,]0)\b/i) ||
+      memSrc.match(/\b(2[.,]5|3[.,]0|3[.,]5|4[.,]0|4[.,]2|4[.,]5|5[.,]0)\s*(?:мм|mm)?\b/i) ||
+      memSrc.match(/\b(3|4|5)\s*(?:мм|mm)\b/i);
+    let thStr = '';
+    if (thMatch) {
+      const rawTh = thMatch[1].replace(',', '.');
+      thStr = rawTh.includes('.') ? `${rawTh} mm` : `${rawTh}.0 mm`;
     }
-    const type = /экп|ekp/i.test(primaryText) ? 'EKP' : 'EPP-4.0';
-    return { materialName: `${brand} ${type} Su Yalıtım Membranı (10 m² Rulo)`, category: 'Yalıtım & Alçıpan' };
+
+    // Rulo uzunluğu/alanı: 15м / 15 м2 vs 10м / 10 м2
+    const rollLenMatch = memSrc.match(/\b(10|15)\s*(?:м2|м²|m2|m²|м|m)(?:\s*[*xх×]\s*1\s*(?:м|m))?(?![a-zа-яё0-9])/i);
+    const rollArea = rollLenMatch ? `${rollLenMatch[1]} m² Rulo` : (brand === 'Villateks' && thStr === '3.0 mm' ? '15 m² Rulo' : '10 m² Rulo');
+
+    const specParts = [brand, layerType, thStr].filter(Boolean).join(' ');
+    return {
+      materialName: `${specParts} Su Yalıtım Membranı (${rollArea})`,
+      category: 'Yalıtım & Alçıpan'
+    };
   }
   if (/\bplanter\b|\bплантер\b/i.test(primaryText)) {
-    return { materialName: 'Planter Geo Profilli Drenaj ve Koruma Membranı (2x15 m)', category: 'Yalıtım & Alçıpan' };
+    const plSrc = (effectiveOrig && /\bplanter\b|\bплантер\b/i.test(effectiveOrig)) ? effectiveOrig : primaryText;
+    const isGreen = /green|грин/i.test(plSrc);
+    const isGeo = /geo|гео/i.test(plSrc);
+    const dimM = plSrc.match(/\b([12]\s*[*xх×]\s*(?:15|20))\s*(?:м|m)?/i);
+    const dimStr = dimM ? dimM[1].replace(/\s+/g, '').replace(/[х*×]/gi, 'x') + ' m' : (isGeo ? '2x15 m' : '2x20 m');
+    const subType = isGreen ? 'Planter Green 30' : (isGeo ? 'Planter Geo' : 'Planter Standart');
+    return {
+      materialName: `${subType} Profilli Drenaj ve Koruma Membranı (${dimStr})`,
+      category: 'Yalıtım & Alçıpan'
+    };
   }
   if (/дорнит|геотекстил|dornit|geotekstil|georex|geoflaks/i.test(primaryText) && !/сетка/i.test(primaryText)) {
     let density = 300;
@@ -3317,9 +3532,14 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     return { materialName: `Dornit Geotekstil Keçe ${density} g/m² (Rulo)`, category: 'Yalıtım & Alçıpan' };
   }
   if (/пеноплэкс|пеноплекс|penoplex|penopleks|\bxps\b.*(?:технониколь|carbon|levha)|экструдирован.*пенополистирол/i.test(primaryText) && !/клей|пена|крепеж|дюбель/i.test(primaryText)) {
+    const xpsSrc = (effectiveOrig && /\b(20|30|40|50|60|80|100|120)\b/.test(effectiveOrig)) ? effectiveOrig : primaryText;
+    const parenOverride = combined.match(/\(\s*(20|30|40|50|60|80|100|120)\s*(?:мм|mm)\b/i)?.[1];
     const xpsThick =
-      primaryText.match(/\b118[05]\s*[*xх×]\s*58[05]\s*[*xх×]\s*(20|30|40|50|80|100)\b/)?.[1] ||
-      primaryText.match(/\b(20|30|40|50|80|100)\s*(?:мм|mm)\b/i)?.[1] ||
+      parenOverride ||
+      xpsSrc.match(/\b118[05]\s*[*xх×]\s*58[05]\s*[*xх×]\s*(20|30|40|50|60|80|100|120)\b/)?.[1] ||
+      xpsSrc.match(/\b(20|30|40|50|60|80|100|120)\s*[*xх×]\s*118[05]\s*[*xх×]\s*58[05]\b/)?.[1] ||
+      xpsSrc.match(/\b(20|30|40|50|60|80|100|120)\s*(?:мм|mm)\b/i)?.[1] ||
+      primaryText.match(/\b(20|30|40|50|60|80|100|120)\s*(?:мм|mm)\b/i)?.[1] ||
       '50';
     return {
       materialName: `Penoplex / XPS Isı Yalıtım Levhası ${xpsThick} mm (1185x585 mm)`,
@@ -3407,15 +3627,18 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 3.12 STANDART METRİK SOMUN (DIN 934) & PUL/RONDELA (DIN 125 / DIN 9021)
+  // 3.12 STANDART METRİK SOMUN (DIN 934) & PUL/RONDELA (DIN 125 / DIN 9021) (Paslanmaz A2 ve Mukavemet Sınıfı к.п. 8/10 ayır!)
   if (
     (/^(?:somun|altıköşe\s*somun)\s*m?\d+/i.test(name.trim()) || /гайка.*din\s*934|гайка\s+шестигран/i.test(primaryText)) &&
     !/низкая|ince|din\s*982|din\s*985|fiber|рым|стяжн|kalıp|kalip|барашк|колпачк|фланц|соединит|uzatma|болт|комплект|komplekt/i.test(primaryText)
   ) {
     const mNut = primaryText.match(/\b[mм]\s*(6|8|10|12|14|16|18|20|22|24|27|30)\b/i);
     if (mNut) {
+      const isInox = /нерж|\ba2\b|\bа2\b|\ba4\b|\bа4\b|paslanmaz|inox/i.test(primaryText);
+      const kpMatch = primaryText.match(/к\.?\s*п\.?\s*(8|10|12)/i);
+      const specSuffix = isInox ? ' (Paslanmaz Çelik A2)' : (kpMatch ? ` (Sınıf ${kpMatch[1]}.0)` : '');
       return {
-        materialName: `Altıköşe Çelik Somun (DIN 934) M${mNut[1]}`,
+        materialName: `Altıköşe Çelik Somun (DIN 934) M${mNut[1]}${specSuffix}`,
         category: 'Sarf Malzeme & Hırdavat'
       };
     }
@@ -3427,13 +3650,39 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     const mWasher = primaryText.match(/\b[mм]\s*(6|8|10|12|14|16|18|20|22|24|27|30)\b/i);
     if (mWasher) {
       const isWide = /9021|увеличен|кузовн|geniş|şase/i.test(primaryText);
+      const isInox = /нерж|\ba2\b|\bа2\b|\ba4\b|\bа4\b|paslanmaz|inox/i.test(primaryText);
+      const specSuffix = isInox ? ' (Paslanmaz Çelik A2)' : '';
       return {
         materialName: isWide
-          ? `Geniş Şase Pul / Rondela (DIN 9021) M${mWasher[1]}`
-          : `Düz Çelik Pul / Rondela (DIN 125) M${mWasher[1]}`,
+          ? `Geniş Şase Pul / Rondela (DIN 9021) M${mWasher[1]}${specSuffix}`
+          : `Düz Çelik Pul / Rondela (DIN 125) M${mWasher[1]}${specSuffix}`,
         category: 'Sarf Malzeme & Hırdavat'
       };
     }
+  }
+  if (/очки\s+защитн|gözlük.*iş\s*güven|şeffaf.*koruyucu\s*gözlük/i.test(primaryText)) {
+    if (/закрыт|kapalı\s*tip|goggle/i.test(primaryText)) {
+      return {
+        materialName: 'Kapalı Tip Koruyucu İş Gözlüğü (Очки защитные закрытые)',
+        category: 'İş Güvenliği & KKD'
+      };
+    }
+    return {
+      materialName: 'Açık Tip Şeffaf Polikarbonat Koruyucu Gözlük (Очки защитные открытые)',
+      category: 'İş Güvenliği & KKD'
+    };
+  }
+  if (/vell\s*vl-231ch|картридж\s+комус\s+tze-231/i.test(combined)) {
+    if (/комус\s+tze-231/i.test(cleanOrig)) {
+      return {
+        materialName: 'Etiket Yazıcı Kartuşu Комус / Brother TZE-231 (12 mm x 8 m)',
+        category: 'Ofis & Kırtasiye'
+      };
+    }
+    return {
+      materialName: 'Çipli Etiket Yazıcı Kartuşu Vell VL-231CH (12 mm)',
+      category: 'Ofis & Kırtasiye'
+    };
   }
 
   // 4. Eğer ürün adında Rusça (Kiril) karakter varsa, teknik ölçülerini koruyarak Türkçe'ye çevir
@@ -4755,8 +5004,8 @@ app.get('/api/materials/compare', async (req, res) => {
       if (/^(?:Арматура рифленая А500С ГОСТ 34028|Сетка сварная арматурная Вр-1|Проволока стальная вязальная ТОЧ|Каркас арматурный сварной|Каркас металлический|Уголок стальной равнополочный ГОСТ 8509|Труба стальная профильная ГОСТ|Труба стальная электросварная ГОСТ|Блок газобетонный стеновой D500|Фанера ламинированная ФОФ для опалубки|Утеплитель каменная вата|Экструдированный пенополистирол|Саморезы по гипсокартону фосфатированные|Ножовка по гипсокартону|Профиль\s*\/\s*подвес для гипсокартона|Гипсокартонный лист|Компрессор воздушный электрический|Эмаль алкидная ПФ-115|Валик малярный с бюгелем|Ершик для унитаза с подставкой|Щетка металлическая зачистная|Черенок деревянный для щетки|Щетка для уборки помещений|Кисть малярная|Пленка стрейч упаковочная|Пленка полиэтиленовая техническая|Тент строительный защитный|Электроды сварочные покрытые|Пропан технический в баллонах|Круг \(диск\) отрезной по металлу|Очиститель монтажной пены профессиональный|Пистолет для монтажной пены профессиональный|Пена монтажная профессиональная под пистолет|Диспенсер для упаковочного скотча|Скотч упаковочный клейкий|Лента малярная креппированная|Перчатки рабочие защитные|Каска строительная защитная|Клипса \(держатель\) для монтажного пистолета|Гвозди строительные ГОСТ|Саморезы строительные оцинкованные|Рым-болт оцинкованный DIN|Болт оцинкованный с шестигранной головкой|Гайка шестигранная оцинкованная DIN|Шайба плоская\s*\/\s*пружинная|Анкерный болт\s*\/\s*шпилька|Хомут кабельный нейлоновый|Наконечник\s*\/\s*гильза кабельная|Кабель силовой медный ВВГнг|Зубило плоское\s*\/\s*пика|Нож строительный сегментный|Запчасть для тепловой пушки|Коронка биметаллическая по металлу|Тачка строительная усиленная|Известь хлорная\s*\/\s*средство|Утеплитель теплоизоляционный минераловатный|Доска магнитно-маркерная офисная|Рулетка измерительная\s*\/\s*уровень|Ключ гаечный комбинированный|Пиломатериал обрезной|Плита ориентированно-стружечная|Бетон товарный БСГ|Цемент портландцемент|Песок строительный карьерный|Щебень гранитный|Кирпич строительный|Смесь сухая ремонтная|Клей плиточный цементный|Грунтовка строительная глубокого|Растворитель технический|Краска строительная водно-дисперсионная|Валик малярный строительный|Шпатель малярный из нержавеющей|Кельма\s*\/\s*гладилка|Герметик силиконовый|Пена монтажная полиуретановая|Гидроизоляция рулонная|Рукав пожарный напорный|Клапан \(вентиль\) пожарный|Труба полипропиленовая\s*\/\s*ПВХ|Кран шаровой латунный|Фитинг соединительный|Хомут трубный стальной|Прокладка уплотнительная сантехническая|Выключатель автоматический модульный|Щит распределительный\s*\/\s*коробка|Розетка электрическая\s*\/\s*вилка|Светильник светодиодный строительный|Электроинструмент\s*\/\s*оснастка|Диск отрезной\s*\/\s*круг|Полотно пильное\s*\/\s*диск|Инструмент слесарно-монтажный|Инвентарь строительный|Емкость\s*\/\s*ведро строительное|Дюбель строительный распорный|Гвозди строительные\s*\/\s*монтажные|Фурнитура дверная|Строп грузоподъемный|Комплектующие опалубки|Жилет сигнальный|Спецобувь защитная|Спецодежда рабочая|Средства индивидуальной защиты|Огнетушитель порошковый|Строительно-монтажный материал|Канцелярские|Оборудование стройплощадки|Хозяйственно-бытовое обеспечение)/i.test(cleaned)) {
         return '';
       }
-      // Reject if it contains bracketed or parenthetical Turkish stock card suffixes appended by Prizma
-      if (/\[.*\]$/.test(cleaned)) return '';
+      // Reject if it contains bracketed or parenthetical Turkish stock card suffixes appended by Prizma or custom fabrication cages (каркас) or generic rubber gloves
+      if (/\[.*\]$/.test(cleaned) || /каркас|^перчатки\s+резиновые$/i.test(cleaned)) return '';
 
       // Normalize Cyrillic 'х' between digits and standardize spacing
       const normOrig = cleaned
@@ -4799,8 +5048,18 @@ app.get('/api/materials/compare', async (req, res) => {
       if (!inv.items || !Array.isArray(inv.items)) return;
       inv.items.forEach(item => {
         if (!item.materialName || item.unitPrice === undefined || item.unitPrice === null) return;
-        const priceNum = Number(item.unitPrice);
+        let priceNum = Number(item.unitPrice);
         if (isNaN(priceNum) || priceNum <= 0) return;
+        const itemQty = Number(item.quantity) || 0;
+        const itemTotal = Number(item.totalPrice) || 0;
+        if (itemQty > 0 && itemTotal > 0) {
+          const impliedUnit = itemTotal / itemQty;
+          const vatRatio = impliedUnit / priceNum;
+          // Rusya faturalarında (УПД / Комус vb.) birim fiyat KDV hariç, satır toplamı KDV dahil (%20 veya %22 НДС) çekilmişse KDV dahil birim fiyata eşitle
+          if (vatRatio >= 1.185 && vatRatio <= 1.228) {
+            priceNum = Number(impliedUnit.toFixed(2));
+          }
+        }
 
         // 0. Sipariş/Hizmet özet satırlarını (İndirim sekmesi özetleri ve tedarikçi adı taşıyan paket özetleri) malzeme kıyaslamasına alma
         const unitLower = String(item.unit || '').toLowerCase().trim();

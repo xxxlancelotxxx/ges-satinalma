@@ -230,7 +230,10 @@ export function evaluateDiscountAudit(
         const dBase = desc.replace(/\s*\([^)]+\)\s*$/, '').trim();
         return vName === desc || (vBase.length >= 6 && vBase === dBase && !/\b\d+/.test(vName.replace(vBase, '')) && !/\b\d+/.test(desc.replace(dBase, '')));
       });
-      if (!comp || !Array.isArray(comp.history) || comp.history.length < 2) continue;
+      if (!comp) continue;
+      const hasHistory = Array.isArray(comp.history) && comp.history.length >= 2;
+      const hasSummaryAvg = !Array.isArray(comp.history) && Number(comp.avgUnitPrice || 0) > 0;
+      if (!hasHistory && !hasSummaryAvg) continue;
 
       const itemUnit = item.unit || 'adet';
       const benchmarkUnit = comp.standardUnit || comp.unit || 'adet';
@@ -250,25 +253,35 @@ export function evaluateDiscountAudit(
         const effectivePrice = conv.conversionApplied ? conv.convertedUnitPrice : itemPrice;
         const curDateMs = input.orderDate ? new Date(input.orderDate).getTime() : 0;
 
-        // Sadece kendisi dışındaki ve bu faturadan ÖNCE veya aynı dönemde alınmış emsal faturaları baz al
-        const otherHistory = comp.history.filter((h: any) => {
-          const hPrice = Number(h.normalizedUnitPrice || h.unitPrice || 0);
-          if (hPrice <= 0) return false;
-          if (input.invoiceNo && h.invoiceNumber && String(h.invoiceNumber).trim() === String(input.invoiceNo).trim()) return false;
-          if (curDateMs > 0 && h.date) {
-            const hMs = new Date(h.date).getTime();
-            // Kendisinden >15 gün sonra alınmış gelecekteki faturaları geçmiş baz fiyatı yapma
-            if (hMs > curDateMs + 15 * 86400000) return false;
-          }
-          return true;
-        });
+        let benchmarkAvg = 0;
+        let benchmarkMin = 0;
+        let benchmarkMax = 0;
 
-        if (otherHistory.length === 0) continue;
+        if (hasHistory) {
+          // Sadece kendisi dışındaki ve bu faturadan ÖNCE veya aynı dönemde alınmış emsal faturaları baz al
+          const otherHistory = comp.history.filter((h: any) => {
+            const hPrice = Number(h.normalizedUnitPrice || h.unitPrice || 0);
+            if (hPrice <= 0) return false;
+            if (input.invoiceNo && h.invoiceNumber && String(h.invoiceNumber).trim() === String(input.invoiceNo).trim()) return false;
+            if (curDateMs > 0 && h.date) {
+              const hMs = new Date(h.date).getTime();
+              // Kendisinden >15 gün sonra alınmış gelecekteki faturaları geçmiş baz fiyatı yapma
+              if (hMs > curDateMs + 15 * 86400000) return false;
+            }
+            return true;
+          });
 
-        const otherPrices = otherHistory.map((h: any) => Number(h.normalizedUnitPrice || h.unitPrice));
-        const benchmarkAvg = otherPrices.reduce((s: number, p: number) => s + p, 0) / otherPrices.length;
-        const benchmarkMin = Math.min(...otherPrices);
-        const benchmarkMax = Math.max(...otherPrices);
+          if (otherHistory.length === 0) continue;
+
+          const otherPrices = otherHistory.map((h: any) => Number(h.normalizedUnitPrice || h.unitPrice));
+          benchmarkAvg = otherPrices.reduce((s: number, p: number) => s + p, 0) / otherPrices.length;
+          benchmarkMin = Math.min(...otherPrices);
+          benchmarkMax = Math.max(...otherPrices);
+        } else {
+          benchmarkAvg = Number(comp.avgUnitPrice || 0);
+          benchmarkMin = Number(comp.minUnitPrice || benchmarkAvg);
+          benchmarkMax = Number(comp.maxUnitPrice || benchmarkAvg);
+        }
 
         if (benchmarkAvg > 0) {
           const diff = ((effectivePrice - benchmarkAvg) / benchmarkAvg) * 100;

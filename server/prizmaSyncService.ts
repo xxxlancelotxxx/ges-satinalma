@@ -260,6 +260,7 @@ class PrizmaSyncService {
           const matchedRow = Array.isArray(cachedOrderRows)
             ? (cachedOrderRows.find((r: any) => `prizma_row_${r.id}` === it.id) || cachedOrderRows[idx])
             : undefined;
+          const pdfDesc = matchedRow?.pdfExtractedName ? cleanRawMaterialName(matchedRow.pdfExtractedName) : '';
           const rowDesc = matchedRow?.description ? cleanRawMaterialName(matchedRow.description) : '';
           const rowMatRu = matchedRow?.materialName2 ? cleanRawMaterialName(matchedRow.materialName2) : '';
           const origRaw = cleanRawMaterialName(it.originalName || it.materialName || '');
@@ -270,18 +271,16 @@ class PrizmaSyncService {
           const fallbackParenDesc = (parenMatch && !/saha\s*genel|excel\s*dosya|fatura\s*icin|it\s*siparis|villa\s*icin|mokr[ıi]y\s*facad|kenar\s*koruma|^https?:/i.test(parenMatch[1]))
             ? parenMatch[1].trim()
             : '';
-          const effectiveRowDesc = rowDesc || fallbackParenDesc;
+          const effectiveRowDesc = pdfDesc || rowDesc || fallbackParenDesc;
           const hasMeaningfulRowDesc = !isShortNoteOrSpecFragment(effectiveRowDesc);
-
-          let effectiveTrSource = matRaw || origRaw;
-          if (isGenericStockCard && hasMeaningfulRowDesc) {
-            effectiveTrSource = translateRussianMaterialToTurkish(effectiveRowDesc) || `${matRaw} (${effectiveRowDesc})`;
-          } else if (/[а-яА-ЯёЁ]/.test(matRaw)) {
-            effectiveTrSource = translateRussianMaterialToTurkish(origRaw || matRaw);
-          }
+          const isFullRussianRowDesc = Boolean(pdfDesc) || (hasMeaningfulRowDesc && effectiveRowDesc.length >= 12 && /[а-яА-ЯёЁ]{4,}/.test(effectiveRowDesc));
 
           let russianOrig = '';
-          if (rowMatRu && !isShortNoteOrSpecFragment(rowMatRu)) {
+          if (isFullRussianRowDesc) {
+            russianOrig = effectiveRowDesc;
+          } else if (!isShortNoteOrSpecFragment(origRaw) && origRaw.length >= 12 && !origRaw.includes('[') && !/^Строительно-монтажный материал/i.test(origRaw)) {
+            russianOrig = origRaw;
+          } else if (rowMatRu && !isShortNoteOrSpecFragment(rowMatRu)) {
             russianOrig = hasMeaningfulRowDesc && !effectiveRowDesc.toLowerCase().includes(rowMatRu.toLowerCase().slice(0, 6))
               ? `${rowMatRu} (${effectiveRowDesc})`
               : rowMatRu;
@@ -292,11 +291,20 @@ class PrizmaSyncService {
           } else if (hasMeaningfulRowDesc && effectiveRowDesc.length >= 15) {
             russianOrig = effectiveRowDesc;
           } else {
-            russianOrig = ensureRussianOriginalName(effectiveTrSource, !isShortNoteOrSpecFragment(origRaw) ? origRaw : '');
+            russianOrig = ensureRussianOriginalName(matRaw || origRaw, !isShortNoteOrSpecFragment(origRaw) ? origRaw : '');
+          }
+
+          let effectiveTrSource = matRaw || origRaw;
+          if (isFullRussianRowDesc) {
+            effectiveTrSource = translateRussianMaterialToTurkish(effectiveRowDesc) || matRaw;
+          } else if (isGenericStockCard && hasMeaningfulRowDesc) {
+            effectiveTrSource = translateRussianMaterialToTurkish(effectiveRowDesc) || `${matRaw} (${effectiveRowDesc})`;
+          } else if (/[а-яА-ЯёЁ]/.test(matRaw)) {
+            effectiveTrSource = translateRussianMaterialToTurkish(origRaw || matRaw);
           }
 
           const itemCat = normalizeCategoryName(
-            it.category && it.category !== 'MALZEME' && !isGenericStockCard ? it.category : '',
+            it.category && it.category !== 'MALZEME' && !isGenericStockCard && !isFullRussianRowDesc ? it.category : '',
             `${russianOrig} ${effectiveTrSource}`
           );
           return {
@@ -588,26 +596,33 @@ class PrizmaSyncService {
                 continue;
               }
 
-              const isGenericCard = /muhtelif|diğer|diger/i.test(cleaned);
-              const hasUsefulDesc = !isShortNoteOrSpecFragment(rawDesc);
+              const isGenericCard = /muhtelif|diğer|diger|sarf\s*malzemeler.*ozel/i.test(cleaned);
+              const pdfDesc = r.pdfExtractedName ? cleanRawMaterialName(r.pdfExtractedName) : '';
+              const effectiveDesc = pdfDesc || rawDesc;
+              const hasUsefulDesc = !isShortNoteOrSpecFragment(effectiveDesc);
+              const isFullRuDesc = Boolean(pdfDesc) || (hasUsefulDesc && effectiveDesc.length >= 12 && /[а-яА-ЯёЁ]{4,}/.test(effectiveDesc));
 
-              const translatedTr = (isGenericCard && hasUsefulDesc)
-                ? (translateRussianMaterialToTurkish(rawDesc) || `${cleaned} (${rawDesc})`)
-                : translateRussianMaterialToTurkish(cleaned || rawDesc || rawName);
+              const translatedTr = isFullRuDesc
+                ? (translateRussianMaterialToTurkish(effectiveDesc) || cleaned)
+                : (isGenericCard && hasUsefulDesc)
+                  ? (translateRussianMaterialToTurkish(effectiveDesc) || `${cleaned} (${effectiveDesc})`)
+                  : translateRussianMaterialToTurkish(cleaned || effectiveDesc || rawName);
 
               let russianOrig = '';
-              if (rawRu && !isShortNoteOrSpecFragment(rawRu)) {
-                russianOrig = hasUsefulDesc && !rawDesc.toLowerCase().includes(rawRu.toLowerCase().slice(0, 6))
-                  ? `${rawRu} (${rawDesc})`
+              if (isFullRuDesc) {
+                russianOrig = effectiveDesc;
+              } else if (rawRu && !isShortNoteOrSpecFragment(rawRu)) {
+                russianOrig = hasUsefulDesc && !effectiveDesc.toLowerCase().includes(rawRu.toLowerCase().slice(0, 6))
+                  ? `${rawRu} (${effectiveDesc})`
                   : rawRu;
               } else if (isGenericCard && hasUsefulDesc) {
-                russianOrig = rawDesc;
+                russianOrig = effectiveDesc;
               } else if (!isShortNoteOrSpecFragment(cleaned) && cleaned.length >= 10) {
                 russianOrig = cleaned;
-              } else if (hasUsefulDesc && rawDesc.length >= 15) {
-                russianOrig = rawDesc;
+              } else if (hasUsefulDesc && effectiveDesc.length >= 15) {
+                russianOrig = effectiveDesc;
               } else {
-                russianOrig = ensureRussianOriginalName(translatedTr || cleaned, !isShortNoteOrSpecFragment(rawDesc) ? rawDesc : '');
+                russianOrig = ensureRussianOriginalName(translatedTr || cleaned, !isShortNoteOrSpecFragment(effectiveDesc) ? effectiveDesc : '');
               }
 
               const itemCategory = normalizeCategoryName('', `${russianOrig} ${cleaned} ${translatedTr}`);

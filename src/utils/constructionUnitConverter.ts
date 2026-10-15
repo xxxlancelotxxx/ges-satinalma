@@ -524,10 +524,10 @@ export function getMaterialBenchmarkUnit(materialName: string, _category?: strin
   const text = String(materialName || '').toLowerCase();
   const normalizedUnits = currentUnits.map(normalizeStandardUnit);
 
-  // 0. KESİN ADET KALEMLERİ (Vitrifiye, Fırça, El Aleti, Manşon, Dübel, Cıvata, Tüp vb.)
+  // 0. KESİN ADET KALEMLERİ (Vitrifiye, Fırça, El Aleti, Aydınlatma, Kapak, Manşon, Dübel, Cıvata, Tüp vb.)
   if (
-    /fırça|firca|ершик|кисть|щетк|унитаз|klozet|раковин|lavabo|смесител|batarya|무фта|муфта|manşon|manson|дюбел|dübel|dubel|гвозд|çivi|civi|болт|гайк|шайб|анкер|ankraj|کлетка|клетка|тележк|баллон|tüpü|tupu|saati|редуктор|горелк|pürmüz|purmuz|conta|прокладк|хомут|kelepçe|kablo bağı|mandal|kilit|menteşe|петля|ручка|kalem|klasör|dosya|sandalye|koltuk|masa|dolap|ranza|yatak|baret|yelek|gözlük|очки|botu|ayakkabı|ботинк/i.test(text) &&
-    !/paspas ızgarası/i.test(text)
+    /fırça|firca|ершик|кисть|щетк|унитаз|klozet|раковин|lavabo|смесител|batarya|무фта|муфта|manşon|manson|дюбел|dübel|dubel|гвозд|çivi|civi|болт|гайк|шайб|анкер|ankraj|کлетка|клетка|тележк|баллон|tüpü|tupu|saati|редуктор|горелк|pürmüz|purmuz|conta|прокладк|хомут|kelepçe|kablo bağı|mandal|kilit|menteşe|петля|ручка|kalem|klasör|dosya|sandalye|koltuk|masa|dolap|ranza|yatak|baret|yelek|gözlük|очки|botu|ayakkabı|ботинк|светильник|прожектор|лампа|aydınlatma|aydinlatma|люк\b|kapak|kapağı|kapagi|рубанок|rende|терка|кельма|шпатель|spatula|ножовка|testere|штроборез|захват|миксер|пистолет|tabanca|герметик|germetik|лента|скотч|bant|валик|rulo|кювета|ванночка|стенд|pano|panosu/i.test(text) &&
+    !/paspas ızgarası|rulo.*membran|rulo.*yalıtım|рулонн/i.test(text)
   ) {
     return normalizedUnits[0] || 'adet';
   }
@@ -715,7 +715,9 @@ export function convertMaterialUnit(params: {
     };
   }
 
-  const text = `${materialName} ${rawItemName || ''} ${category || ''}`.toLowerCase();
+  // DİKKAT: Kategori adı (ör. "Yalıtım & Alçıpan" veya "Seramik & Vitrifiye") text aramasına dahil EDİLMEZ;
+  // aksi halde o kategorideki keramzit veya aksesuarlar "alçıpan"/"seramik" kelimesinden dolayı levha sanılır!
+  const text = `${materialName} ${rawItemName || ''}`.toLowerCase();
 
   // --------------------------------------------------------------------------
   // A. AĞIRLIK - AĞIRLIK (KG <-> TON)
@@ -1514,21 +1516,22 @@ export function convertMaterialUnit(params: {
   // --------------------------------------------------------------------------
   // D. PLAKA, LEVHA, KONTRPLAK, BRANDA/TENTE VE IZGARA (ADET / PLAKA <-> M² <-> M³)
   // --------------------------------------------------------------------------
-  const isSheetOrBoard = 
-    text.includes('гипсокартон') ||
-    text.includes('alçıpan') ||
-    text.includes('alcipan') ||
-    text.includes('гкл') ||
-    text.includes('осб') ||
-    text.includes('osb') ||
-    text.includes('фанер') ||
-    text.includes('kontrplak') ||
-    text.includes('plywood') ||
-    text.includes('аквапанел') ||
-    text.includes('тент') ||
-    text.includes('тарпаулин') ||
-    text.includes('branda') ||
-    text.includes('tente');
+  const isSheetOrBoard =
+    (text.includes('гипсокартон') ||
+      text.includes('alçıpan') ||
+      text.includes('alcipan') ||
+      text.includes('гкл') ||
+      text.includes('осб') ||
+      text.includes('osb') ||
+      text.includes('фанер') ||
+      text.includes('kontrplak') ||
+      text.includes('plywood') ||
+      text.includes('аквапанел') ||
+      text.includes('тент') ||
+      text.includes('тарпаулин') ||
+      text.includes('branda') ||
+      text.includes('tente')) &&
+    !/рубанок|rende|ножовка|testere|дюбел|dübel|dubel|саморез|vida|профиль|подвес|герметик|germetik|люк\b|kapak|kapağı|kapagi|лента|bant|шпатель|spatula/i.test(text);
 
   const explicitBoardArea = extractBoardAreaM2(combinedSpecText);
   const boardVolSpec = extractBoardVolumeM3(combinedSpecText);
@@ -1593,7 +1596,7 @@ export function convertMaterialUnit(params: {
   }
 
   // D2. Adet / Plaka <-> m² (Yalnızca gerçek levha/branda ise VEYA açık ebat varsa)
-  if (isSheetOrBoard || explicitBoardArea !== null) {
+  if ((isSheetOrBoard || explicitBoardArea !== null) && !/люк\b|kapak|kapağı|kapagi|светильник|прожектор|стенд|pano/i.test(text)) {
     let boardArea = explicitBoardArea;
     if (!boardArea) {
       if (text.includes('тент') || text.includes('тарпаулин') || text.includes('branda') || text.includes('tente')) {
@@ -1640,18 +1643,19 @@ export function convertMaterialUnit(params: {
   // --------------------------------------------------------------------------
   // E. HAZIR BETON, HARÇ & ŞAP, AGREGA (M³ <-> TON / KG)
   // --------------------------------------------------------------------------
-  const isBulkConcreteOrMortar = 
-    text.includes('бетон') ||
-    text.includes('beton') ||
-    text.includes('раствор') ||
-    text.includes('harç') ||
-    text.includes('harc') ||
-    text.includes('şap') ||
-    text.includes('sap') ||
-    text.includes('песок') ||
-    text.includes('kum') ||
-    text.includes('щебень') ||
-    text.includes('çakıl');
+  const isBulkConcreteOrMortar =
+    (text.includes('бетон') ||
+      text.includes('beton') ||
+      text.includes('раствор') ||
+      text.includes('harç') ||
+      text.includes('harc') ||
+      text.includes('şap') ||
+      text.includes('sap') ||
+      text.includes('песок') ||
+      text.includes('kum') ||
+      text.includes('щебень') ||
+      text.includes('çakıl')) &&
+    !/стенд|ящик.*песк|пескоуловител|миксер|рубанок|дюбел|dübel|сверл|бур|диск|круг|анкер/i.test(text);
 
   if (isBulkConcreteOrMortar) {
     let densityTonPerM3 = 2.4; // Hazır beton: 2.4 ton/m³
@@ -1691,10 +1695,44 @@ export function convertMaterialUnit(params: {
   }
 
   // --------------------------------------------------------------------------
+  // E1.5. BİG-BAG / ÇUVAL HAFİF AGREGA & KERAMZİT (ADET / TORBA <-> M³)
+  // --------------------------------------------------------------------------
+  const bigBagMatch = combinedSpecText.match(/биг[\s-]*б[еэ]г[а-яё\s]*(\d+(?:[.,]\d+)?)\s*(?:м3|m3|м³|m³)/i)
+    || ((/керамзит|keramzit|keramizit/i.test(text)) ? combinedSpecText.match(/(\d+(?:[.,]\d+)?)\s*(?:м3|m3|м³|m³)/i) : null);
+  if (bigBagMatch || (/керамзит|keramzit|keramizit/i.test(text) && (from === 'adet' || from === 'torba' || to === 'adet' || to === 'torba'))) {
+    const bagVolM3 = bigBagMatch ? parseFloat(bigBagMatch[1].replace(',', '.')) : (unitPrice >= 2500 ? 3.0 : 1.0);
+    if (bagVolM3 > 0 && (from === 'adet' || from === 'torba') && to === 'm³') {
+      return {
+        convertedUnitPrice: Number((unitPrice / bagVolM3).toFixed(2)),
+        convertedQuantity: Number((quantity * bagVolM3).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: bagVolM3,
+        formula: `1 Big-Bag / Torba = ${bagVolM3} m³`,
+        confidence: bigBagMatch ? 'EXACT' : 'HIGH',
+        conversionApplied: true
+      };
+    }
+    if (bagVolM3 > 0 && from === 'm³' && (to === 'adet' || to === 'torba')) {
+      return {
+        convertedUnitPrice: Number((unitPrice * bagVolM3).toFixed(2)),
+        convertedQuantity: Number((quantity / bagVolM3).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: 1 / bagVolM3,
+        formula: `1 Big-Bag / Torba = ${bagVolM3} m³`,
+        confidence: bigBagMatch ? 'EXACT' : 'HIGH',
+        conversionApplied: true
+      };
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // E2. GAZBETON VE DUVAR BLOKLARI (ADET / ŞT <-> M³)
   // --------------------------------------------------------------------------
-  const isGazbetonBlock = 
-    /газобетон|gazbeton|bonolit|poritep|ytong|istkult|исткульт|шлакоблок|кбб/i.test(text);
+  const isGazbetonBlock =
+    /газобетон|gazbeton|bonolit|poritep|ytong|istkult|исткульт|шлакоблок|кбб/i.test(text) &&
+    !/рубанок|rende|дюбел|dübel|dubel|терка|кельма|шпатель|ножовка|testere|штроборез|захват|клей|yapıştırıcı|yapistirici/i.test(text);
 
   if (isGazbetonBlock) {
     const gazSpec = extractGazbetonDimensions(combinedSpecText);
@@ -1799,7 +1837,9 @@ export function convertMaterialUnit(params: {
   // G. BOYA, KALIP YAĞI, KOVA, AMBALAJLI PAKET & ELEKTROT (KOVA / ADET / PAKET <-> KG / LT)
   // --------------------------------------------------------------------------
   const pkgSpec = extractPackageVolumeOrWeight(combinedSpecText);
-  const isPaintOrPrimer = /краск|boya|эмаль|emal|пф-115|pf-115|грунтовк|astar|antipas/i.test(text);
+  const isPaintOrPrimer =
+    /краск|boya|эмаль|emal|пф-115|pf-115|грунтовк|astar|antipas/i.test(text) &&
+    !/светильник|прожектор|лампа|aydınlatma|aydinlatma|люк\b|kapak|kapağı|kapagi|валик|rulo|кисть|fırça|firca|лента|скотч|bant|кювета|ванночка|пистолет|миксер|шпатель/i.test(text);
   const isFormworkOil = /kalıp\s*ayırıcı\s*yağ|kalıp\s*yağ|kalip\s*yag|масло.*опалуб|смазка.*опалуб|эмульсол/i.test(text);
   const isDryBagMortar = /tamir\s*harcı|tamir\s*harci|ремонтн.*состав|litokol|glims|mapei|planitop/i.test(text);
 
