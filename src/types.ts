@@ -240,6 +240,10 @@ export interface MaterialComparisonHistoryItem {
   invoiceId?: string;
   invoiceNumber?: string;
   originalName?: string;
+  comparisonMode?: 'COMMODITY_STANDARD' | 'BRAND_SEGMENTED';
+  qualitySegment?: 'COMMODITY' | 'PREMIUM' | 'STANDARD' | 'ECONOMY';
+  qualitySegmentLabel?: string;
+  brand?: string;
   jobsiteId?: string;
   jobsiteName?: string;
   supervisorName?: string;
@@ -252,6 +256,11 @@ export interface MaterialComparison {
   materialName: string;
   category: string;
   unit: string;
+  comparisonMode?: 'COMMODITY_STANDARD' | 'BRAND_SEGMENTED';
+  comparisonModeLabel?: string;
+  qualitySegment?: 'COMMODITY' | 'PREMIUM' | 'STANDARD' | 'ECONOMY';
+  qualitySegmentLabel?: string;
+  brand?: string;
   minUnitPrice: number;
   maxUnitPrice: number;
   avgPrice: number;

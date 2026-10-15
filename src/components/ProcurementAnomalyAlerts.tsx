@@ -8,6 +8,7 @@ import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { detectSuperIntelligentProcurementAnomalies } from '../utils/aiForensicAuditor';
 import { isExemptFromBenchmarkAudit } from '../utils/auditRiskEngine';
 import { ensureRussianOriginalName } from '../utils/categoryClassifier';
+import { analyzeMaterialSegment, areMaterialSegmentsCompatible } from '../utils/materialSegmentIntelligence';
 import {
   AlertTriangle,
   TrendingUp,
@@ -382,12 +383,17 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
       );
     };
 
-    // Helper: Verify that two history rows represent strictly the same "elma-elma" material in the original Russian invoice text
-    const areHistoryEntriesStrictlyEquivalent = (a: any, b: any, matName: string): boolean => {
+    // Helper: Verify that two history rows represent strictly the same "elma-elma" material in the original Russian invoice text AND belong to the same Brand/Quality Segment (unless it's a GOST/DIN Commodity)
+    const areHistoryEntriesStrictlyEquivalent = (a: any, b: any, matName: string, category?: string): boolean => {
       if (!a || !b) return false;
       const pA = Number(a.normalizedUnitPrice || a.unitPrice || 0);
       const pB = Number(b.normalizedUnitPrice || b.unitPrice || 0);
       if (pA <= 0 || pB <= 0) return false;
+
+      // 0. Smart Commodity vs. Brand/Quality Segment Gate ("Demir demirdir, ama Mercedes ile Lada kıyaslanmaz")
+      if (!areMaterialSegmentsCompatible(a, b, matName, category)) {
+        return false;
+      }
 
       const origA = String(a.originalName || '').toLowerCase().replace(/,/g, '.');
       const origB = String(b.originalName || '').toLowerCase().replace(/,/g, '.');
@@ -465,7 +471,7 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
         const sorted = [...vHist].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
         const first = sorted[0];
         const latest = sorted[sorted.length - 1];
-        if (!areHistoryEntriesStrictlyEquivalent(first, latest, comp.materialName)) return;
+        if (!areHistoryEntriesStrictlyEquivalent(first, latest, comp.materialName, comp.category)) return;
         const prevPrice = Number(first.normalizedUnitPrice || first.unitPrice || 0);
         const currPrice = Number(latest.normalizedUnitPrice || latest.unitPrice || 0);
         const currQty = Number(latest.normalizedQuantity || latest.quantity || 1);
@@ -526,7 +532,7 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
         const sortedByPrice = [...comp.history].sort((a, b) => Number(a.unitPrice) - Number(b.unitPrice));
         const cheapestRec = sortedByPrice[0];
         const priciestRec = sortedByPrice[sortedByPrice.length - 1];
-        if (!areHistoryEntriesStrictlyEquivalent(cheapestRec, priciestRec, comp.materialName)) return;
+        if (!areHistoryEntriesStrictlyEquivalent(cheapestRec, priciestRec, comp.materialName, comp.category)) return;
 
         // Calculate actual financial overpayment of purchases above minUnitPrice
         const actualOverpayment = comp.history.reduce((sum: number, h: any) => {
@@ -1217,6 +1223,31 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
                       <span className="text-[11px] font-bold text-slate-700 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
                         {alert.category}
                       </span>
+
+                      {(() => {
+                        const segInfo = analyzeMaterialSegment(
+                          alert.materialName,
+                          alert.russianSubtitle || alert.materialName,
+                          alert.category,
+                          alert.currentPrice
+                        );
+                        const isCommodity = segInfo.comparisonMode === 'COMMODITY_STANDARD';
+                        const badgeColors = isCommodity
+                          ? 'bg-sky-50 text-sky-900 border-sky-200'
+                          : segInfo.qualitySegment === 'PREMIUM'
+                          ? 'bg-amber-50 text-amber-900 border-amber-300'
+                          : segInfo.qualitySegment === 'ECONOMY'
+                          ? 'bg-slate-100 text-slate-700 border-slate-300'
+                          : 'bg-emerald-50 text-emerald-900 border-emerald-200';
+                        return (
+                          <span
+                            className={`text-[10px] font-extrabold px-2.5 py-1 rounded-lg border flex items-center space-x-1 ${badgeColors}`}
+                            title={segInfo.segmentReason}
+                          >
+                            <span>{segInfo.qualitySegmentLabel}</span>
+                          </span>
+                        );
+                      })()}
 
                       {alert.jobsiteName && (
                         <span className="text-[11px] font-bold text-indigo-800 bg-indigo-50 px-2.5 py-1 rounded-lg border border-indigo-100 flex items-center space-x-1">

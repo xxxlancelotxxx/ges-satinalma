@@ -1,5 +1,6 @@
 import { useAuth } from '../context/AuthContext';
 import { normalizeCategoryName, CANONICAL_CATEGORIES, sortCategoriesByPriority, ensureRussianOriginalName } from '../utils/categoryClassifier';
+import { analyzeMaterialSegment } from '../utils/materialSegmentIntelligence';
 import { SearchableFilterDropdown } from './SearchableFilterDropdown';
 import { DateRangeFilterDropdown } from './DateRangeFilterDropdown';
 import { DateFilterState, matchesDateFilter } from '../utils/filterHelpers';
@@ -113,6 +114,8 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const [invoiceNoFilter, setInvoiceNoFilter] = useState<string>('');
   const [dateFilter, setDateFilter] = useState<DateFilterState>({ preset: 'all' });
   const [onlyWithPriceGap, setOnlyWithPriceGap] = useState<boolean>(false);
+  const [comparisonModeFilter, setComparisonModeFilter] = useState<'ALL' | 'COMMODITY_STANDARD' | 'BRAND_SEGMENTED'>('ALL');
+  const [qualitySegmentFilter, setQualitySegmentFilter] = useState<'ALL' | 'PREMIUM' | 'STANDARD' | 'ECONOMY'>('ALL');
   const [sortBy, setSortBy] = useState<'gap' | 'spend' | 'name' | 'qty'>('gap');
 
   // Handle external navigation (from Prizma Invoices, Drive, Pre-Approval, etc.)
@@ -432,6 +435,39 @@ export const MaterialPriceComparison: React.FC<Props> = ({
     return Array.from(set).sort();
   }, [validComparisons]);
 
+  const getMaterialSegmentInfo = (c: MaterialComparison) => {
+    const firstOrig = c.history?.[0]?.originalName || c.materialName;
+    const computed = analyzeMaterialSegment(c.materialName, firstOrig, c.category, c.avgUnitPrice);
+    return {
+      comparisonMode: c.comparisonMode || computed.comparisonMode,
+      comparisonModeLabel: c.comparisonModeLabel || computed.comparisonModeLabel,
+      qualitySegment: c.qualitySegment || computed.qualitySegment,
+      qualitySegmentLabel: c.qualitySegmentLabel || computed.qualitySegmentLabel,
+      brand: c.brand || computed.brand,
+      comparisonRuleSummary: computed.segmentReason
+    };
+  };
+
+  const segmentModeCounts = useMemo(() => {
+    let commodityCount = 0;
+    let brandSegmentedCount = 0;
+    let premiumCount = 0;
+    let standardCount = 0;
+    let economyCount = 0;
+    validComparisons.forEach(c => {
+      const info = getMaterialSegmentInfo(c);
+      if (info.comparisonMode === 'COMMODITY_STANDARD') {
+        commodityCount++;
+      } else {
+        brandSegmentedCount++;
+        if (info.qualitySegment === 'PREMIUM') premiumCount++;
+        else if (info.qualitySegment === 'ECONOMY') economyCount++;
+        else standardCount++;
+      }
+    });
+    return { commodityCount, brandSegmentedCount, premiumCount, standardCount, economyCount };
+  }, [validComparisons]);
+
   const isAnyFilterActive = useMemo(() => {
     return (
       selectedCategory !== 'ALL' ||
@@ -443,9 +479,11 @@ export const MaterialPriceComparison: React.FC<Props> = ({
       (dateFilter.preset && dateFilter.preset !== 'all') ||
       onlyWithPriceGap ||
       onlyMultipleUnits ||
+      comparisonModeFilter !== 'ALL' ||
+      qualitySegmentFilter !== 'ALL' ||
       Boolean(searchTerm.trim())
     );
-  }, [selectedCategory, selectedJobsite, selectedVendor, selectedSupervisor, prizmaSourceFilter, invoiceNoFilter, dateFilter, onlyWithPriceGap, onlyMultipleUnits, searchTerm]);
+  }, [selectedCategory, selectedJobsite, selectedVendor, selectedSupervisor, prizmaSourceFilter, invoiceNoFilter, dateFilter, onlyWithPriceGap, onlyMultipleUnits, comparisonModeFilter, qualitySegmentFilter, searchTerm]);
 
   const handleResetFilters = () => {
     setSelectedCategory('ALL');
@@ -457,6 +495,8 @@ export const MaterialPriceComparison: React.FC<Props> = ({
     setDateFilter({ preset: 'all' });
     setOnlyWithPriceGap(false);
     setOnlyMultipleUnits(false);
+    setComparisonModeFilter('ALL');
+    setQualitySegmentFilter('ALL');
     setSearchTerm('');
   };
 
@@ -464,9 +504,12 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const filteredMaterials = validComparisons
     .filter(c => {
       const q = searchTerm.trim().toLowerCase();
+      const segInfo = getMaterialSegmentInfo(c);
       const matchesSearch = !q ||
         c.materialName.toLowerCase().includes(q) ||
         c.category.toLowerCase().includes(q) ||
+        (segInfo.brand && segInfo.brand.toLowerCase().includes(q)) ||
+        segInfo.qualitySegmentLabel.toLowerCase().includes(q) ||
         c.history.some(
           h =>
             h.jobsiteName.toLowerCase().includes(q) ||
@@ -489,8 +532,10 @@ export const MaterialPriceComparison: React.FC<Props> = ({
       const matchesDate = !dateFilter.preset || dateFilter.preset === 'all' || c.history.some(h => matchesDateFilter(h.date, dateFilter));
       const matchesGap = !onlyWithPriceGap || c.priceDifferencePercentage > 0;
       const matchesMultiUnit = !onlyMultipleUnits || (c.hasMultipleUnits || (c.detectedUnits && c.detectedUnits.length > 1));
+      const matchesMode = comparisonModeFilter === 'ALL' || segInfo.comparisonMode === comparisonModeFilter;
+      const matchesQuality = qualitySegmentFilter === 'ALL' || segInfo.qualitySegment === qualitySegmentFilter;
 
-      return matchesSearch && matchesCat && matchesJob && matchesVen && matchesSup && matchesPrizma && matchesInvNo && matchesDate && matchesGap && matchesMultiUnit;
+      return matchesSearch && matchesCat && matchesJob && matchesVen && matchesSup && matchesPrizma && matchesInvNo && matchesDate && matchesGap && matchesMultiUnit && matchesMode && matchesQuality;
     })
     .sort((a, b) => {
       if (sortBy === 'gap') {
@@ -747,10 +792,29 @@ export const MaterialPriceComparison: React.FC<Props> = ({
               🇷🇺 {ensureRussianOriginalName(mat.materialName, mat.history?.[0]?.originalName)}
             </div>
 
-            <div className="flex items-center space-x-2 mt-1">
+            <div className="flex flex-wrap items-center gap-1.5 mt-1">
               <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
                 {mat.category}
               </span>
+              {(() => {
+                const seg = getMaterialSegmentInfo(mat);
+                const isCommodity = seg.comparisonMode === 'COMMODITY_STANDARD';
+                const badgeClass = isCommodity
+                  ? 'bg-sky-50 text-sky-900 border-sky-200'
+                  : seg.qualitySegment === 'PREMIUM'
+                  ? 'bg-amber-50 text-amber-900 border-amber-300'
+                  : seg.qualitySegment === 'ECONOMY'
+                  ? 'bg-slate-100 text-slate-700 border-slate-300'
+                  : 'bg-emerald-50 text-emerald-900 border-emerald-200';
+                return (
+                  <span
+                    className={`text-[10px] font-extrabold px-2 py-0.5 rounded border flex items-center space-x-1 ${badgeClass}`}
+                    title={seg.comparisonRuleSummary}
+                  >
+                    <span>{seg.qualitySegmentLabel}</span>
+                  </span>
+                );
+              })()}
               {hasMergedItems && (
                 <span className="text-[10px] font-extrabold text-amber-800 bg-amber-100/80 px-2 py-0.5 rounded border border-amber-200 flex items-center space-x-1">
                   <Sparkles className="w-2.5 h-2.5 text-amber-600" />
@@ -1257,6 +1321,24 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                 <span className="text-xs text-indigo-200 bg-indigo-500/20 border border-indigo-400/30 px-2.5 py-0.5 rounded-lg font-mono font-bold">
                   {mat.history.length} Satınalma Faturası
                 </span>
+                {(() => {
+                  const seg = getMaterialSegmentInfo(mat);
+                  const isCommodity = seg.comparisonMode === 'COMMODITY_STANDARD';
+                  return (
+                    <span
+                      className={`text-xs px-2.5 py-0.5 rounded-lg font-bold border ${
+                        isCommodity
+                          ? 'bg-sky-500/20 text-sky-200 border-sky-400/30'
+                          : seg.qualitySegment === 'PREMIUM'
+                          ? 'bg-amber-500/25 text-amber-200 border-amber-400/40'
+                          : 'bg-emerald-500/20 text-emerald-200 border-emerald-400/30'
+                      }`}
+                      title={seg.comparisonRuleSummary}
+                    >
+                      {seg.qualitySegmentLabel}
+                    </span>
+                  );
+                })()}
               </div>
               <h2 className="text-lg sm:text-xl font-black text-white mt-1 flex flex-wrap items-center gap-2">
                 <span>{mat.materialName}</span>
@@ -1850,6 +1932,104 @@ export const MaterialPriceComparison: React.FC<Props> = ({
             <Calculator className="w-3.5 h-3.5 text-purple-200" />
             <span>Birim Laboratuvarı</span>
           </button>
+        </div>
+      </div>
+
+      {/* COMMODITY vs BRAND/QUALITY SEGMENT FILTER BAR */}
+      <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-extrabold text-slate-700 uppercase tracking-wider mr-1 flex items-center space-x-1.5">
+            <Layers className="w-3.5 h-3.5 text-indigo-600" />
+            <span>Kıyaslama Rejimi:</span>
+          </span>
+
+          <button
+            type="button"
+            onClick={() => {
+              setComparisonModeFilter('ALL');
+              setQualitySegmentFilter('ALL');
+            }}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+              comparisonModeFilter === 'ALL'
+                ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+            }`}
+          >
+            Tümü ({validComparisons.length})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setComparisonModeFilter(comparisonModeFilter === 'COMMODITY_STANDARD' ? 'ALL' : 'COMMODITY_STANDARD');
+              setQualitySegmentFilter('ALL');
+            }}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border flex items-center space-x-1.5 ${
+              comparisonModeFilter === 'COMMODITY_STANDARD'
+                ? 'bg-sky-700 text-white border-sky-800 ring-2 ring-sky-200 shadow-xs'
+                : 'bg-sky-50/70 hover:bg-sky-100/80 text-sky-900 border-sky-200'
+            }`}
+            title="Demir, hazır beton, çelik profil, kereste, kum, çakıl ve GOST kablolar marka fark etmeksizin tüm tedarikçiler arasında doğrudan kıyaslanır."
+          >
+            <span>🏗️ Standart Emtia ("Demir Demirdir" — Marka Bağımsız)</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-black ${
+              comparisonModeFilter === 'COMMODITY_STANDARD' ? 'bg-sky-900 text-sky-100' : 'bg-sky-100 text-sky-800'
+            }`}>
+              {segmentModeCounts.commodityCount}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setComparisonModeFilter(comparisonModeFilter === 'BRAND_SEGMENTED' ? 'ALL' : 'BRAND_SEGMENTED');
+            }}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border flex items-center space-x-1.5 ${
+              comparisonModeFilter === 'BRAND_SEGMENTED'
+                ? 'bg-amber-600 text-white border-amber-700 ring-2 ring-amber-200 shadow-xs'
+                : 'bg-amber-50/70 hover:bg-amber-100/80 text-amber-900 border-amber-200'
+            }`}
+            title="Yalıtım membranı, XPS, alçıpan, İSG ekipmanı, el aletleri ve sarf malzemeleri kendi marka/kalite segmenti içinde (Premium vs Premium, Ekonomik vs Ekonomik) adil kıyaslanır."
+          >
+            <span>🏷️ Marka & Kalite Segmentli ("Mercedes / Lada" Ayrımı)</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-black ${
+              comparisonModeFilter === 'BRAND_SEGMENTED' ? 'bg-amber-800 text-amber-100' : 'bg-amber-100 text-amber-900'
+            }`}>
+              {segmentModeCounts.brandSegmentedCount}
+            </span>
+          </button>
+        </div>
+
+        {/* Quality Tier Pills */}
+        <div className="flex flex-wrap items-center gap-1.5 border-t lg:border-t-0 pt-2 lg:pt-0 border-slate-100">
+          <span className="text-[10px] font-bold text-slate-500 uppercase mr-1">Kalite Segmenti:</span>
+          {[
+            { id: 'PREMIUM' as const, label: '👑 Premium / Profesyonel', count: segmentModeCounts.premiumCount, activeClass: 'bg-amber-600 text-white border-amber-700', idleClass: 'bg-amber-50 text-amber-900 border-amber-200 hover:bg-amber-100' },
+            { id: 'STANDARD' as const, label: '⚖️ Standart Seri', count: segmentModeCounts.standardCount, activeClass: 'bg-emerald-600 text-white border-emerald-700', idleClass: 'bg-emerald-50 text-emerald-900 border-emerald-200 hover:bg-emerald-100' },
+            { id: 'ECONOMY' as const, label: '📦 Ekonomik Seri', count: segmentModeCounts.economyCount, activeClass: 'bg-slate-700 text-white border-slate-800', idleClass: 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200' }
+          ].map(tier => {
+            const isActive = qualitySegmentFilter === tier.id;
+            return (
+              <button
+                key={tier.id}
+                type="button"
+                onClick={() => {
+                  if (isActive) {
+                    setQualitySegmentFilter('ALL');
+                  } else {
+                    setComparisonModeFilter('BRAND_SEGMENTED');
+                    setQualitySegmentFilter(tier.id);
+                  }
+                }}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer border flex items-center space-x-1 ${
+                  isActive ? tier.activeClass : tier.idleClass
+                }`}
+              >
+                <span>{tier.label}</span>
+                <span className="text-[10px] font-mono opacity-85">({tier.count})</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
