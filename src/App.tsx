@@ -22,6 +22,7 @@ import { ComparativeOffersView } from './components/ComparativeOffersView';
 
 import { Coins } from 'lucide-react';
 import { evaluateDiscountAudit } from './utils/auditRiskEngine';
+import { ensureComparisonGroupIntegrity } from './utils/materialGroupIntegrity';
 
 import {
   PurchasingSupervisor,
@@ -156,7 +157,7 @@ function AppContent() {
         trashInvsPromise,
         trashDscsPromise
       ]);
-      if (Array.isArray(mats)) setMaterialComparisons(mats);
+      if (Array.isArray(mats)) setMaterialComparisons(ensureComparisonGroupIntegrity(mats));
       if (Array.isArray(trashInvs)) setTrashInvoices(trashInvs);
       if (Array.isArray(trashDscs)) setTrashDiscounts(trashDscs);
     } catch (err) {

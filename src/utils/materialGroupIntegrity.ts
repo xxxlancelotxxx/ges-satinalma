@@ -237,3 +237,73 @@ export function splitGroupBySpec<T>(entries: T[], getText: (e: T) => string, get
     return { entries: c.members, label: parts.length ? parts.join(', ') : 'Spesifikasyon Belirtilmemiş', signature: c.sig };
   });
 }
+
+/**
+ * İstemci (Frontend) tarafı emniyet kemeri: Sunucu önbelleği veya yeniden başlatılmamış
+ * bir konteyner eski /api/materials/compare çıktısını döndürse bile, çelişen grupları
+ * tarayıcıda anında böler ve min/max/ortalama fiyatları yeniden hesaplar.
+ */
+export function ensureComparisonGroupIntegrity<T extends { materialName: string; unit?: string; history?: any[] }>(comparisons: T[]): T[] {
+  if (!Array.isArray(comparisons) || comparisons.length === 0) return comparisons;
+  const out: T[] = [];
+  for (const comp of comparisons) {
+    const history = Array.isArray(comp.history) ? comp.history : [];
+    if (history.length < 2) {
+      out.push(comp);
+      continue;
+    }
+    const parts = splitGroupBySpec(
+      history,
+      (h: any) => String(h?.originalName || h?.materialName || comp.materialName || ''),
+      (h: any) => String(h?.unit || comp.unit || '')
+    );
+    if (parts.length <= 1) {
+      out.push(comp);
+      continue;
+    }
+    const hostType = [...parts].sort((a, b) => b.entries.length - a.entries.length)[0].signature.type;
+    const baseParenRaw = (comp.materialName.match(/\(([^()]*)\)\s*$/) || [])[1];
+    const baseParen = baseParenRaw && /^[\d.,x×хX*\s-]+(?:mm|m|мм)?$/i.test(baseParenRaw.trim()) ? baseParenRaw.trim() : undefined;
+    parts.forEach((part, idx) => {
+      const isForeignType = part.signature.type && part.signature.type !== hostType;
+      let partName = `${comp.materialName} [${part.label}]`;
+      if (part.label === 'Spesifikasyon Belirtilmemiş') {
+        partName = `${comp.materialName.replace(/\s*\(\s*\d+(?:[.,]\d+)?\s*mikron[^)]*\)/i, ' (mikron belirtilmemiş)')} [${part.label}]`;
+      }
+      if (isForeignType) {
+        const typeLabel = getProductTypeLabel(part.signature.type!);
+        const rest = part.label.split(', ').filter(s => s !== typeLabel).join(', ');
+        partName = `${typeLabel}${baseParen ? ` (${baseParen})` : ''}${rest ? ` [${rest}]` : ''}`;
+      }
+      const prices = part.entries.map((h: any) => Number(h?.price) || 0).filter((p: number) => p > 0);
+      const minPrice = prices.length ? Math.min(...prices) : 0;
+      const maxPrice = prices.length ? Math.max(...prices) : 0;
+      const averagePrice = prices.length ? prices.reduce((a: number, b: number) => a + b, 0) / prices.length : 0;
+      const totalQuantity = part.entries.reduce((s: number, h: any) => s + (Number(h?.quantity) || 0), 0);
+      const potentialSavings = part.entries.reduce((s: number, h: any) => {
+        const p = Number(h?.price) || 0;
+        const q = Number(h?.quantity) || 0;
+        return p > minPrice && q > 0 ? s + (p - minPrice) * q : s;
+      }, 0);
+      const minEntry = part.entries.find((h: any) => (Number(h?.price) || 0) === minPrice) || part.entries[0];
+      const maxEntry = part.entries.find((h: any) => (Number(h?.price) || 0) === maxPrice) || part.entries[0];
+      out.push({
+        ...comp,
+        id: `${(comp as any).id || comp.materialName}__spec${idx}`,
+        materialName: partName,
+        history: part.entries,
+        minPrice,
+        maxPrice,
+        averagePrice,
+        totalQuantity,
+        potentialSavings,
+        minSupplier: minEntry?.supplier || (comp as any).minSupplier,
+        maxSupplier: maxEntry?.supplier || (comp as any).maxSupplier,
+        minJobsiteId: minEntry?.jobsiteId || (comp as any).minJobsiteId,
+        maxJobsiteId: maxEntry?.jobsiteId || (comp as any).maxJobsiteId,
+      });
+    });
+  }
+  return out;
+}
+
