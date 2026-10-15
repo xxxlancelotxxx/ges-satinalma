@@ -8,6 +8,7 @@ import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { detectSuperIntelligentProcurementAnomalies } from '../utils/aiForensicAuditor';
 import { isExemptFromBenchmarkAudit } from '../utils/auditRiskEngine';
 import { ensureRussianOriginalName } from '../utils/categoryClassifier';
+import { isLowPriorityConsumable } from '../utils/lowPriorityConsumables';
 import { analyzeMaterialSegment, areMaterialSegmentsCompatible } from '../utils/materialSegmentIntelligence';
 import {
   AlertTriangle,
@@ -128,6 +129,8 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
   const [selectedJobsite, setSelectedJobsite] = useState<string>('ALL');
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [sortBy, setSortBy] = useState<'IMPACT' | 'PERCENTAGE' | 'DATE'>('PERCENTAGE');
+  // Ofis/kartuş/deterjan/ikram gibi düşük öncelikli, çok değişken sarflar varsayılan olarak gizli
+  const [showLowPriority, setShowLowPriority] = useState<boolean>(false);
 
   // Manager acknowledgements map: { [anomalyId]: AnomalyAcknowledgement }
   const [acknowledgedMap, setAcknowledgedMap] = useState<Record<string, AnomalyAcknowledgement>>(() => {
@@ -745,14 +748,24 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
     }
   };
 
+  // Düşük öncelikli sarf alarmlarını ayır (ofis, kartuş/toner, temizlik, ikram)
+  const lowPriorityAlertCount = useMemo(
+    () => allAlerts.filter(a => isLowPriorityConsumable(a.materialName, a.category, a.russianSubtitle)).length,
+    [allAlerts]
+  );
+  const priorityAlerts = useMemo(
+    () => (showLowPriority ? allAlerts : allAlerts.filter(a => !isLowPriorityConsumable(a.materialName, a.category, a.russianSubtitle))),
+    [allAlerts, showLowPriority]
+  );
+
   // Separate active vs acknowledged
   const activeAlerts = useMemo(() => {
-    return allAlerts.filter(a => !acknowledgedMap[a.id]);
-  }, [allAlerts, acknowledgedMap]);
+    return priorityAlerts.filter(a => !acknowledgedMap[a.id]);
+  }, [priorityAlerts, acknowledgedMap]);
 
   const archivedAlerts = useMemo(() => {
-    return allAlerts.filter(a => !!acknowledgedMap[a.id]);
-  }, [allAlerts, acknowledgedMap]);
+    return priorityAlerts.filter(a => !!acknowledgedMap[a.id]);
+  }, [priorityAlerts, acknowledgedMap]);
 
   // Current list based on active view tab
   const currentList = activeViewTab === 'ACTIVE' ? activeAlerts : archivedAlerts;
@@ -1031,6 +1044,30 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
           </p>
         )}
       </div>
+
+      {/* Low-priority consumables toggle */}
+      {lowPriorityAlertCount > 0 && (
+        <div className="bg-slate-50 rounded-2xl px-4 py-3 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+          <div className="text-slate-600 font-medium">
+            {showLowPriority
+              ? (language === 'RU'
+                  ? `Показаны также ${lowPriorityAlertCount} уведомлений по мелким расходникам (офис, картриджи, моющие, кухня).`
+                  : `Ofis, kartuş/toner, deterjan ve mutfak gibi düşük öncelikli ${lowPriorityAlertCount} sarf alarmı da gösteriliyor.`)
+              : (language === 'RU'
+                  ? `${lowPriorityAlertCount} уведомлений по мелким расходникам (офис, картриджи, моющие, кухня) скрыто, чтобы не отвлекать от основных материалов.`
+                  : `Ofis, kartuş/toner, deterjan ve mutfak gibi düşük öncelikli ${lowPriorityAlertCount} sarf alarmı, ana malzemeleri gölgelememesi için gizlendi.`)}
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowLowPriority(v => !v)}
+            className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold whitespace-nowrap cursor-pointer"
+          >
+            {showLowPriority
+              ? (language === 'RU' ? 'Скрыть расходники' : 'Sarfları Gizle')
+              : (language === 'RU' ? 'Показать расходники' : 'Sarfları da Göster')}
+          </button>
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">

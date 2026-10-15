@@ -5,6 +5,7 @@ import { areVendorsEqual } from './vendorNormalizer';
 import { CANONICAL_28_CATEGORIES, normalizeCategoryName, sortCategoriesByPriority } from './categoryClassifier';
 import { getCategorySpendingSummary, verifyProcurementDataIntegrity, isPrizmaAutoSyncedInvoice } from './procurementAnalyticsCore';
 import { detectSuperIntelligentProcurementAnomalies } from './aiForensicAuditor';
+import { isLowPriorityConsumable } from './lowPriorityConsumables';
 export { isPrizmaAutoSyncedInvoice };
 const ua = formatRuble;
 
@@ -215,6 +216,8 @@ export function getDashboardAnomalies(invoices: any[] = [], discounts: any[] = [
     evidence: sa.evidence,
     recommendation: sa.recommendation,
     jobsiteName: sa.jobsiteName,
+    category: sa.category,
+    materialName: sa.materialName,
     rawRecord: undefined
   }));
 
@@ -225,7 +228,9 @@ export function getDashboardAnomalies(invoices: any[] = [], discounts: any[] = [
     if (!map.has(a.id)) map.set(a.id, a);
   });
 
-  return Array.from(map.values()).sort((a: any, b: any) => {
+  return Array.from(map.values()).filter((a: any) =>
+    !isLowPriorityConsumable(a.materialName || a.materialOrSupplier, a.category, a.title)
+  ).sort((a: any, b: any) => {
     const sev = { CRITICAL: 1, WARNING: 2, INFO: 3 };
     const diff = (sev[a.severity as keyof typeof sev] || 2) - (sev[b.severity as keyof typeof sev] || 2);
     if (diff !== 0) return diff;
