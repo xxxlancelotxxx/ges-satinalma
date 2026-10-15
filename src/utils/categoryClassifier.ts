@@ -1826,7 +1826,7 @@ const TR_TO_RU_TECH_DICT: Array<[RegExp, string]> = [
   [/\bastar\b|\bbetonokontakt\b/i, 'Грунтовка строительная глубокого проникновения / Бетоноконтакт'],
   [/\btiner\b|\bsolvent\b|\bwhite spirit\b/i, 'Растворитель технический (Уайт-спирит / 646)'],
   [/\bboya\b/i, 'Краска строительная водно-дисперсионная / эмаль'],
-  [/\brulo\b/i, 'Валик малярный строительный'],
+  [/\bboya\s*rulo|\bparmak\s*rulo|\brulo\s*fırça|\brulo\s*firca/i, 'Валик малярный строительный'],
   [/\bspatula\b|\bispula\b/i, 'Шпатель малярный из нержавеющей стали'],
   [/\bmala\b/i, 'Кельма / гладилка штукатурная'],
   [/\bsilikon\b|\bmastik\b|\bakrilik\b/i, 'Герметик силиконовый / акриловый строительный'],
@@ -1863,7 +1863,9 @@ const TR_TO_RU_TECH_DICT: Array<[RegExp, string]> = [
   [/\byangın\b|\byangin\b|\btüp\b|\btup\b/i, 'Огнетушитель порошковый (ОП) / противопожарный инвентарь'],
   [/\bklavye\b|\bmouse\b|\bfare\b|\bwebcam\b|\bmonitör\b|\bmonitor\b|\blogitech\b/i, 'Компьютерная периферия и оргтехника (клавиатура / мышь)'],
   [/\btoner\b|\bkartuş\b|\bkartus\b|\byazıcı\b|\byazici\b/i, 'Картридж лазерный / тонер для оргтехники'],
-  [/\bkağıt\b|\bkagit\b|\ba4\b|\ba3\b|\bklasör\b|\bklasor\b|\bkalem\b|\bzımba\b|\bzimba\b|\bnot\b|\bpoşet\b|\bposet\b|\bzarf\b|\bdosya\b/i, 'Канцелярские товары и бумага офисная'],
+  [/\bçöp\s*poşet|\bcop\s*poset|\bçöp\s*torba|\bcop\s*torba/i, 'Мешки для мусора полиэтиленовые'],
+  [/\bfotokopi\s*kağıd|\bfotokopi\s*kagid|\bkağıt\s*a4|\bkagit\s*a4|\bkağıt\s*a3|\bkagit\s*a3|\ba4\b|\ba3\b/i, 'Бумага офисная для принтера'],
+  [/\bklasör\b|\bklasor\b|\bkalem\b|\bzımba\b|\bzimba\b|\bnot\b|\bpoşet\s*dosya|\bzarf\b|\bdosya\b/i, 'Канцелярские принадлежности'],
   [/\btemizlik\b|\bdeterjan\b|\bsabun\b|\bçamaşır\b|\bcamasir\b|\bpeçete\b|\bpecete\b|\bhavlu\b|\bçöp\b|\bcop\b|\btorba\b|\bsüpürge\b|\bsupurge\b|\bpaspas\b|\bbez\b/i, 'Хозяйственные товары и средства профессиональной уборки'],
   [/\biçme\s*suyu|\bçay\b|\bcay\b|\bkahve\b|\bşeker\b|\bseker\b|\bbardak\b|\bgıda\b|\bgida\b/i, 'Хозяйственно-бытовое обеспечение офиса и площадки'],
   [/\bmazot\b|\bdizel\b|\byakıt\b|\byakit\b|\byağ\b|\byag\b|\bhidrolik\b|\bfilltre\b|\bfiltre\b|\bakü\b|\baku\b|\blastik\b|\bcam\s*suyu\b/i, 'ГСМ, дизельное топливо и расходные материалы для спецтехники'],
@@ -1874,8 +1876,8 @@ function isGenuineRussianOriginal(text?: string): boolean {
   if (!text) return false;
   const s = text.trim();
   if (!s) return false;
-  // Exclude synthetic TR_TO_RU_TECH_DICT strings that end with [TURKISH STOCK CARD]
-  if (/\[[^\]]+\]$/.test(s) && /Гидроизоляция рулонная наплавляемая|Утеплитель теплоизоляционный|Хозяйственно-бытовое обеспечение|Диск отрезной \/ круг шлифовальный|Труба полипропиленовая \/ ПВХ/i.test(s)) {
+  // Exclude synthetic TR_TO_RU_TECH_DICT strings and auto-generated Russian templates
+  if (/^(?:Гидроизоляция рулонная наплавляемая|Утеплитель теплоизоляционный|Хозяйственно-бытовое обеспечение|Хозяйственные товары и средства|Диск отрезной \/ круг шлифовальный|Труба полипропиленовая \/ ПВХ|Канцелярские товары и бумага офисная|Канцелярские принадлежности|Валик малярный строительный|Оборудование стройплощадки, мебель|Инструмент слесарно-монтажный ручной|Строительно-монтажный материал \/ ТМЦ)/i.test(s)) {
     return false;
   }
   // Exclude Turkish stock card strings that happen to contain "ГОСТ" or "А400"
@@ -1904,13 +1906,15 @@ export function ensureRussianOriginalName(materialName?: string, rawOriginalName
     if (tmcMatch && tmcMatch[1]) {
       orig = tmcMatch[1].trim();
     }
-    const synthBracketMatch = orig.match(/^(?:Гидроизоляция рулонная наплавляемая \/ мембрана|Утеплитель теплоизоляционный минераловатный|Хозяйственно-бытовое обеспечение офиса и площадки|Диск отрезной \/ круг шлифовальный абразивный|Труба полипропиленовая \/ ПВХ \/ ПНД инженерная).*?\[([^\]]+)\]$/i);
+    const synthBracketMatch = orig.match(/^(?:Гидроизоляция рулонная наплавляемая \/ мембрана|Утеплитель теплоизоляционный минераловатный|Хозяйственно-бытовое обеспечение офиса и площадки|Диск отрезной \/ круг шлифовальный абразивный|Труба полипропиленовая \/ ПВХ \/ ПНД инженерная|Канцелярские товары и бумага офисная|Валик малярный строительный).*?\[([^\]]+)\]$/i);
     if (synthBracketMatch && synthBracketMatch[1]) {
       orig = synthBracketMatch[1].trim();
     }
     const isShortNoteOrDrawingCode = /^(?:\d+\s*(?:шт|м|кг|л|уп|кор|рул|пл|мпа)|кж\s*\d|к\d\s*схем|корпус|стилобат|арт\.?\s*\d|спайка|осина\b)/i.test(orig);
     const isStaleCableOnWireless = /^Кабель силовой медный/i.test(orig) && /kablosuz|klavye|mouse|fare/i.test(materialName || '');
-    if (orig && isGenuineRussianOriginal(orig) && !isShortNoteOrDrawingCode && !isStaleCableOnWireless) {
+    const isStaleRollerOnTrashBag = /^Валик малярный/i.test(orig) && /çöp|cop|poşet|poset|torba|мусор/i.test(materialName || '');
+    const isStalePaperOnStationery = /^Канцелярские товары и бумага офисная/i.test(orig) && !/бумага|kağıt|kagit|a4|a3/i.test(materialName || '');
+    if (orig && isGenuineRussianOriginal(orig) && !isShortNoteOrDrawingCode && !isStaleCableOnWireless && !isStaleRollerOnTrashBag && !isStalePaperOnStationery) {
       return orig;
     }
     const src = (orig && !isGenuineRussianOriginal(orig) ? `${materialName || ''} ${orig}` : (materialName || orig || '')).trim();

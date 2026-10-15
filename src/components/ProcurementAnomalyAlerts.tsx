@@ -382,6 +382,57 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
       );
     };
 
+    // Helper: Verify that two history rows represent strictly the same "elma-elma" material in the original Russian invoice text
+    const areHistoryEntriesStrictlyEquivalent = (a: any, b: any, matName: string): boolean => {
+      if (!a || !b) return false;
+      const pA = Number(a.normalizedUnitPrice || a.unitPrice || 0);
+      const pB = Number(b.normalizedUnitPrice || b.unitPrice || 0);
+      if (pA <= 0 || pB <= 0) return false;
+
+      const origA = String(a.originalName || '').toLowerCase().replace(/,/g, '.');
+      const origB = String(b.originalName || '').toLowerCase().replace(/,/g, '.');
+      const combA = `${origA} ${matName.toLowerCase()}`;
+      const combB = `${origB} ${matName.toLowerCase()}`;
+
+      // 1. Conflicting product sub-types in original Russian text must never be compared
+      const incompatiblePairs: Array<[RegExp, RegExp]> = [
+        [/тахеометр|leica|зарядн|трегер/i, /гипсокартон|гипрок|gyproc|гкл\b/i],
+        [/лента|ультранеодил|бандажн/i, /рулон|эпп|экп|техноэласт|изопласт|виллатекс/i],
+        [/шпонка|гидрошпонк|waterbar/i, /мембран|эпп|экп|техноэласт|изопласт|виллатекс/i],
+        [/sikaplan|пвх.*мембран|мембран.*пвх/i, /эпп|экп|техноэласт|изопласт|виллатекс|битум/i],
+        [/паста|финиш/i, /штукатурк.*30\s*кг|ротбанд\s*30/i],
+        [/куртка/i, /костюм/i],
+        [/охран/i, /рабоч|итр/i],
+        [/бетонн|кость/i, /звездочк|стульчик|пластик/i],
+        [/связь|аренда/i, /элемент.*ригель|ригель/i],
+        [/широкоформатн|плоттер|914\s*мм|610\s*мм/i, /а4|a4|а3|a3|500\s*л|светокопи|svetocopy/i],
+        [/станция|перекачк|насос/i, /^дизельное\s*топливо|^mazot$/i],
+      ];
+      for (const [rx1, rx2] of incompatiblePairs) {
+        if ((rx1.test(combA) && rx2.test(combB)) || (rx2.test(combA) && rx1.test(combB))) {
+          return false;
+        }
+      }
+
+      // 2. If both rows have genuine Russian descriptions, check metric / thickness / diameter consistency
+      const cleanDescA = origA.replace(/к\.?\s*п\.?\s*\d+(?:\.\d+)?/gi, ' ');
+      const cleanDescB = origB.replace(/к\.?\s*п\.?\s*\d+(?:\.\d+)?/gi, ' ');
+      const metricA = cleanDescA.match(/(?:^|[^a-zа-яё0-9])[mм]\s*(\d{1,2})(?![0-9])/i)?.[1];
+      const metricB = cleanDescB.match(/(?:^|[^a-zа-яё0-9])[mм]\s*(\d{1,2})(?![0-9])/i)?.[1];
+      if (metricA && metricB && metricA !== metricB) return false;
+
+      // 3. Guard against residual pack-vs-piece or unit conversion artifacts (> 250% spread) unless Russian headwords match
+      const ratio = Math.max(pA, pB) / Math.min(pA, pB);
+      if (ratio > 3.5) {
+        const cyrWordsA = (cleanDescA.match(/[а-яё]{4,}/gi) || []).map(w => w.slice(0, 5));
+        const cyrWordsB = new Set((cleanDescB.match(/[а-яё]{4,}/gi) || []).map(w => w.slice(0, 5)));
+        const sharedRoots = cyrWordsA.filter(w => cyrWordsB.has(w));
+        if (sharedRoots.length === 0) return false;
+      }
+
+      return true;
+    };
+
     // 1. Same Supplier Price Hike Detection (Canonical Elma-Elma Normalized Comparisons)
     comparisons.forEach((comp) => {
       if (!comp || !comp.materialName || !Array.isArray(comp.history) || comp.history.length < 2) return;
@@ -414,6 +465,7 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
         const sorted = [...vHist].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
         const first = sorted[0];
         const latest = sorted[sorted.length - 1];
+        if (!areHistoryEntriesStrictlyEquivalent(first, latest, comp.materialName)) return;
         const prevPrice = Number(first.normalizedUnitPrice || first.unitPrice || 0);
         const currPrice = Number(latest.normalizedUnitPrice || latest.unitPrice || 0);
         const currQty = Number(latest.normalizedQuantity || latest.quantity || 1);
@@ -474,6 +526,7 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
         const sortedByPrice = [...comp.history].sort((a, b) => Number(a.unitPrice) - Number(b.unitPrice));
         const cheapestRec = sortedByPrice[0];
         const priciestRec = sortedByPrice[sortedByPrice.length - 1];
+        if (!areHistoryEntriesStrictlyEquivalent(cheapestRec, priciestRec, comp.materialName)) return;
 
         // Calculate actual financial overpayment of purchases above minUnitPrice
         const actualOverpayment = comp.history.reduce((sum: number, h: any) => {

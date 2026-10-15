@@ -540,15 +540,16 @@ export function getMaterialBenchmarkUnit(materialName: string, _category?: strin
   const text = String(materialName || '').toLowerCase();
   const normalizedUnits = currentUnits.map(normalizeStandardUnit);
 
-  // 0. KESİN ADET KALEMLERİ (Vitrifiye, Fırça, El Aleti, Aydınlatma, Kapak, Manşon, Dübel, Cıvata, Tüp vb.)
+  // 0. KESİN ADET KALEMLERİ (Vitrifiye, Fırça, El Aleti, Aydınlatma, Kapak, Manşon, Dübel, Cıvata, Somun, Pul, Saplama, Paspayı, Tüp vb.)
   if (
-    /fırça|firca|ершик|кисть|щетк|унитаз|klozet|раковин|lavabo|смесител|batarya|무фта|муфта|manşon|manson|дюбел|dübel|dubel|гвозд|çivi|civi|болт|гайк|шайб|анкер|ankraj|کлетка|клетка|тележк|баллон|tüpü|tupu|saati|редуктор|горелк|pürmüz|purmuz|conta|прокладк|хомут|kelepçe|kablo bağı|mandal|kilit|menteşe|петля|ручка|kalem|klasör|dosya|sandalye|koltuk|masa|dolap|ranza|yatak|baret|yelek|gözlük|очки|botu|ayakkabı|ботинк|светильник|прожектор|лампа|aydınlatma|aydinlatma|люк\b|kapak|kapağı|kapagi|рубанок|rende|терка|кельма|шпатель|spatula|ножовка|testere|штроборез|захват|миксер|пистолет|tabanca|герметик|germetik|лента|скотч|bant|валик|rulo|кювета|ванночка|стенд|pano|panosu/i.test(text) &&
+    /fırça|firca|ершик|кисть|щетк|унитаз|klozet|раковин|lavabo|смесител|batarya|무фта|муфта|manşon|manson|дюбел|dübel|dubel|гвозд|çivi|civi|болт|cıvata|civata|гайк|somun|шайб|pul\b|rondela|шпильк|saplama|tij\b|gijon|саморез|vida\b|фиксатор|paspay|анкер|ankraj|کлетка|клетка|тележк|баллон|tüpü|tupu|saati|редуктор|горелк|pürmüz|purmuz|conta|прокладк|хомут|kelepçe|kablo bağı|mandal|kilit|menteşe|петля|ручка|kalem|klasör|dosya|sandalye|koltuk|masa|dolap|ranza|yatak|baret|yelek|gözlük|очки|botu|ayakkabı|ботинк|светильник|прожектор|лампа|aydınlatma|aydinlatma|люк\b|kapak|kapağı|kapagi|рубанок|rende|терка|кельма|шпатель|spatula|ножовка|testere|штроборез|захват|миксер|пистолет|tabanca|герметик|germetik|лента|скотч|bant|валик|rulo|кювета|ванночка|стенд|pano|panosu|yangın\s*hortumu|рукав\s*пожарн|lazer|указка|тахеометр|taheometre|нивелир|nivo|çöp\s*poşet|cop\s*poset|çöp\s*torba|мешк.*мусор|küp\s*şeker|сахар\s*кусков/i.test(text) &&
     !/paspas ızgarası|membran|мембран|yalıtım|изопласт|izoplast|техноэласт|техноеласт|икопал|icopal|виллатекс|villateks|ультранап|ultranap|биполь|bipol|рулонн|geotekstil|jeotekstil|геотекстил|дорнит|inşaat naylonu|пленка|alçıpan|гипсокартон/i.test(text)
   ) {
     if (normalizedUnits.includes('adet')) return 'adet';
     if (normalizedUnits.includes('çift')) return 'çift';
     if (normalizedUnits.includes('takım')) return 'takım';
     if (normalizedUnits.includes('paket')) return 'paket';
+    if (normalizedUnits.includes('rulo')) return 'rulo';
     return normalizedUnits[0] || 'adet';
   }
 
@@ -723,6 +724,59 @@ export function convertMaterialUnit(params: {
   const from = normalizeStandardUnit(params.fromUnit);
   const to = normalizeStandardUnit(params.toUnit);
 
+  // DİKKAT: Kategori adı (ör. "Yalıtım & Alçıpan" veya "Seramik & Vitrifiye") text aramasına dahil EDİLMEZ;
+  // aksi halde o kategorideki keramzit veya aksesuarlar "alçıpan"/"seramik" kelimesinden dolayı levha sanılır!
+  const text = `${materialName} ${rawItemName || ''}`.toLowerCase();
+
+  // 0. Aynı birim yazılmış olsa dahi açık koli/paket çarpanı varsa (örn: "20 упаковок по 1 кг" = 2500 ₽ veya plastik paspayında "упаковка 1000шт" = 1500 ₽)
+  const masterCartonMatch = text.match(/(\d+)\s*упаков(?:ок|ки)\s*по\s*\d+\s*(?:кг|г|л)/i);
+  if (masterCartonMatch && unitPrice >= 500 && (to === 'adet' || to === 'paket')) {
+    const cartonCount = parseInt(masterCartonMatch[1], 10);
+    if (cartonCount >= 2 && cartonCount <= 100) {
+      return {
+        convertedUnitPrice: Number((unitPrice / cartonCount).toFixed(2)),
+        convertedQuantity: Number((quantity * cartonCount).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: cartonCount,
+        formula: `1 Koli = ${cartonCount} Paket`,
+        confidence: 'EXACT',
+        conversionApplied: true
+      };
+    }
+  }
+  if (/paspay|фиксатор/i.test(text) && !/бетон|кость|лягушк|sehpa/i.test(text) && unitPrice >= 200 && to === 'adet') {
+    const spPackMatch =
+      text.match(/(\d+)\s*(?:шт|adet)\s*(?:\/|\s*в\s*|\s*-\s*|\s*)(?:уп|пакет|кор|paket)/i) ||
+      text.match(/(?:уп|упак|упаковка|пакет|paket)\s*[-:.]?\s*(\d+)\s*(?:шт|adet)/i) ||
+      text.match(/\(\s*(\d+)\s*(?:шт|adet)\b/i);
+    const spCount = spPackMatch ? parseInt(spPackMatch[1], 10) : 500;
+    if (spCount >= 50 && spCount <= 5000) {
+      return {
+        convertedUnitPrice: Number((unitPrice / spCount).toFixed(2)),
+        convertedQuantity: Number((quantity * spCount).toFixed(2)),
+        fromUnit: from,
+        toUnit: to,
+        factor: spCount,
+        formula: `1 Paket = ${spCount} Adet`,
+        confidence: spPackMatch ? 'EXACT' : 'HIGH',
+        conversionApplied: true
+      };
+    }
+  }
+  if (/лазерная\s*указка|green\s*laser\s*303/i.test(text) && unitPrice > 50 && unitPrice < 150 && to === 'adet') {
+    return {
+      convertedUnitPrice: Number((unitPrice * 10).toFixed(2)),
+      convertedQuantity: Math.max(1, Number((quantity / 10).toFixed(2))),
+      fromUnit: from,
+      toUnit: to,
+      factor: 0.1,
+      formula: '1 Adet Lazer İşaretleyici',
+      confidence: 'EXACT',
+      conversionApplied: true
+    };
+  }
+
   // 1. Aynı birim ise doğrudan dön
   if (from === to) {
     return {
@@ -736,10 +790,6 @@ export function convertMaterialUnit(params: {
       conversionApplied: false
     };
   }
-
-  // DİKKAT: Kategori adı (ör. "Yalıtım & Alçıpan" veya "Seramik & Vitrifiye") text aramasına dahil EDİLMEZ;
-  // aksi halde o kategorideki keramzit veya aksesuarlar "alçıpan"/"seramik" kelimesinden dolayı levha sanılır!
-  const text = `${materialName} ${rawItemName || ''}`.toLowerCase();
 
   // --------------------------------------------------------------------------
   // A. AĞIRLIK - AĞIRLIK (KG <-> TON)
@@ -1533,10 +1583,9 @@ export function convertMaterialUnit(params: {
     text.includes('jeotekstil') ||
     text.includes('geotekstil') ||
     text.includes('дорнит') ||
-    text.includes('рулон') ||
-    text.includes('rulo');
+    text.includes('гидроизоляц');
 
-  if (isMembraneOrGeotextile || from === 'rulo' || to === 'rulo') {
+  if (isMembraneOrGeotextile) {
     let rollArea = extractRollAreaM2(combinedSpecText);
     if (!rollArea) {
       if (isPolyFilm) {
@@ -1716,7 +1765,7 @@ export function convertMaterialUnit(params: {
   }
 
   // D2. Adet / Plaka <-> m² (Yalnızca gerçek levha/branda ise VEYA açık ebat varsa)
-  if ((isSheetOrBoard || explicitBoardArea !== null) && !/люк\b|kapak|kapağı|kapagi|светильник|прожектор|стенд|pano/i.test(text)) {
+  if ((isSheetOrBoard || explicitBoardArea !== null) && !/люк\b|kapak|kapağı|kapagi|светильник|прожектор|стенд|pano|болт|cıvata|civata|гайк|somun|шайб|pul\b|rondela|шпильк|saplama|саморез|vida\b|дюбел|dübel|dubel|анкер|ankraj|гвозд|çivi|civi|фиксатор|paspay/i.test(text)) {
     let boardArea = explicitBoardArea;
     if (!boardArea) {
       if (text.includes('тент') || text.includes('тарпаулин') || text.includes('branda') || text.includes('tente')) {
@@ -2127,6 +2176,19 @@ export function convertMaterialUnit(params: {
   // G4. BOYU BELİRTİLEN BORULAR, HORTUMLAR VE KANALLAR (ADET <-> METRE)
   // --------------------------------------------------------------------------
   if (/boru|труб|воздуховод|yangın\s*hortumu|рукав\s*пожарн/i.test(text) && ((from === 'adet' && to === 'metre') || (from === 'metre' && to === 'adet'))) {
+    // Yangın hortumunda (20m rulo) faturada birim MT girilmiş ancak fiyat zaten 1 rulo fiyatıysa (>= 500 ₽), 20 ile çarpma!
+    if (/yangın\s*hortumu|рукав\s*пожарн/i.test(text) && from === 'metre' && to === 'adet' && unitPrice >= 500) {
+      return {
+        convertedUnitPrice: unitPrice,
+        convertedQuantity: quantity,
+        fromUnit: from,
+        toUnit: to,
+        factor: 1,
+        formula: '1 Adet Yangın Hortumu Seti (20m) = 1 Adet',
+        confidence: 'HIGH',
+        conversionApplied: true
+      };
+    }
     const lenMatch =
       combinedSpecText.match(/(?:[xх*×]|l\s*=|\()\s*(\d+(?:[.,]\d+)?)\s*(?:м|m)(?![a-zа-яё0-9²³])/i) ||
       combinedSpecText.match(/\b(1000|1250|2000|3000|6000)\s*(?:мм|mm)\b/i) ||
@@ -2207,14 +2269,18 @@ export function convertMaterialUnit(params: {
 
   // --------------------------------------------------------------------------
   // G6. PAKETLİ PASPAYI, DÜBEL, VİDA, SOMUN, PUL, KABLO BAĞI & SARF (PAKET / KUTU <-> ADET)
+  // (Çöp poşetleri rulo/paket bazında kıyaslandığından adet bölmesine girmez!)
   // --------------------------------------------------------------------------
+  const isTrashBagItem = /çöp\s*poşet|cop\s*poset|çöp\s*torba|cop\s*torba|мешк.*мусор|пакет.*мусор/i.test(text);
   const explicitPackMatch =
     combinedSpecText.match(/(\d+)\s*(?:шт|adet|пар|çift|cift|рул|rulo)\s*(?:\/|\s*в\s*|\s*-\s*|\s*)(?:уп|пакет|кор|короб|пач|paket|kutu|koli)/i) ||
+    combinedSpecText.match(/(?:уп|упак|упаковка|пакет|кор|коробка|paket|kutu)\s*[-:.]?\s*(\d+)\s*(?:шт|adet|пар|çift|уп)/i) ||
+    combinedSpecText.match(/(\d+)\s*упаков(?:ок|ки)\s*по\s*\d+\s*(?:кг|г|л)/i) ||
     combinedSpecText.match(/\(\s*(\d+)\s*(?:шт|adet|пар|çift)\b/i);
   const isSpacerItem = /paspay|фиксатор|конус|звездочк|стульчик/i.test(text);
   const isFastenerOrTie = /дюбел|dübel|dubel|саморез|vida|гайк|somun|шайб|pul\b|анкер|ankraj|хомут|kablo\s*bağ|cırt\s*kelepçe|клемм|wago|скоб|клипс/i.test(text);
 
-  if ((explicitPackMatch || isSpacerItem || isFastenerOrTie) && ((from === 'paket' || from === 'kutu') && to === 'adet' || (from === 'adet' && (to === 'paket' || to === 'kutu')))) {
+  if (!isTrashBagItem && (explicitPackMatch || isSpacerItem || isFastenerOrTie) && ((from === 'paket' || from === 'kutu') && to === 'adet' || (from === 'adet' && (to === 'paket' || to === 'kutu')))) {
     const rawCount = explicitPackMatch ? parseInt(explicitPackMatch[1], 10) : (isSpacerItem ? 500 : 100);
     const packCount = (rawCount >= 2 && rawCount <= 5000) ? rawCount : 100;
     if ((from === 'paket' || from === 'kutu') && to === 'adet') {
