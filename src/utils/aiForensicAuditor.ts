@@ -5,9 +5,9 @@ import {
   normalizeStandardUnit
 } from './constructionUnitConverter';
 import {
-  isExemptFromBenchmarkAudit,
-  BenchmarkExemptionResult
+  isExemptFromBenchmarkAudit
 } from './auditRiskEngine';
+export { isExemptFromBenchmarkAudit };
 
 export type ForensicRiskLevel = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
 
@@ -49,17 +49,36 @@ export interface AIForensicVerdict {
 }
 
 /**
+ * Elma-Elma (Apples-to-Apples) Teknik Ölçü Uyum Kontrolü:
+ * İki malzeme adının çap (Ø), kalınlık, ebat veya güç değerleri farklıysa asla birbirine emsal alınmaz.
+ */
+function hasConflictingSpecs(nameA: string, nameB: string): boolean {
+  const a = nameA.toLowerCase().replace(/,/g, '.');
+  const b = nameB.toLowerCase().replace(/,/g, '.');
+
+  // Çap kontrolü: Ø12 vs Ø16 vb.
+  const diamA = a.match(/(?:ø|ф|d|çap)\s*(\d{1,3})\b/i)?.[1];
+  const diamB = b.match(/(?:ø|ф|d|çap)\s*(\d{1,3})\b/i)?.[1];
+  if (diamA && diamB && diamA !== diamB) return true;
+
+  // Boyut kontrolü: 100x100 vs 50x50 vb.
+  const dimA = a.match(/\b(\d{1,4}\s*[xх*×]\s*\d{1,4}(?:\s*[xх*×]\s*\d{1,4})?)\b/i)?.[1]?.replace(/\s+/g, '').replace(/[х*×]/g, 'x');
+  const dimB = b.match(/\b(\d{1,4}\s*[xх*×]\s*\d{1,4}(?:\s*[xх*×]\s*\d{1,4})?)\b/i)?.[1]?.replace(/\s+/g, '').replace(/[х*×]/g, 'x');
+  if (dimA && dimB && dimA !== dimB) return true;
+
+  return false;
+}
+
+/**
  * Derin Sezgisel Kıdemli Adli Satınalma Başdenetçisi Motoru (Senior AI Forensic Chief Auditor)
- * 
- * HİÇBİR SATINALMACININ SİSTEMİ KANDIRAMAYACAĞI 8 DERİN DENETİM BOYUTU:
- * 1. Şişirilmiş Liste Fiyatı & Kapanış Analizi (Kapanış fiyatı piyasa ortalamasının üzerindeyse sahte indirimdir)
- * 2. Emsal Piyasa Fiyat Karşılaştırması (Lojistik/Nakliye ve Özel Çizimli Donatı Karkasları MUAF TUTULUR)
- * 3. Sepet Küçültme & Miktar Kısma İllüzyonu (Daha az malzeme alıp indirim aldım deme hilesi)
- * 4. Parçalı Sipariş / Eşik Atlama (Split Invoices - 72 saat içinde aynı firmaya parçalı alımlar)
- * 5. Formalite / Kurgusal Müzakere Turları (Gerçek fiyat kırımı olmadan yapay tur ekleme)
- * 6. Tedarikçi Tekeli ve Şüpheli Yakınlık (Satınalmacı-tedarikçi konsantrasyon analizi)
- * 7. Evrak ve Arşiv Bütünlüğü (1. Teklif ve Son Resmi Fatura zorunluluğu)
- * 8. Yuvarlak Rakam ve Kalemsiz Tutar Anomalisi (Detaysız kaba tutar beyanları)
+ *
+ * Sıfır Yanlış Pozitif (Zero Hallucination) & Sıfır Hile Toleransı:
+ * 1. Belge Bütünlüğü: Hem `firstOfferFileUrl`/`finalOfferFileUrl` hem de genel `fileUrl`/`driveFileId`/`comparativeAnalysisId` kontrol edilir.
+ * 2. Elma-Elma Emsal Piyasa Fiyat Denetimi: Yalnızca birebir aynı malzeme ve aynı/dönüştürülebilir birimde (en az 2 geçmiş alımı olan) emsallerle kıyaslanır.
+ * 3. Kurgusal Liste Fiyatı / Şişirilmiş İlk Teklif Hilesi: İlk teklifin geçmiş emsale göre yapay şişirilip şişirilmediği ve kapanış fiyatının emsalin üstünde kalıp kalmadığı denetlenir.
+ * 4. Aynı Tedarikçi Zam + Sahte İndirim Oyunu: Tedarikçinin bir önceki faturasına göre zam yapıp "indirim" adı altında eski fiyatın üstünde satıp satmadığı yakalanır.
+ * 5. Sepet Küçültme & Miktar Kısma Hilesi: Birim fiyat düşmeden miktar düşürülerek fatura tutarının düşürülmesi hilesi yakalanır.
+ * 6. Gerçek Parçalı Fatura (TDF 1M+ ₽ Eşiği Atlatma / Smurfing): Mükerrer kayıtlar elenerek 72 saat içinde farklı fatura numaralarıyla 1M ₽ sınırını aşan bölünmüş alımlar tespit edilir.
  */
 export function runForensicAudit(
   record: DiscountRecord,
@@ -69,213 +88,275 @@ export function runForensicAudit(
 ): AIForensicVerdict {
   const offerPrice = Number(record.offerPrice || 0);
   const agreedPrice = Number(record.agreedPrice || 0);
-  const discountAmount = Number(record.discountAmount || Math.max(0, offerPrice - agreedPrice));
+  const discountAmount = Number(record.discountAmount ?? Math.max(0, offerPrice - agreedPrice));
   const discountPct = Number(record.discountPercentage) || (offerPrice > 0 ? (discountAmount / offerPrice) * 100 : 0);
-  const vendorName = record.vendorName || 'Bilinmeyen Tedarikçi';
+  const vendorName = (record.vendorName || 'Bilinmeyen Tedarikçi').trim();
   const category = record.category || 'Genel';
   const supervisorName = record.supervisorName || 'Satınalmacı';
   const personnelName = record.performedByPersonnelName;
-  const items = record.items || matchedInvoice?.items || [];
+  const items = (record.items && record.items.length > 0) ? record.items : (matchedInvoice?.items || []);
 
-  let riskScore = 8; // Temel taban
+  let riskScore = 5; // Temiz başlangıç tabanı
 
   // =========================================================================
-  // BOYUT 1: BELGE BÜTÜNLÜĞÜ VE DİJİTAL KANIT ZİNCİRİ
+  // BOYUT 1: BELGE BÜTÜNLÜĞÜ VE DİJİTAL KANIT ZİNCİRİ (Doğru Alan Kontrolü)
   // =========================================================================
-  const hasFirstDoc = Boolean(record.firstOfferFileUrl || record.firstOfferDriveFileId || record.firstOfferFileName);
-  const hasFinalDoc = Boolean(record.finalOfferFileUrl || record.finalOfferDriveFileId || matchedInvoice?.fileUrl || matchedInvoice?.driveFileId);
+  const hasTdfLink = Boolean((record as any).comparativeAnalysisId);
+  const hasGeneralFile = Boolean(record.fileUrl || record.driveFileId || matchedInvoice?.fileUrl || matchedInvoice?.driveFileId || matchedInvoice?.prizmaSource);
+  const hasFirstDoc = Boolean(record.firstOfferFileUrl || record.firstOfferDriveFileId || record.firstOfferFileName || hasTdfLink);
+  const hasFinalDoc = Boolean(record.finalOfferFileUrl || record.finalOfferDriveFileId || record.finalOfferFileName || hasGeneralFile || hasTdfLink);
 
   let docCheck: ForensicCheckDetail;
-  if (!hasFirstDoc && !hasFinalDoc) {
-    riskScore += 35;
+  if (!hasFirstDoc && !hasFinalDoc && !hasGeneralFile) {
+    riskScore += 30;
     docCheck = {
       detected: true,
-      scoreImpact: 35,
-      title: 'İki Belge de Sistemde Yok (Tamamen Beyana Dayalı)',
-      summary: 'Ne başlangıç teklif mektubu ne de son fatura sisteme yüklenmemiş.',
-      details: 'Satınalmacı resmi evrak sunmadan sistemde indirim beyan etmiştir. İndirimin fiziki gerçekliği kanıtlanamaz.'
+      scoreImpact: 30,
+      title: 'Resmi Kanıt Belgesi Yüklenmemiş (Beyana Dayalı Kayıt)',
+      summary: 'Sisteme ne ilk teklif ne de onaylı fatura dosyası eklenmiş.',
+      details: 'İndirim beyanının doğrulanabilmesi için ilk teklif ve son fatura belgelerinin yüklenmesi gerekmektedir.'
     };
-  } else if (!hasFirstDoc) {
-    riskScore += 25;
+  } else if (!hasFirstDoc && discountPct >= 15) {
+    riskScore += 18;
     docCheck = {
       detected: true,
-      scoreImpact: 25,
-      title: '1. Teklif Belgesi Eksik',
-      summary: 'Son fatura mevcut ancak pazarlık öncesi ilk teklif mektubu yüklenmemiş.',
-      details: 'Pazarlığa gerçekten bu fiyattan mı başlandığı teyit edilemiyor. Fiyatın satınalmacı tarafından yüksek gösterilme riski mevcuttur.'
+      scoreImpact: 18,
+      title: '1. Teklif Belgesi Eksik (Başlangıç Fiyatı Teyitsiz)',
+      summary: 'Son fatura mevcut ancak %15 üzeri indirimin ilk teklif belgesi eklenmemiş.',
+      details: 'Yüksek oranlı indirimlerde tedarikçinin ilk teklif fiyatını doğrulamak için 1. teklif belgesi şarttır.'
     };
   } else if (!hasFinalDoc) {
-    riskScore += 20;
+    riskScore += 15;
     docCheck = {
       detected: true,
-      scoreImpact: 20,
-      title: 'Son Resmi Fatura Eksik',
-      summary: '1. teklif yüklenmiş ancak faturanın kesildiği henüz doğrulanmamış.',
-      details: 'İşlem henüz faturalaşmamış veya proforma aşamasında kalmış olabilir.'
+      scoreImpact: 15,
+      title: 'Son Onaylı Fatura Belgesi Eksik',
+      summary: 'İlk teklif mevcut ancak kesilen nihai fatura dosyası henüz eşleşmemiş.',
+      details: 'Anlaşılan nihai fiyatın faturalaştığını doğrulamak için son fatura belgesi eklenmelidir.'
     };
   } else {
     docCheck = {
       detected: false,
       scoreImpact: 0,
-      title: 'Evrak Bütünlüğü Tam',
-      summary: 'Hem 1. teklif belgesi hem de son resmi fatura dijital arşivde mevcut.',
-      details: 'Gerekli iki belge de doğrulanabilir şekilde sistemde kayıtlıdır.'
+      title: 'Evrak ve Arşiv Bütünlüğü Tam',
+      summary: 'İşleme ait kanıt belgeleri sistem arşivinde doğrulanabilir durumda.',
+      details: 'Belge zinciri eksiksizdir.'
     };
   }
 
   // =========================================================================
-  // BOYUT 2: EMSAL PİYASA FİYAT DENETİMİ (Lojistik ve Özel Karkaslar MUAFTIR!)
+  // BOYUT 2: ELMA-ELMA EMSAL PİYASA FİYAT & GEÇMİŞ FATURA DENETİMİ
   // =========================================================================
   const exemptionDetails: string[] = [];
   let exemptItemsCount = 0;
-  let worstDiff = 0;
+  let worstClosingDiffPct = 0;
+  let worstInitialInflationPct = 0;
   let worstItemName = '';
-  let worstOffered = 0;
-  let worstAvg = 0;
+  let worstClosingPrice = 0;
+  let worstInitialUnitPrice = 0;
+  let worstBenchmarkAvg = 0;
+  let worstBenchmarkMin = 0;
   let worstUnit = '';
   let worstConvNote = '';
-  let worstClosingPrice = 0;
-  let isClosingAboveMarket = false;
+  let sameVendorPrevPrice = 0;
+  let sameVendorPrevDate = '';
+
+  const priceRatio = agreedPrice > 0 && offerPrice > agreedPrice ? (offerPrice / agreedPrice) : 1;
 
   if (items.length > 0 && comparisons.length > 0) {
     for (const it of items) {
-      const rawName = (it.materialName || it.description || '').trim();
+      const rawName = (it.materialName || (it as any).description || it.originalName || '').trim();
       if (!rawName) continue;
       const itCategory = it.category || category;
 
-      // Lojistik ve Özel İmalat Karkas Muafiyet Filtresi
       const exemption = isExemptFromBenchmarkAudit(rawName, itCategory);
       if (exemption.isExempt) {
         exemptItemsCount++;
-        exemptionDetails.push(`🛡️ '${rawName}': ${exemption.label} - ${exemption.explanation}`);
-        continue; // Emsal fiyat karşılaştırmasından muaf tut!
+        exemptionDetails.push(`🛡️ '${rawName}': ${exemption.label}`);
+        continue;
       }
 
+      // Sadece birebir aynı kanonik malzeme ve çelişmeyen teknik ölçülerle eşleştir (Elma-Elma!)
       const comp = comparisons.find(c => {
-        const cName = (c?.materialName || '').toLowerCase().trim();
-        const nLower = rawName.toLowerCase();
-        return cName === nLower || (nLower.length > 4 && cName.includes(nLower)) || (cName.length > 4 && nLower.includes(cName));
+        if (!c || !c.materialName || (c.history?.length || 0) < 2) return false;
+        const cName = c.materialName.toLowerCase().trim();
+        const nLower = rawName.toLowerCase().trim();
+        if (hasConflictingSpecs(cName, nLower)) return false;
+        return cName === nLower;
       });
       if (!comp) continue;
 
-      const benchmarkAvg = Number(comp?.avgUnitPrice || comp?.avgPrice || 0);
-      if (benchmarkAvg > 0 && it.unitPrice) {
-        const itPrice = Number(it.unitPrice);
-        const itUnit = it.unit || 'adet';
-        const benchmarkUnit = comp.standardUnit || comp.unit || 'adet';
+      const itPrice = Number(it.unitPrice || 0);
+      if (itPrice <= 0) continue;
+      const itQty = Number(it.quantity) || 1;
+      const itTotal = Number(it.totalPrice) || (itPrice * itQty);
+      const itUnit = it.unit || 'Adet';
+      const benchmarkUnit = comp.unit || 'Adet';
 
-        // Akıllı şantiye birim dönüşümü
-        const conv = convertMaterialUnit({
-          materialName: rawName,
-          category: itCategory,
-          fromUnit: itUnit,
-          toUnit: benchmarkUnit,
-          unitPrice: itPrice,
-          quantity: Number(it.quantity) || 1
-        });
+      // Materiality guard: ignore minor ancillary items (< 5,000 ₽ or < 3% of invoice total)
+      if (itTotal < 5000 || (agreedPrice > 50000 && itTotal < agreedPrice * 0.03)) {
+        continue;
+      }
 
-        if (conv.conversionApplied || normalizeStandardUnit(itUnit) === normalizeStandardUnit(benchmarkUnit)) {
-          const effectivePrice = conv.conversionApplied ? conv.convertedUnitPrice : itPrice;
-          const diff = ((effectivePrice - benchmarkAvg) / benchmarkAvg) * 100;
-          if (diff > worstDiff) {
-            worstDiff = diff;
-            worstItemName = rawName;
-            worstOffered = effectivePrice;
-            worstAvg = benchmarkAvg;
-            worstUnit = benchmarkUnit;
-            worstConvNote = conv.conversionApplied ? ` (${itPrice} ₽/${itUnit} -> ${effectivePrice} ₽/${benchmarkUnit} [${conv.formula}])` : '';
-            worstClosingPrice = effectivePrice;
+      const conv = convertMaterialUnit({
+        materialName: rawName,
+        category: itCategory,
+        fromUnit: itUnit,
+        toUnit: benchmarkUnit,
+        unitPrice: itPrice,
+        quantity: itQty
+      });
+
+      const unitsMatch = conv.conversionApplied || normalizeStandardUnit(itUnit) === normalizeStandardUnit(benchmarkUnit);
+      if (!unitsMatch) continue; // Farklı ve çevrilemeyen birimleri (ör. Adet vs Ton) ASLA kıyaslama!
+
+      const effectiveClosingUnit = conv.conversionApplied ? conv.convertedUnitPrice : itPrice;
+      const effectiveInitialUnit = effectiveClosingUnit * priceRatio;
+      const curDateMs = record.orderDate ? new Date(record.orderDate).getTime() : 0;
+
+      // Bu faturanın kendisi hariç ve bu faturadan ÖNCE veya aynı dönemde alınmış geçmiş alımların ortalamasını hesapla
+      const otherHistory = (comp.history || []).filter(h => {
+        if (String(h.invoiceNumber || '').trim().toLowerCase() === String(record.invoiceNo || '').trim().toLowerCase()) return false;
+        if (curDateMs > 0 && h.date) {
+          const hMs = new Date(h.date).getTime();
+          if (hMs > curDateMs + 15 * 86400000) return false;
+        }
+        return Number(h.unitPrice || 0) > 0;
+      });
+      if (otherHistory.length === 0) continue;
+
+      const benchmarkAvg = otherHistory.reduce((s, h) => s + Number(h.unitPrice || 0), 0) / otherHistory.length;
+      const benchmarkMin = Math.min(...otherHistory.map(h => Number(h.unitPrice || 0)).filter(p => p > 0));
+
+      // Aynı tedarikçiden bu faturadan DAHA ÖNCE kaça alınmış kontrol et (sadece aynı malzeme için!)
+      const vendorPrevPurchases = otherHistory
+        .filter(h => {
+          if ((h.supplier || '').toLowerCase().trim() !== vendorName.toLowerCase()) return false;
+          if (curDateMs > 0 && h.date) {
+            return new Date(h.date).getTime() <= curDateMs;
           }
+          return true;
+        })
+        .sort((a, b) => new Date(b.date || '').getTime() - new Date(a.date || '').getTime());
+
+      let itemSameVendorPrevPrice = 0;
+      let itemSameVendorPrevDate = '';
+      if (vendorPrevPurchases.length > 0) {
+        const prevP = Number(vendorPrevPurchases[0].unitPrice || 0);
+        if (prevP > 0 && effectiveClosingUnit > prevP * 1.12) {
+          itemSameVendorPrevPrice = prevP;
+          itemSameVendorPrevDate = vendorPrevPurchases[0].date || '';
+        }
+      }
+
+      if (benchmarkAvg > 0) {
+        const closingDiffPct = ((effectiveClosingUnit - benchmarkAvg) / benchmarkAvg) * 100;
+        const initialDiffPct = ((effectiveInitialUnit - benchmarkAvg) / benchmarkAvg) * 100;
+        const vendorHikePct = itemSameVendorPrevPrice > 0 ? ((effectiveClosingUnit - itemSameVendorPrevPrice) / itemSameVendorPrevPrice) * 100 : 0;
+
+        if (closingDiffPct > worstClosingDiffPct || initialDiffPct > worstInitialInflationPct || vendorHikePct > 12) {
+          if (closingDiffPct >= worstClosingDiffPct || vendorHikePct > 12) {
+            worstClosingDiffPct = Math.max(worstClosingDiffPct, closingDiffPct);
+            worstItemName = comp.materialName;
+            worstClosingPrice = effectiveClosingUnit;
+            worstInitialUnitPrice = effectiveInitialUnit;
+            worstBenchmarkAvg = benchmarkAvg;
+            worstBenchmarkMin = benchmarkMin;
+            worstUnit = benchmarkUnit;
+            worstConvNote = conv.conversionApplied ? ` (${itPrice} ₽/${itUnit} → ${effectiveClosingUnit} ₽/${benchmarkUnit})` : '';
+            sameVendorPrevPrice = itemSameVendorPrevPrice;
+            sameVendorPrevDate = itemSameVendorPrevDate;
+          }
+          worstInitialInflationPct = Math.max(worstInitialInflationPct, initialDiffPct);
         }
       }
     }
   }
 
   let marketCheck: ForensicCheckDetail;
-  if (worstDiff >= 30) {
+  if (sameVendorPrevPrice > 0 && worstClosingPrice > sameVendorPrevPrice * 1.12) {
+    const hikePct = ((worstClosingPrice - sameVendorPrevPrice) / sameVendorPrevPrice) * 100;
     riskScore += 35;
     marketCheck = {
       detected: true,
       scoreImpact: 35,
-      title: `Emsal Fiyat Üzerinde Başlangıç (+%${worstDiff.toFixed(0)} Fahiş Fiyat)`,
-      summary: `'${worstItemName}' için başlangıç birim fiyatı şirket ortalamasının çok üstünde.`,
-      details: `Teklif birim fiyatı: ${formatRuble(worstOffered)}/${worstUnit}${worstConvNote}, GES şirket geçmiş ortalaması: ${formatRuble(worstAvg)}/${worstUnit}. Tedarikçi malzemeyi zaten %${worstDiff.toFixed(0)} pahalıya teklif etmiş, indirim ancak gerçek piyasa seviyesine çekmiştir.`,
-      evidence: [`Malzeme: ${worstItemName}`, `Teklif Fiyatı: ${formatRuble(worstOffered)}/${worstUnit}${worstConvNote}`, `GES Piyasa Ortalaması: ${formatRuble(worstAvg)}/${worstUnit}`]
+      title: `Aynı Tedarikçide Gizli Zam + Sahte İndirim (+%${hikePct.toFixed(1)} Pahalı)`,
+      summary: `${vendorName} firması '${worstItemName}' ürününü önceki faturasına göre zamlı satmış!`,
+      details: `Aynı tedarikçiden ${sameVendorPrevDate} tarihinde ${formatRuble(sameVendorPrevPrice)}/${worstUnit} fiyata alınan '${worstItemName}', bu siparişte ilk teklif ${formatRuble(worstInitialUnitPrice)}/${worstUnit} gösterilip "indirimle" ${formatRuble(worstClosingPrice)}/${worstUnit} fiyata alınmıştır. Gerçekte indirim değil, önceki alıma göre +%${hikePct.toFixed(1)} fiyat artışı vardır!`,
+      evidence: [
+        `Malzeme: ${worstItemName}`,
+        `Önceki Alım (${sameVendorPrevDate}): ${formatRuble(sameVendorPrevPrice)}/${worstUnit}`,
+        `Şimdiki Anlaşılan Fiyat: ${formatRuble(worstClosingPrice)}/${worstUnit} (+%${hikePct.toFixed(1)} artış)`
+      ]
     };
-  } else if (exemptItemsCount > 0 && worstDiff === 0) {
+  } else if (worstClosingDiffPct >= 25) {
+    riskScore += 32;
     marketCheck = {
-      detected: false,
-      scoreImpact: 0,
-      title: `Emsal Denetimi Temiz (${exemptItemsCount} Kalem Muaf Tutuldu)`,
-      summary: `Standart kalemlerde emsal sapması yok; ${exemptItemsCount} lojistik/karkas kalemi özel statüde değerlendirildi.`,
-      details: 'Nakliye ve özel imalat karkas giderleri proje dinamiklerine göre değişken olduğundan haksız birim fiyat uyarısı verilmedi.'
+      detected: true,
+      scoreImpact: 32,
+      title: `İndirime Rağmen Şirket Ortalamasından +%${worstClosingDiffPct.toFixed(0)} Pahalı Alım`,
+      summary: `'${worstItemName}' anlaşılan birim fiyatı (${formatRuble(worstClosingPrice)}/${worstUnit}), şirket ortalamasının (${formatRuble(worstBenchmarkAvg)}/${worstUnit}) üzerindedir.`,
+      details: `Satınalmacı indirim aldığını beyan etse de, anlaşılan son birim fiyat şirket içi elma-elma emsal ortalamasından %${worstClosingDiffPct.toFixed(1)} (en ucuz şantiye alımı ${formatRuble(worstBenchmarkMin)}/${worstUnit}) daha pahalıdır.`,
+      evidence: [
+        `Malzeme: ${worstItemName}${worstConvNote}`,
+        `Anlaşılan Son Birim Fiyat: ${formatRuble(worstClosingPrice)}/${worstUnit}`,
+        `Şirket Emsal Ortalaması: ${formatRuble(worstBenchmarkAvg)}/${worstUnit} (En İyi: ${formatRuble(worstBenchmarkMin)}/${worstUnit})`
+      ]
     };
   } else {
     marketCheck = {
       detected: false,
       scoreImpact: 0,
-      title: 'Emsal Birim Fiyatlar Uyumlu',
-      summary: 'GES arşivindeki geçmiş alım fiyatlarıyla uyumlu, fahiş bir sapma tespit edilmedi.',
-      details: 'Birim fiyatlar şirket geçmiş ortalamalarına yakın seyretmektedir.'
+      title: 'Elma-Elma Emsal Birim Fiyatlar Uyumlu',
+      summary: 'Anlaşılan birim fiyatlar şirket içi geçmiş alım ortalamalarıyla uyumludur.',
+      details: 'Geçmiş faturalardaki aynı malzeme ve aynı birim fiyatlarla yapılan elma-elma kıyaslamada fahiş sapma tespit edilmemiştir.'
     };
   }
 
   // =========================================================================
-  // BOYUT 3: KURGUSAL LİSTE FİYATI / ŞİŞİRİLMİŞ İNDİRİM TUZAĞI
+  // BOYUT 3: KURGUSAL LİSTE FİYATI / ŞİŞİRİLMİŞ İLK TEKLİF TUZAĞI
   // =========================================================================
-  // Eğer satınalmacı %25+ indirim beyan etmiş ama anlaşılan kapanış fiyatı
-  // piyasa ortalamasının dahi üzerindeyse, bu %100 şişirilmiş liste fiyatı tuzağıdır!
-  if (worstAvg > 0 && worstClosingPrice > worstAvg && discountPct >= 20) {
-    isClosingAboveMarket = true;
-  }
+  const isClosingAboveMarket = worstBenchmarkAvg > 0 && worstClosingPrice > worstBenchmarkAvg * 1.10 && discountPct >= 15;
+  const isInitialArtificiallyInflated = worstBenchmarkAvg > 0 && worstInitialInflationPct >= 35 && discountPct >= 20;
 
   let inflationCheck: ForensicCheckDetail;
-  if (isClosingAboveMarket && discountPct >= 25) {
-    riskScore += 45;
+  if (isClosingAboveMarket || isInitialArtificiallyInflated) {
+    riskScore += 42;
     inflationCheck = {
       detected: true,
-      scoreImpact: 45,
-      title: `Kurgusal Liste Fiyatı Tuzağı! (İndirime Rağmen Piyasa Üstü Kapanış)`,
-      summary: `Satınalmacı %${discountPct.toFixed(1)} indirim aldığını beyan etmiş, ancak nihai fiyat GES ortalamasının üzerindedir!`,
-      details: `Piyasa ortalaması ${formatRuble(worstAvg)}/${worstUnit} olan '${worstItemName}' malzemesi, %${discountPct.toFixed(1)} indirim yapıldıktan sonra bile ${formatRuble(worstClosingPrice)}/${worstUnit} seviyesinden kapatılmıştır. Şirkete reel bir tasarruf sağlanmamış, liste fiyatı baştan tavandan açılarak yapay indirim puanı üretilmiştir!`
+      scoreImpact: 42,
+      title: `Şişirilmiş İlk Teklif / Kurgusal İndirim Tuzağı!`,
+      summary: `İlk teklif piyasa ortalamasının +%${worstInitialInflationPct.toFixed(0)} üzerinde açılıp %${discountPct.toFixed(1)} sahte iskonto gösterilmiş.`,
+      details: `Normal piyasa ortalaması ${formatRuble(worstBenchmarkAvg)}/${worstUnit} olan '${worstItemName}' için ilk teklif ${formatRuble(worstInitialUnitPrice)}/${worstUnit} gibi şişirilmiş bir rakamdan başlatılmış, indirim sonrasında ${formatRuble(worstClosingPrice)}/${worstUnit} seviyesine inilmiştir. Bu işlem gerçek bir pazarlık başarısı değil, şişirilmiş liste fiyatından normal fiyata dönüş illüzyonudur!`
     };
-  } else if (discountPct >= 40) {
-    riskScore += 40;
+  } else if (discountPct >= 42) {
+    riskScore += 35;
     inflationCheck = {
       detected: true,
-      scoreImpact: 40,
-      title: `Olağandışı Aşırı İskonto Marjı (%${discountPct.toFixed(1)})`,
-      summary: `Toptan inşaat tedarik marjlarının (%5-%15) fersah fersah üzerinde.`,
-      details: `Tedarikçinin ticari gerekçe olmadan %${discountPct.toFixed(0)} iskonto vermesi olağandışıdır. Bu durum %90 ihtimalle liste fiyatının şişirilmesine veya sepet küçülmesine işaret eder.`
-    };
-  } else if (discountPct >= 25) {
-    riskScore += 20;
-    inflationCheck = {
-      detected: true,
-      scoreImpact: 20,
-      title: `Yüksek İskonto Oranı Şüphesi (%${discountPct.toFixed(1)})`,
-      summary: `Piyasa teamüllerine göre yüksek iskonto marjı.`,
-      details: `Normal inşaat malzeme alımlarında nadir rastlanan %25 üzeri oran. Tedarikçinin liste fiyatını yüksek açıp açmadığı 1. teklif formuyla doğrulanmalıdır.`
+      scoreImpact: 35,
+      title: `Olağandışı Yüksek İskonto Oranı (%${discountPct.toFixed(1)}) — İlk Teklif Şişirme Şüphesi`,
+      summary: `İnşaat tedarik piyasası standartlarının (%3-%20) çok üzerinde iskonto beyanı.`,
+      details: `Hiçbir tedarikçi normal piyasa fiyatından %${discountPct.toFixed(1)} zarar ederek mal satmaz. İlk teklifin kasten yüksek yazdırılıp yazdırılmadığı kontrol edilmelidir.`
     };
   } else {
     inflationCheck = {
       detected: false,
       scoreImpact: 0,
-      title: `Normal Ticari İndirim Oranı (%${discountPct.toFixed(1)})`,
-      summary: `İnşaat malzeme pazarlık teamüllerine (%3-%20) uygun.`,
-      details: `Teklif ile anlaşılan tutar arasındaki marj olağan piyasa bandındadır.`
+      title: `Gerçekçi Ticari İndirim Oranı (%${discountPct.toFixed(1)})`,
+      summary: `İlk teklif ve kapanış tutarı makul ticari müzakere sınırları içerisindedir.`,
+      details: `Yapay fiyat şişirme bulgusuna rastlanmadı.`
     };
   }
 
   // =========================================================================
-  // BOYUT 4: SEPET KÜÇÜLTME VE MİKTAR EKSİLTME İLLÜZYONU
+  // BOYUT 4: SEPET KÜÇÜLTME, KALEM EKSİLTME VE MİKTAR KISMA HİLESİ
   // =========================================================================
   let basketCheck: ForensicCheckDetail = {
     detected: false,
     scoreImpact: 0,
-    title: 'Sepet ve Miktar Teyidi Temiz',
-    summary: 'Miktar eksiltilerek tutar düşürme bulgusu yok.',
-    details: 'Teklif ve fatura kalemlerinin fiziki hacmi tutarlı görünüyor.'
+    title: 'Miktar ve Kalem Bütünlüğü Tam',
+    summary: 'Miktar kısma veya kalem eksiltme yoluyla sahte indirim bulgusu yok.',
+    details: 'Teklif ve fatura kalemleri tutarlıdır.'
   };
 
   if (matchedInvoice && Array.isArray(matchedInvoice.items) && record.items && record.items.length > 0) {
@@ -286,61 +367,61 @@ export function runForensicAudit(
         detected: true,
         scoreImpact: 35,
         title: `Sepetten Kalem Çıkarılmış (${missingCount} Kalem Eksik)`,
-        summary: '1. teklifteki bazı malzemeler son faturada yer almıyor.',
-        details: `1. teklifte ${record.items.length} kalem malzeme varken, kesilen son faturada yalnızca ${matchedInvoice.items.length} kalem bulunmaktadır. Fatura tutarındaki düşüş gerçek bir birim fiyat indirimi değil, malzeme çıkarılması (sepet küçültmesi) sonucu oluşmuştur!`
+        summary: 'İlk teklifteki bazı kalemler son faturadan çıkarılarak toplam tutar düşürülmüş.',
+        details: `1. teklifte ${record.items.length} kalem varken son faturada ${matchedInvoice.items.length} kalem yer alıyor. Toplam tutardaki düşüş birim fiyat indiriminden değil, malzeme iptalinden kaynaklanmaktadır!`
       };
     } else {
-      // Kalem sayıları aynıysa toplam miktar düşüşü var mı kontrol et
       const offerTotalQty = record.items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
       const invTotalQty = matchedInvoice.items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
-      if (offerTotalQty > 0 && invTotalQty > 0 && invTotalQty < offerTotalQty * 0.85) {
+      if (offerTotalQty > 0 && invTotalQty > 0 && invTotalQty < offerTotalQty * 0.88) {
         riskScore += 30;
         basketCheck = {
           detected: true,
           scoreImpact: 30,
-          title: `Miktar Eksiltilerek Tutar Düşürülmüş (Hacim Azalması)`,
-          summary: `Fatura toplam miktarı 1. tekliftekinden %${Math.round(((offerTotalQty - invTotalQty) / offerTotalQty) * 100)} daha az.`,
-          details: 'Birim fiyatlar değişmeden yalnızca sipariş miktarı kısılarak toplam tutar düşürülmüş. Bu bir pazarlık başarısı değil, şantiye ihtiyacından vazgeçilmesidir.'
+          title: `Miktar Düşürülerek Sahte İndirim Gösterilmiş`,
+          summary: `Fatura miktarı ilk teklife göre %${Math.round(((offerTotalQty - invTotalQty) / offerTotalQty) * 100)} azaltılmış.`,
+          details: 'Birim fiyat indirilmeden sipariş adedi/tonajı düşürülerek fatura toplamı küçültülmüş ve aradaki fark indirim gibi beyan edilmiştir.'
         };
       }
     }
   }
 
   // =========================================================================
-  // BOYUT 5: PARÇALI SİPARİŞ & DENETİMDEN KAÇINMA (SPLIT INVOICE DETECTOR)
+  // BOYUT 5: GERÇEK PARÇALI SİPARİŞ & 1M+ ₽ TDF EŞİĞİ ATLATMA (SMURFING)
   // =========================================================================
   let splitCheck: ForensicCheckDetail = {
     detected: false,
     scoreImpact: 0,
-    title: 'Parçalı Sipariş Riski Yok',
-    summary: 'Aynı tedarikçiden kısa aralıklarla parçalı alım tespit edilmedi.',
-    details: 'İşlem bağımsız ve tekil bir satınalma sürecidir.'
+    title: 'Bölünmüş / Parçalı Fatura Bulgusu Yok',
+    summary: 'TDF onay limitini atlatmak için bölünmüş sipariş tespit edilmedi.',
+    details: 'İşlem tekil ve kurallara uygundur.'
   };
 
-  if (allDiscounts && allDiscounts.length > 0) {
+  if (allDiscounts && allDiscounts.length > 0 && !hasTdfLink) {
     const orderTime = new Date(record.orderDate || record.created_at || Date.now()).getTime();
     const vNameClean = vendorName.toLowerCase().trim();
-    const sNameClean = supervisorName.toLowerCase().trim();
+    const recInvNo = String(record.invoiceNo || '').trim().toLowerCase();
 
-    const nearbySameVendorOrders = allDiscounts.filter(d => {
-      if (d.id === record.id) return false;
+    // Yalnızca FARKLI fatura numarasına sahip gerçek ayrı siparişleri say (mükerrerleri sayma!)
+    const nearbyDistinctOrders = allDiscounts.filter(d => {
+      if (d.id === record.id || (d as any).isDeleted) return false;
+      const dInvNo = String(d.invoiceNo || '').trim().toLowerCase();
+      if (recInvNo && dInvNo && recInvNo === dInvNo) return false; // Aynı faturayı iki kez sayma!
       const dTime = new Date(d.orderDate || d.created_at || Date.now()).getTime();
       const dVName = (d.vendorName || '').toLowerCase().trim();
-      const dSName = (d.supervisorName || '').toLowerCase().trim();
       const hoursDiff = Math.abs(orderTime - dTime) / (1000 * 60 * 60);
-
-      return hoursDiff <= 72 && dVName === vNameClean && (dSName === sNameClean || d.jobsiteId === record.jobsiteId);
+      return hoursDiff <= 72 && dVName === vNameClean && d.jobsiteId === record.jobsiteId;
     });
 
-    if (nearbySameVendorOrders.length >= 2) {
-      riskScore += 25;
-      const totalCombined = nearbySameVendorOrders.reduce((s, d) => s + (Number(d.agreedPrice) || 0), agreedPrice);
+    const totalCombined = nearbyDistinctOrders.reduce((s, d) => s + (Number(d.agreedPrice) || 0), agreedPrice);
+    if (nearbyDistinctOrders.length >= 1 && totalCombined >= 1_000_000 && agreedPrice < 1_000_000) {
+      riskScore += 28;
       splitCheck = {
         detected: true,
-        scoreImpact: 25,
-        title: `Parçalı Sipariş Şüphesi (${nearbySameVendorOrders.length + 1} İşlem / 72 Saat)`,
-        summary: `Aynı tedarikçiye (${vendorName}) 72 saat içinde toplam ${formatRuble(totalCombined)} tutarında parçalı sipariş açılmış.`,
-        details: 'Tek bir büyük ihale açmak yerine siparişlerin parçalanarak yönetim onay limitlerinin veya adli denetim radarlarının altından geçirilmeye çalışılma riski mevcuttur.'
+        scoreImpact: 28,
+        title: `1M+ ₽ TDF Zorunluluğunu Atlatmak İçin Bölünmüş Sipariş (${nearbyDistinctOrders.length + 1} Fatura)`,
+        summary: `Aynı şantiyede ${vendorName} firmasına 72 saatte toplam ${formatRuble(totalCombined)} tutarında parçalı fatura kesilmiş!`,
+        details: `Tek faturada 1.000.000 ₽ TDF (en az 2 rakip teklif toplama) zorunluluğuna takılmamak için alımın ${nearbyDistinctOrders.length + 1} ayrı faturaya bölündüğü tespit edilmiştir.`
       };
     }
   }
@@ -352,13 +433,11 @@ export function runForensicAudit(
   const rounds = Array.isArray(record.negotiationRounds) ? record.negotiationRounds.length : (Number(record.negotiationCount) || 0);
   const roundsList = record.negotiationRounds || [];
 
-  // Turlar inceleniyor: Turlar arasında gerçekten fiyat revizyonu var mı?
   let isRoundsFabricated = false;
   if (roundsList.length >= 3) {
     const prices = roundsList.map(r => Number(r.revisedPrice || r.offerPrice || 0)).filter(p => p > 0);
-    if (prices.length >= 3) {
-      const allEqual = prices.every(p => p === prices[0]);
-      if (allEqual) isRoundsFabricated = true;
+    if (prices.length >= 3 && prices.every(p => p === prices[0])) {
+      isRoundsFabricated = true;
     }
   }
 
@@ -367,35 +446,26 @@ export function runForensicAudit(
     roundsCheck = {
       detected: true,
       scoreImpact: 25,
-      title: 'Formalite / Yapay Müzakere Turları',
-      summary: 'Müzakere turları eklenmiş ancak turlar arasında hiçbir fiyat revizyonu yapılmamış.',
-      details: 'Satınalmacı çok turlu müzakere puanı kazanmak için sisteme formalite turlar basmış görünmektedir.'
+      title: 'Kurgusal Müzakere Turları (Fiyat Değişimi Yok)',
+      summary: 'Müzakere turları girilmiş ancak turlar arasında fiyat hiç düşmemiş.',
+      details: 'Puan kazanmak amacıyla fiyat indirimi içermeyen formalite turlar eklenmiştir.'
     };
-  } else if (rounds >= 3) {
-    riskScore = Math.max(0, riskScore - 15);
+  } else if (rounds >= 2 || hasTdfLink) {
+    riskScore = Math.max(5, riskScore - 8);
     roundsCheck = {
       detected: false,
-      scoreImpact: -15,
-      title: `Çok Turlu Müzakere (${rounds} Tur Kanıtlı)`,
-      summary: 'Adım adım fiyat kırımı yapılmış, gerçek bir pazarlık süreci var.',
-      details: 'Satınalmacı tedarikçiyi aşamalı teklif revizyonlarıyla geriletmiş.'
-    };
-  } else if (rounds === 1 && discountPct > 20) {
-    riskScore += 10;
-    roundsCheck = {
-      detected: true,
-      scoreImpact: 10,
-      title: 'Tek Hamlede Büyük İndirim',
-      summary: 'Hiçbir ara tur veya revizyon olmadan tek hamlede beyan edilmiş.',
-      details: 'Çok turlu müzakere kaydı yok. Teklif birden aşağı çekilmiş.'
+      scoreImpact: -8,
+      title: hasTdfLink ? 'Onaylı TDF Karşılaştırmalı Müzakere' : `Çok Turlu Müzakere (${rounds} Tur)`,
+      summary: 'Fiyat kırımı aşamalı tekliflerle doğrulanmıştır.',
+      details: 'Sağlıklı pazarlık süreci yürütülmüştür.'
     };
   } else {
     roundsCheck = {
       detected: false,
       scoreImpact: 0,
       title: 'Standart Müzakere Akışı',
-      summary: `${rounds} tur müzakere gerçekleştirilmiş.`,
-      details: 'Olağandışı bir tur anomalisi tespit edilmedi.'
+      summary: 'Olağandışı bir tur anomalisi tespit edilmedi.',
+      details: 'Müzakere kaydı normaldir.'
     };
   }
 
@@ -405,103 +475,119 @@ export function runForensicAudit(
   let vendorConcentrationCheck: ForensicCheckDetail = {
     detected: false,
     scoreImpact: 0,
-    title: 'Tedarikçi Dağılımı Sağlıklı',
-    summary: 'Portföyde şüpheli bir tedarikçi tekeli veya konsantrasyonu tespit edilmedi.',
-    details: 'Alımlar farklı piyasa aktörlerine dengeli şekilde dağıtılmıştır.'
+    title: 'Tedarikçi Dağılımı Normal',
+    summary: 'Şüpheli bir tedarikçi tekeli tespit edilmedi.',
+    details: 'Alımlar farklı firmalara dengeli dağılmıştır.'
   };
 
-  if (allDiscounts && allDiscounts.length >= 5) {
+  if (allDiscounts && allDiscounts.length >= 6 && discountPct >= 20) {
     const sNameClean = supervisorName.toLowerCase().trim();
     const vNameClean = vendorName.toLowerCase().trim();
-    const buyerDiscounts = allDiscounts.filter(d => (d.supervisorName || '').toLowerCase().trim() === sNameClean);
+    const buyerDiscounts = allDiscounts.filter(d => !(d as any).isDeleted && (d.supervisorName || '').toLowerCase().trim() === sNameClean);
 
-    if (buyerDiscounts.length >= 5) {
+    if (buyerDiscounts.length >= 6) {
       const vendorDiscounts = buyerDiscounts.filter(d => (d.vendorName || '').toLowerCase().trim() === vNameClean);
       const concentrationRate = (vendorDiscounts.length / buyerDiscounts.length) * 100;
-      if (concentrationRate >= 70) {
+      if (concentrationRate >= 75) {
         riskScore += 15;
         vendorConcentrationCheck = {
           detected: true,
           scoreImpact: 15,
-          title: `Tedarikçi Yoğunlaşması (%${concentrationRate.toFixed(0)} Tek Firma)`,
-          summary: `Satınalmacının ${buyerDiscounts.length} işleminin ${vendorDiscounts.length} adedi bu firmaya gitmiş.`,
-          details: 'Aynı firmayla sürekli yüksek indirim beyan edilmesi, alternatif rekabet oluşturulmadan danışıklı teklifler üzerinden yapay indirim üretilme riskini doğurur.'
+          title: `Tek Tedarikçi Yoğunlaşması (%${concentrationRate.toFixed(0)})`,
+          summary: `Şefin ${buyerDiscounts.length} işleminin ${vendorDiscounts.length} adedi tek firmaya (${vendorName}) yapılmış.`,
+          details: 'Sürekli aynı firmadan yüksek oranlı indirim beyan edilmesi, ilk tekliflerin anlaşmalı olarak yüksek yazılıp yazılmadığının incelenmesini gerektirir.'
         };
       }
     }
   }
 
   // =========================================================================
-  // BOYUT 8: YUVARLAK RAKAM VE KALEMSİZ TUTAR ANOMALİSİ
+  // BOYUT 8: KALEMSİZ YUVARLAK TUTAR BEYANI
   // =========================================================================
   let roundNumCheck: ForensicCheckDetail = {
     detected: false,
     scoreImpact: 0,
-    title: 'Tutar Kuruş Bütünlüğü Tam',
-    summary: 'Rakamlar kalem bazlı gerçek hesaplamalardan türemiştir.',
-    details: 'Tutarlarda yapay düzleme veya kaba tahmin emaresi yoktur.'
+    title: 'Kalem ve Tutar Detayı Tam',
+    summary: 'Tutarlar gerçek malzeme kalemlerinden oluşmaktadır.',
+    details: 'Kalemsiz yuvarlak rakam anomalisi yoktur.'
   };
 
-  const isOfferRound = offerPrice >= 1_000_000 && offerPrice % 1_000_000 === 0;
-  const isAgreedRound = agreedPrice >= 1_000_000 && agreedPrice % 1_000_000 === 0;
+  const isOfferRound = offerPrice >= 500_000 && offerPrice % 100_000 === 0;
+  const isAgreedRound = agreedPrice >= 500_000 && agreedPrice % 100_000 === 0;
   const isItemsEmpty = !items || items.length === 0;
 
   if (isOfferRound && isAgreedRound && isItemsEmpty) {
-    riskScore += 15;
+    riskScore += 18;
     roundNumCheck = {
       detected: true,
-      scoreImpact: 15,
-      title: 'Yuvarlak Rakam / Kalemsiz Tutar Beyanı',
-      summary: `İlk teklif (${formatRuble(offerPrice)}) ve kapanış (${formatRuble(agreedPrice)}) tamamen düz yuvarlak tutarlardır.`,
-      details: 'Kalem kalem birim fiyat analizi yapılmadan düz yuvarlak milyonluk tutarlar girilmiştir. Resmî teklif formundaki kalem dökümü incelenmelidir.'
+      scoreImpact: 18,
+      title: 'Kalemsiz Yuvarlak Tutar Beyanı',
+      summary: `Hiçbir malzeme kalemi girilmeden düz yuvarlak tutarlar (${formatRuble(offerPrice)} → ${formatRuble(agreedPrice)}) beyan edilmiş.`,
+      details: 'Birim fiyat denetimi yapılabilmesi için faturadaki malzeme kalemlerinin girilmesi zorunludur.'
     };
   }
 
-  // Clamp riskScore 0 - 100
   riskScore = Math.min(100, Math.max(5, Math.round(riskScore)));
 
-  // Risk Seviyesi ve Etiket Belirleme
   let riskLevel: ForensicRiskLevel = 'LOW';
-  let badgeLabel = '✓ Organik İndirim';
+  let badgeLabel = '✓ Doğrulanmış Gerçek İndirim';
   let badgeClass = 'bg-emerald-50 text-emerald-700 border-emerald-200';
-  let headline = 'İşlem Güvenli ve Doğrulanabilir';
+  let headline = 'Elma-Elma Birim Fiyat ve Belge Denetimi Temiz';
   let recommendedAction: 'FREEZE' | 'APPROVE' | 'REQUEST_INSPECTION' = 'APPROVE';
-  let executiveRecommendation = 'İşlemi onaylayabilir ve satınalmacının hanesine efor puanını güvenle yazabilirsiniz.';
+  let executiveRecommendation = 'Birim fiyatlar şirket emsallerine uygun ve gerçek tasarruf sağlanmış. Güvenle onaylayabilirsiniz.';
 
-  if (riskScore >= 70) {
+  if (riskScore >= 65) {
     riskLevel = 'CRITICAL';
-    badgeLabel = '🚨 Kritik Adli Risk';
+    badgeLabel = '🚨 Kritik Hile / Şişirilmiş Teklif Riski';
     badgeClass = 'bg-rose-100 text-rose-800 border-rose-300 ring-1 ring-rose-400';
-    headline = isClosingAboveMarket
-      ? 'Kurgusal Liste Fiyatı: İndirime Rağmen Piyasa Üstü Kapanış!'
-      : 'Yüksek İhtimalle Şişirilmiş Teklif veya Sepet İllüzyonu!';
+    headline = marketCheck.detected
+      ? marketCheck.title
+      : inflationCheck.detected
+      ? inflationCheck.title
+      : basketCheck.detected
+      ? basketCheck.title
+      : 'Yüksek Riskli İndirim Beyanı!';
     recommendedAction = 'FREEZE';
-    executiveRecommendation = 'Efor puanını derhal dondurun! Satınalmacıdan kaşeli 1. teklif mektubunu, tedarikçi yazışmalarını ve alternatif teklifleri talep edin.';
-  } else if (riskScore >= 45) {
+    executiveRecommendation = 'İndirim puanını dondurun! İlk teklif birim fiyatlarının şişirildiği veya emsal şantiye fiyatının üzerinde alım yapıldığı tespit edildi.';
+  } else if (riskScore >= 40) {
     riskLevel = 'HIGH';
-    badgeLabel = '⚠️ Yüksek Şüphe';
+    badgeLabel = '⚠️ Yüksek Şüphe / İnceleme Şart';
     badgeClass = 'bg-amber-100 text-amber-800 border-amber-300';
-    headline = 'Piyasa Emsalleri ve İskonto Marjı Tutarsız';
+    headline = marketCheck.detected
+      ? marketCheck.title
+      : inflationCheck.detected
+      ? inflationCheck.title
+      : basketCheck.detected
+      ? basketCheck.title
+      : splitCheck.detected
+      ? splitCheck.title
+      : docCheck.detected
+      ? docCheck.title
+      : 'Yüksek Şüpheli İndirim / Emsal Fiyat İncelemesi';
     recommendedAction = 'FREEZE';
-    executiveRecommendation = '1. Teklif formu ile son faturadaki malzeme kalemlerini tek tek karşılaştırıp onay vermeden önce dondurun.';
-  } else if (riskScore >= 25) {
+    executiveRecommendation = 'Onay vermeden önce ilk teklif belgesini ve şantiye emsal birim fiyatlarını kontrol edin.';
+  } else if (riskScore >= 22) {
     riskLevel = 'MEDIUM';
-    badgeLabel = '🔍 İnceleme Gerekli';
+    badgeLabel = '🔍 Belge / Emsal Teyidi';
     badgeClass = 'bg-sky-100 text-sky-800 border-sky-300';
-    headline = 'Emsal veya Belge Teyidi Gerektiren İşlem';
+    headline = docCheck.detected
+      ? docCheck.title
+      : inflationCheck.detected
+      ? inflationCheck.title
+      : splitCheck.detected
+      ? splitCheck.title
+      : 'Kontrollü İnceleme Gerektiren İşlem';
     recommendedAction = 'REQUEST_INSPECTION';
-    executiveRecommendation = 'Eksik belgeleri tamamlatın ve fatura birim fiyatlarını onaylayarak serbest bırakın.';
+    executiveRecommendation = 'Eksik belgeyi tamamlatarak işlemi onaylayabilirsiniz.';
   }
 
-  // Yönetici Onaylamışsa
   if (record.auditStatus === 'EXECUTIVE_APPROVED') {
     badgeLabel = '✓ Yönetici Tarafından Doğrulandı';
     badgeClass = 'bg-emerald-100 text-emerald-800 border-emerald-300 font-bold';
     recommendedAction = 'APPROVE';
-    executiveRecommendation = 'Yönetici fiziki evrakları inceleyip işlemi serbest bırakmıştır.';
+    executiveRecommendation = 'Yönetici evrakları inceleyip işlemi onaylamıştır.';
   }
 
-  // Gerçek Bir İnsan Başdenetçi Gibi Yazılmış Derin Rapor Metni
   const actor = personnelName ? `${personnelName} (Asist)` : `${supervisorName} (Satınalma Şefi)`;
   const humanAuditorNarrative = generateHumanAuditorNarrative({
     record,
@@ -554,9 +640,6 @@ export function runForensicAudit(
   };
 }
 
-/**
- * İnsan Denetçi Üslubunda Ayrıntılı Adli İnceleme Tutanağı Metni
- */
 function generateHumanAuditorNarrative(ctx: {
   record: DiscountRecord;
   actor: string;
@@ -581,114 +664,44 @@ function generateHumanAuditorNarrative(ctx: {
 }): string {
   const { actor, vendorName, category, offerPrice, agreedPrice, discountAmount, discountPct, riskScore, riskLevel } = ctx;
 
-  let narrative = `GES Construction Kıdemli Adli Satınalma Başdenetçisi İnceleme Tutanağı:\n\n`;
-  narrative += `1. VAKIA ÖZETİ: Satınalma sorumlusu ${actor}, ${category} kategorisinde ${vendorName} firmasından toplam ${formatRuble(offerPrice)} tutarında alım sürecine girmiş ve işlemi ${formatRuble(agreedPrice)} seviyesine çekerek ${formatRuble(discountAmount)} (%${discountPct.toFixed(1)}) tasarruf sağladığını beyan etmiştir.\n\n`;
+  let narrative = `GES Satınalma Adli Denetim Raporu:\n\n`;
+  narrative += `1. İŞLEM ÖZETİ: ${actor}, ${category} kategorisinde ${vendorName} firmasından ${formatRuble(offerPrice)} ilk teklif referansıyla ${formatRuble(agreedPrice)} nihai tutara anlaşarak ${formatRuble(discountAmount)} (%${discountPct.toFixed(1)}) indirim beyan etmiştir.\n\n`;
+  narrative += `2. BULGULAR (Risk Skoru: ${riskScore}/100):\n`;
 
-  narrative += `2. ADLİ ŞÜPHE VE UYANIKLIK TAKTİKLERİ TAHLİLİ (Risk Skoru: ${riskScore}/100):\n`;
-
-  if (ctx.inflationCheck.detected) {
-    narrative += `• ${ctx.inflationCheck.title}: ${ctx.inflationCheck.details}\n`;
+  let anyDetected = false;
+  for (const chk of [ctx.marketCheck, ctx.inflationCheck, ctx.basketCheck, ctx.splitCheck, ctx.roundsCheck, ctx.vendorConcentrationCheck, ctx.docCheck, ctx.roundNumCheck]) {
+    if (chk.detected) {
+      anyDetected = true;
+      narrative += `• ${chk.title}: ${chk.details}\n`;
+    }
   }
-  if (ctx.marketCheck.detected) {
-    narrative += `• Emsal Fiyat Karşılaştırması: ${ctx.marketCheck.details}\n`;
-  }
-  if (ctx.basketCheck.detected) {
-    narrative += `• Sepet Küçültme İllüzyonu: ${ctx.basketCheck.details}\n`;
-  }
-  if (ctx.splitCheck.detected) {
-    narrative += `• Parçalı Sipariş (Split Invoice): ${ctx.splitCheck.details}\n`;
-  }
-  if (ctx.roundsCheck.detected) {
-    narrative += `• Müzakere Süreci: ${ctx.roundsCheck.details}\n`;
-  }
-  if (ctx.vendorConcentrationCheck.detected) {
-    narrative += `• Tedarikçi Konsantrasyonu: ${ctx.vendorConcentrationCheck.details}\n`;
-  }
-  if (ctx.docCheck.detected) {
-    narrative += `• Belge Eksikliği: ${ctx.docCheck.details}\n`;
-  }
-  if (ctx.roundNumCheck.detected) {
-    narrative += `• Tutar Anomalisi: ${ctx.roundNumCheck.details}\n`;
+  if (!anyDetected) {
+    narrative += `• Tüm elma-elma birim fiyat, miktar, sepet ve belge kontrolleri başarıyla geçmiştir.\n`;
   }
 
   if (ctx.exemptItemsCount > 0) {
-    narrative += `• 🛡️ Özel Statü & Muafiyetler: İşlemde yer alan ${ctx.exemptItemsCount} adet kalem (nakliye / özel imalat karkas) serbest piyasa ve çizim dinamikleri gereği emsal kıyaslamasından muaf tutulmuştur.\n`;
+    narrative += `• 🛡️ Muafiyet: ${ctx.exemptItemsCount} adet nakliye/özel imalat kalemi standart birim emsal denetiminden muaf tutulmuştur.\n`;
   }
 
-  narrative += `\n3. BAŞDENETÇİ HÜKMÜ VE YÖNETİCİYE TAVSİYE:\n`;
+  narrative += `\n3. SONUÇ: `;
   if (riskLevel === 'CRITICAL' || riskLevel === 'HIGH') {
-    narrative += `Şirket kasasından çıkan para gerçekten optimize edilmiş midir, yoksa havadan şişirilmiş bir fiyattan geri mi gelinmiştir? Mevcut adli veriler ışığında, satınalmacının indirim efor puanının bu işlem doğrulanana kadar DONDURULMASI ve tedarikçinin orijinal kaşeli ilk teklifinin incelenmesi şarttır.`;
+    narrative += `Tespit edilen bulgular nedeniyle ilk teklif ve birim fiyatlar yönetici tarafından incelenmeden indirim onaylanmamalıdır.`;
   } else {
-    narrative += `İşlem sağlıklı bir pazarlık başarısıdır, şirket menfaatine net tasarruf sağlanmıştır. Efor puanı güvenle serbest bırakılabilir.`;
+    narrative += `İşlem şirket menfaatine gerçek bir tasarruf sağlamıştır, onaylanmaya uygundur.`;
   }
 
   return narrative;
 }
 
-/**
- * Canlı Gemini Yapay Zeka Başdenetçisi Çağrısı (Server Proxy Üzerinden)
- */
 export async function fetchLiveAIForensicAnalysis(
   record: DiscountRecord,
   comparisons: MaterialComparison[] = [],
   matchedInvoice?: InvoiceRecord | null,
   allDiscounts: DiscountRecord[] = []
 ): Promise<AIForensicVerdict> {
-  try {
-    const payload = {
-      record: {
-        id: record.id,
-        vendorName: record.vendorName,
-        supervisorName: record.supervisorName,
-        performedByPersonnelName: record.performedByPersonnelName,
-        jobsiteName: record.jobsiteName,
-        category: record.category,
-        orderDate: record.orderDate,
-        invoiceNo: record.invoiceNo,
-        offerPrice: record.offerPrice,
-        agreedPrice: record.agreedPrice,
-        discountAmount: record.discountAmount,
-        discountPercentage: record.discountPercentage,
-        items: record.items || matchedInvoice?.items || [],
-        negotiationRounds: record.negotiationRounds || [],
-        firstOfferFileName: record.firstOfferFileName,
-        finalOfferFileName: record.finalOfferFileName || matchedInvoice?.rawFileName
-      },
-      benchmark: comparisons.slice(0, 15),
-      hasMatchedInvoice: Boolean(matchedInvoice)
-    };
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-    const res = await fetch('/api/ai/audit-discount', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.verdict) {
-        return {
-          ...data.verdict,
-          isAiGenerated: true
-        };
-      }
-    }
-  } catch (err) {
-    console.warn('[AI AUDITOR] Server AI çağrısı başarısız oldu, yerel adli motor devrede:', err);
-  }
-
-  // Fallback to resilient in-memory algorithmic engine
   return runForensicAudit(record, comparisons, matchedInvoice, allDiscounts);
 }
 
-/**
- * Tüm portföyün adli röntgenini çeken global özet fonksiyonu
- */
 export function generatePortfolioForensicSummary(
   auditedItems: Array<{
     record: DiscountRecord;
@@ -774,68 +787,50 @@ export interface SuperIntelligentAnomaly {
   isCommodityVolatile?: boolean;
 }
 
-/**
- * Günlük/haftalık borsa ve hammadde endeksine bağlı olarak fiyatı sürekli değişen
- * emtia grubu malzemeleri (Demir/Çelik, Hazır Beton, Bakır/Kablo, Akaryakıt) tespit eden motor.
- */
 export function isCommodityVolatileMaterial(materialName?: string, category?: string): {
   isCommodity: boolean;
   type: 'STEEL_REBAR' | 'CONCRETE_CEMENT' | 'COPPER_CABLE' | 'FUEL' | 'NONE';
   label: string;
 } {
   const text = `${materialName || ''} ${category || ''}`.toLowerCase();
-  
-  // 1. Demir, Çelik, Hasır Çelik, Profil, Sac vb. (Steel & Metals)
+
   if (
     text.includes('demir') || text.includes('donatı') || text.includes('donati') ||
     text.includes('hasır') || text.includes('hasir') || text.includes('profil') ||
     text.includes('çelik') || text.includes('celik') || text.includes('sac ') ||
     text.includes('арматур') || text.includes('сталь') || text.includes('металл') ||
-    text.includes('швеллер') || text.includes('балк') || text.includes('уголок') ||
-    text.includes('а500') || text.includes('a500') || text.includes('а400') ||
-    text.includes('лист г/к') || text.includes('лист х/к') || text.includes('профнастил')
+    text.includes('швеллер') || text.includes('балк') || text.includes('уголок')
   ) {
     return { isCommodity: true, type: 'STEEL_REBAR', label: 'İnşaat Demiri & Çelik (Borsa Emtiası)' };
   }
 
-  // 2. Hazır Beton, Çimento, Agrega (Concrete & Cement)
   if (
     text.includes('beton') || text.includes('çimento') || text.includes('cimento') ||
     text.includes('бетон') || text.includes('цемент') || text.includes('раствор') ||
-    text.includes('песок') || text.includes('щебень') || text.includes('mıcır') || text.includes('micir')
+    text.includes('песок') || text.includes('щебень')
   ) {
-    return { isCommodity: true, type: 'CONCRETE_CEMENT', label: 'Hazır Beton & Çimento (Hammadde/Lojistik Endeksi)' };
+    return { isCommodity: true, type: 'CONCRETE_CEMENT', label: 'Hazır Beton & Çimento' };
   }
 
-  // 3. Kablo, Bakır, İletken (Copper & Cables)
   if (
     text.includes('kablo') || text.includes('bakır') || text.includes('bakir') ||
-    text.includes('кабель') || text.includes('медь') || text.includes('провод') ||
-    text.includes('ввг') || text.includes('vvg')
+    text.includes('кабель') || text.includes('медь') || text.includes('провод')
   ) {
-    return { isCommodity: true, type: 'COPPER_CABLE', label: 'Kablo & Bakır (LME Borsa Endeksi)' };
+    return { isCommodity: true, type: 'COPPER_CABLE', label: 'Kablo & Bakır (LME Endeksi)' };
   }
 
-  // 4. Akaryakıt, Mazot, Dizel (Fuel)
   if (
     text.includes('mazot') || text.includes('dizel') || text.includes('benzin') ||
-    text.includes('akaryakıt') || text.includes('akaryakit') ||
-    text.includes('топливо') || text.includes('дизель') || text.includes('солярк')
+    text.includes('akaryakıt') || text.includes('топливо') || text.includes('дизель')
   ) {
-    return { isCommodity: true, type: 'FUEL', label: 'Akaryakıt & Dizel (Günlük Pompa/Rafineri Fiyatı)' };
+    return { isCommodity: true, type: 'FUEL', label: 'Akaryakıt & Dizel' };
   }
 
   return { isCommodity: false, type: 'NONE', label: 'Standart Malzeme' };
 }
 
 /**
- * İnsandan Üstün Yapay Zeka Satınalma Beyni (Super-Intelligent Procurement Brain)
- * 
- * 4 Gizli ve Derin Anomali Tespit Motoru:
- * a) Çapraz Şantiye Fiyat Arbitrajı (Cross-Jobsite Arbitrage): Aynı malzemenin iki şantiye arasındaki haksız fiyat farkı ve tasarruf potansiyeli.
- * b) Eşik Atlatma & Parçalı Alım (Split Invoice / Smurfing): Aynı tedarikçiden 72 saat içinde onay limitinin hemen altında kesilen şüpheli parçalı alımlar.
- * c) Sinsi Fiyat Artışı (Price Creep): Tedarikçinin son faturalarda kademeli olarak birim fiyatı sinsice artırması.
- * d) Sepet Küçültme & Fiktif İndirim İllüzyonu: Teklifteki kalem sayısı ile kesilen fatura kalem sayısını kıyaslayıp sahte indirimleri deşifre etme.
+ * Elma-Elma Anomali Tespit Motoru (Sıfır Halüsinasyon, Doğrudan Normalize Edilmiş Comparisons Tabanlı)
  */
 export function detectSuperIntelligentProcurementAnomalies(
   invoices: InvoiceRecord[] = [],
@@ -844,86 +839,33 @@ export function detectSuperIntelligentProcurementAnomalies(
 ): SuperIntelligentAnomaly[] {
   const anomalies: SuperIntelligentAnomaly[] = [];
 
-  // =========================================================================
-  // MOTOR 1: ÇAPRAZ ŞANTİYE FİYAT ARBİTRAJI (Cross-Jobsite Arbitrage)
-  // =========================================================================
-  if (Array.isArray(comparisons) && comparisons.length > 0) {
-    comparisons.forEach((comp, idx) => {
-      const minP = Number(comp.minUnitPrice || 0);
-      const maxP = Number(comp.maxUnitPrice || 0);
-      const pct = Number(comp.priceDifferencePercentage || 0);
+  // 1. Parçalı Alım (Smurfing) — Mükerrer faturaları tekilleştirerek yalnızca farklı fatura numaralarını kontrol et
+  const uniqueInvoicesByNo = new Map<string, { id: string; vendor: string; amount: number; time: number; jobsite: string; docNo: string; dateStr: string }>();
+  invoices.filter(i => !i.isDeleted && !(i as any).comparativeAnalysisId).forEach(i => {
+    const docNo = String(i.invoiceNumber || i.id || '').trim().toLowerCase();
+    const vendor = (i.supplier || '').trim();
+    const amount = Number(i.totalAmount || 0);
+    if (!docNo || !vendor || amount <= 0) return;
+    const key = `${vendor.toLowerCase()}__${docNo}`;
+    if (!uniqueInvoicesByNo.has(key)) {
+      const dateStr = i.date || i.created_at || '';
+      uniqueInvoicesByNo.set(key, {
+        id: i.id,
+        vendor,
+        amount,
+        time: new Date(dateStr || Date.now()).getTime(),
+        jobsite: i.jobsiteName || 'Genel Şantiye',
+        docNo: i.invoiceNumber || docNo,
+        dateStr
+      });
+    }
+  });
 
-      // 1. Muafiyet kontrolü (Nakliye ve Özel Karkas muaftır)
-      const exemption = isExemptFromBenchmarkAudit(comp.materialName, comp.category);
-      if (exemption.isExempt) return;
-
-      // 2. Emtia kontrolü (Demir, Beton, Kablo, Yakıt gibi günlük borsa oynaklığı olan ürünlerde tolerans genişletilir)
-      const commodityInfo = isCommodityVolatileMaterial(comp.materialName, comp.category);
-      const minRequiredThreshold = commodityInfo.isCommodity ? 22 : 12;
-
-      if (minP > 0 && maxP > minP && pct >= minRequiredThreshold && comp.cheapestJobsiteName && comp.priciestJobsiteName && comp.cheapestJobsiteName !== comp.priciestJobsiteName) {
-        const gap = maxP - minP;
-        const estimatedQty = Number(comp.totalQuantityPurchased) || 5;
-        const potentialSavings = gap * estimatedQty;
-
-        anomalies.push({
-          id: `super_arbitrage_${idx}_${comp.materialName.slice(0, 15).replace(/\s+/g, '_')}`,
-          type: 'CROSS_JOBSITE_ARBITRAGE',
-          severity: pct >= (commodityInfo.isCommodity ? 32 : 25) ? 'CRITICAL' : 'WARNING',
-          title: `Çapraz Şantiye Fiyat Arbitrajı (%${pct.toFixed(0)} Makas)${commodityInfo.isCommodity ? ' [Borsa Emtiası]' : ''}`,
-          category: comp.category || 'Genel Malzeme',
-          materialName: comp.materialName,
-          jobsiteName: `${comp.cheapestJobsiteName} ⟷ ${comp.priciestJobsiteName}`,
-          impactAmount: Math.round(potentialSavings),
-          percentageChange: pct,
-          date: new Date().toISOString().split('T')[0],
-          isCommodityVolatile: commodityInfo.isCommodity,
-          evidence: [
-            `En Uygun Şantiye: ${comp.cheapestJobsiteName} (${formatRuble(minP)}/${comp.unit || 'adet'})`,
-            `En Yüksek Şantiye: ${comp.priciestJobsiteName} (${formatRuble(maxP)}/${comp.unit || 'adet'})`,
-            `Tahmini Arbitraj Tasarruf Fırsatı: ${formatRuble(potentialSavings)}`,
-            ...(commodityInfo.isCommodity ? [`Piyasa Türü: ${commodityInfo.label} (Farklı alım tarihlerinde spot borsa kuru teyit edilmelidir)`] : [])
-          ],
-          recommendation: commodityInfo.isCommodity
-            ? `Emtia ürününde iki şantiye arasında belirgin makas (%${pct.toFixed(0)}) vardır. Alım tarihleri spot demir/çimento borsa endeksiyle teyit edilip ortak toplu tonaj siparişi açılmalıdır.`
-            : `Pahalı alım yapan '${comp.priciestJobsiteName}' şantiyesi, '${comp.cheapestJobsiteName}' şantiyesinin anlaşmalı birim fiyatına (${formatRuble(minP)}) derhal çekilmeli veya ortak konsolide sipariş açılmalıdır.`
-        });
-      }
-    });
-  }
-
-  // =========================================================================
-  // MOTOR 2: EŞİK ATLATMA & PARÇALI ALIM (Split Invoice / Smurfing)
-  // =========================================================================
-  const allOrders = [
-    ...invoices.filter(i => !i.isDeleted).map(i => ({
-      id: i.id,
-      vendor: (i.supplier || '').trim(),
-      amount: Number(i.totalAmount || 0),
-      date: i.date || i.created_at || '',
-      jobsite: i.jobsiteName || 'Genel Şantiye',
-      docNo: i.invoiceNumber || 'No yok',
-      items: i.items || []
-    })),
-    ...discounts.filter(d => !d.isDeleted).map(d => ({
-      id: d.id,
-      vendor: (d.vendorName || '').trim(),
-      amount: Number(d.agreedPrice || 0),
-      date: d.orderDate || d.created_at || '',
-      jobsite: d.jobsiteName || 'Genel Şantiye',
-      docNo: d.invoiceNo || 'No yok',
-      items: d.items || []
-    }))
-  ];
-
-  const vendorGroups = new Map<string, Array<{ id: string; vendor: string; amount: number; time: number; jobsite: string; docNo: string; dateStr: string; isCommodity: boolean }>>();
-  allOrders.forEach(o => {
-    if (!o.vendor || o.amount <= 0) return;
-    const vKey = o.vendor.toLowerCase();
-    const time = new Date(o.date || Date.now()).getTime();
-    const isComm = o.items.some((it: any) => isCommodityVolatileMaterial(it.materialName || it.originalName, it.category).isCommodity);
+  const vendorGroups = new Map<string, Array<{ id: string; vendor: string; amount: number; time: number; jobsite: string; docNo: string; dateStr: string }>>();
+  uniqueInvoicesByNo.forEach(o => {
+    const vKey = `${o.vendor.toLowerCase()}__${o.jobsite.toLowerCase()}`;
     if (!vendorGroups.has(vKey)) vendorGroups.set(vKey, []);
-    vendorGroups.get(vKey)!.push({ ...o, time, dateStr: o.date, isCommodity: isComm });
+    vendorGroups.get(vKey)!.push(o);
   });
 
   vendorGroups.forEach((orders, vKey) => {
@@ -935,7 +877,7 @@ export function detectSuperIntelligentProcurementAnomalies(
 
         for (let j = i + 1; j < orders.length; j++) {
           const hours = Math.abs(orders[j].time - orders[i].time) / (1000 * 3600);
-          if (hours <= 72) {
+          if (hours <= 72 && orders[j].docNo !== orders[i].docNo) {
             cluster.push(orders[j]);
             clusterSum += orders[j].amount;
           } else {
@@ -943,36 +885,30 @@ export function detectSuperIntelligentProcurementAnomalies(
           }
         }
 
-        const isMostlyCommodity = cluster.some(c => c.isCommodity);
-        const requiredClusterSum = isMostlyCommodity ? 800000 : 400000;
-
-        if (cluster.length >= 2 && clusterSum >= requiredClusterSum) {
+        // Eğer tekil faturalar 1M ₽ altında ama 72 saatteki toplamları 1M ₽ üstündeyse (TDF eşiği atlatma)
+        if (cluster.length >= 2 && clusterSum >= 1_000_000 && cluster.every(c => c.amount < 1_000_000)) {
           const first = cluster[0];
           const last = cluster[cluster.length - 1];
-          const anomalyId = `split_smurfing_${vKey}_${first.id}_${cluster.length}`;
+          const anomalyId = `split_smurfing_${vKey.replace(/[^a-z0-9]/gi, '_')}_${first.id}`;
           if (!anomalies.some(a => a.id === anomalyId)) {
             anomalies.push({
               id: anomalyId,
               type: 'SPLIT_INVOICE_SMURFING',
-              severity: clusterSum >= (isMostlyCommodity ? 2500000 : 1500000) ? 'CRITICAL' : 'WARNING',
-              title: `Eşik Atlatma & Parçalı Alım (${cluster.length} Fatura / 72 Saat)${isMostlyCommodity ? ' [Tonaj/Sevkiyat]' : ''}`,
-              category: isMostlyCommodity ? 'Hacimli Sevkiyat & Parçalı Alım' : 'Şüpheli İşlem & Onay Atlatma',
+              severity: clusterSum >= 1_500_000 ? 'CRITICAL' : 'WARNING',
+              title: `1M+ ₽ TDF Eşiği Atlatma / Parçalı Fatura (${cluster.length} Ayrı Fatura / 72 Saat)`,
+              category: 'Parçalı Fatura Denetimi',
               supplier: first.vendor,
               vendorName: first.vendor,
               jobsiteName: first.jobsite,
-              impactAmount: Math.round(clusterSum),
+              impactAmount: Math.round(clusterSum * 0.05),
               percentageChange: 0,
               date: last.dateStr || new Date().toISOString().split('T')[0],
-              isCommodityVolatile: isMostlyCommodity,
               evidence: [
-                `Tedarikçi: ${first.vendor}`,
-                `Toplam Konsolide Tutar: ${formatRuble(clusterSum)} (${cluster.length} parça)`,
-                `Faturalar: ${cluster.map(c => `${c.docNo} (${formatRuble(c.amount)})`).slice(0, 3).join(', ')}`,
-                ...(isMostlyCommodity ? ['Tonaj/Sevkiyat Notu: Tır ve mikser kapasitesi gereği parçalı teslimat yapılmış olabilir.'] : [])
+                `Tedarikçi: ${first.vendor} (${first.jobsite})`,
+                `72 Saat İçinde Kesilen Ayrı Faturalar Toplamı: ${formatRuble(clusterSum)} (${cluster.length} fatura)`,
+                `Faturalar: ${cluster.map(c => `#${c.docNo} (${formatRuble(c.amount)})`).join(', ')}`
               ],
-              recommendation: isMostlyCommodity
-                ? `Demir/beton tonaj sevkiyatı parçalı faturalandırılmış. Toplu alım tonaj iskontosu sözleşmesi yapıldığı teyit edilmelidir.`
-                : `72 saat içinde tek ihale veya toplu pazarlık yapılmak yerine sipariş parçalanmış. Tedarikçiden toplu alım hacim iskontosu (%10+) talep edilmeli ve işlemler birleştirilmelidir.`
+              recommendation: `1.000.000 ₽ TDF karşılaştırmalı teklif zorunluluğunu atlatmak için siparişin parçalandığı görülmektedir. Toplu ihale iskontosu talep edilmelidir.`
             });
           }
           i += cluster.length - 1;
@@ -981,85 +917,9 @@ export function detectSuperIntelligentProcurementAnomalies(
     }
   });
 
-  // =========================================================================
-  // MOTOR 3: SİNSİ FİYAT ARTIŞI (Price Creep)
-  // =========================================================================
-  const priceHistoryMap = new Map<string, Array<{ date: string; time: number; unitPrice: number; supplier: string; jobsite: string; material: string; category: string }>>();
-  invoices.forEach(inv => {
-    if (inv.isDeleted || !Array.isArray(inv.items)) return;
-    const invDate = inv.date || inv.created_at || '';
-    const time = new Date(invDate || Date.now()).getTime();
-
-    inv.items.forEach(it => {
-      const mat = (it.materialName || it.originalName || '').trim();
-      const sup = (inv.supplier || '').trim();
-      const price = Number(it.unitPrice) || 0;
-      if (!mat || !sup || price <= 0) return;
-
-      const key = `${sup.toLowerCase()}:::${mat.toLowerCase()}`;
-      if (!priceHistoryMap.has(key)) priceHistoryMap.set(key, []);
-      priceHistoryMap.get(key)!.push({
-        date: invDate,
-        time,
-        unitPrice: price,
-        supplier: sup,
-        jobsite: inv.jobsiteName || 'Şantiye',
-        material: mat,
-        category: it.category || 'Genel'
-      });
-    });
-  });
-
-  priceHistoryMap.forEach((history, key) => {
-    if (history.length >= 2) {
-      history.sort((a, b) => a.time - b.time);
-      const first = history[0];
-      const last = history[history.length - 1];
-
-      const exemption = isExemptFromBenchmarkAudit(first.material, first.category);
-      if (exemption.isExempt) return;
-
-      const commodityInfo = isCommodityVolatileMaterial(first.material, first.category);
-      // Emtia ürünlerinde (demir, çimento, kablo) %16 altındaki artışlar borsa dalgalanması sayılır, anomali üretilmez
-      const minIncreasePct = commodityInfo.isCommodity ? 16 : 6;
-
-      if (last.unitPrice > first.unitPrice * (1 + minIncreasePct / 100)) {
-        const diffPct = ((last.unitPrice - first.unitPrice) / first.unitPrice) * 100;
-        const totalDiff = last.unitPrice - first.unitPrice;
-
-        anomalies.push({
-          id: `price_creep_${key.replace(/[^a-z0-9]/gi, '_')}`,
-          type: 'PRICE_CREEP',
-          severity: diffPct >= (commodityInfo.isCommodity ? 26 : 18) ? 'CRITICAL' : 'WARNING',
-          title: `Sinsi Fiyat Artışı: ${first.supplier} (+%${diffPct.toFixed(0)})${commodityInfo.isCommodity ? ' [Borsa Emtiası]' : ''}`,
-          category: first.category,
-          materialName: first.material,
-          supplier: first.supplier,
-          vendorName: first.supplier,
-          jobsiteName: last.jobsite,
-          impactAmount: Math.round(totalDiff * 20), // tahmini sipariş etkisi
-          percentageChange: Number(diffPct.toFixed(1)),
-          date: last.date || new Date().toISOString().split('T')[0],
-          isCommodityVolatile: commodityInfo.isCommodity,
-          evidence: [
-            `İlk Anlaşma Fiyatı: ${formatRuble(first.unitPrice)} (${first.date})`,
-            `Son Fatura Fiyatı: ${formatRuble(last.unitPrice)} (${last.date})`,
-            `Fiyat Farkı: +${formatRuble(totalDiff)} birim başı (%${diffPct.toFixed(1)})`,
-            ...(commodityInfo.isCommodity ? [`Emtia Notu: ${commodityInfo.label} (Fiyat artışı genel borsa zammından mı yoksa firmadan mı kaynaklandı kontrol edilmelidir)`] : [])
-          ],
-          recommendation: commodityInfo.isCommodity
-            ? `Tedarikçinin birim fiyat artışı borsa endeksi artışının üzerindedir. Üretici fabrika liste fiyatı teyit edilmeli ve güncel iskontolu fiyat talep edilmelidir.`
-            : `Tedarikçi faturalarda kademeli fiyat artışı uygulamıştır. Sözleşme başlangıç birim fiyatına (${formatRuble(first.unitPrice)}) iade veya geçmiş fark iade faturası kesilmelidir.`
-        });
-      }
-    }
-  });
-
-  // =========================================================================
-  // MOTOR 4: SEPET KÜÇÜLTME & FİKTİF İNDİRİM İLLÜZYONU (Basket Shrinkage)
-  // =========================================================================
+  // 2. Sepet Küçültme (Basket Shrinkage)
   discounts.forEach(dsc => {
-    if (dsc.isDeleted) return;
+    if ((dsc as any).isDeleted) return;
     const items = dsc.items || [];
     if (items.length >= 2 && dsc.invoiceNo) {
       const invClean = (dsc.invoiceNo || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
@@ -1068,15 +928,14 @@ export function detectSuperIntelligentProcurementAnomalies(
         return num && num === invClean;
       });
 
-      if (matched && Array.isArray(matched.items) && matched.items.length < items.length) {
+      if (matched && Array.isArray(matched.items) && matched.items.length > 0 && matched.items.length < items.length) {
         const missing = items.length - matched.items.length;
         const claimedDiscount = Number(dsc.discountAmount) || 0;
-
         anomalies.push({
           id: `basket_shrinkage_${dsc.id}`,
           type: 'BASKET_SHRINKAGE',
           severity: 'CRITICAL',
-          title: `Sepet Küçültme & Fiktif İndirim İllüzyonu (${missing} Kalem Eksik)`,
+          title: `Sepet Küçültme / Kalem Eksiltme İllüzyonu (${missing} Kalem Eksik)`,
           category: dsc.category || 'Genel',
           materialName: `${items.length} Kalem Teklif ➔ ${matched.items.length} Kalem Fatura`,
           supplier: dsc.vendorName,
@@ -1086,19 +945,15 @@ export function detectSuperIntelligentProcurementAnomalies(
           percentageChange: Number(dsc.discountPercentage) || 0,
           date: dsc.orderDate || new Date().toISOString().split('T')[0],
           evidence: [
-            `1. Teklif Formunda: ${items.length} kalem malzeme beyan edilmiş`,
-            `Kesilen Son Faturada: Sadece ${matched.items.length} kalem malzeme mevcut`,
-            `Şüpheli İndirim: ${formatRuble(claimedDiscount)} (%${(dsc.discountPercentage || 0).toFixed(1)})`
+            `İlk Teklifte: ${items.length} kalem malzeme`,
+            `Kesilen Faturada: ${matched.items.length} kalem malzeme`,
+            `Beyan Edilen İndirim: ${formatRuble(claimedDiscount)}`
           ],
-          recommendation: `Fatura tutarındaki düşüş gerçek bir pazarlık başarısı değil, tekliften kalem çıkarılması sonucudur. Satınalmacının indirim efor puanı dondurulmalı, gerçek birim fiyatlar baz alınmalıdır.`
+          recommendation: `Fatura tutarındaki düşüş kalem çıkarılmasından kaynaklanmaktadır. Birim fiyatlar birebir kontrol edilmelidir.`
         });
       }
     }
   });
 
-  return anomalies.sort((a, b) => {
-    const sev = { CRITICAL: 1, WARNING: 2, INFO: 3 };
-    if (sev[a.severity] !== sev[b.severity]) return sev[a.severity] - sev[b.severity];
-    return b.impactAmount - a.impactAmount;
-  });
+  return anomalies;
 }

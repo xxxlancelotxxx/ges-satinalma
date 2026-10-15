@@ -4,6 +4,7 @@ import { formatRuble, formatRubleWithDecimals, openOriginalFileViewer, formatUpl
 import { getPrizmaBtfUrl, getPrizmaStfUrl } from '../utils/prizmaUrlHelper';
 import { useAuth } from '../context/AuthContext';
 import { checkRecordPermission } from '../utils/permissions';
+import { ensureRussianOriginalName } from '../utils/categoryClassifier';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
   X,
@@ -720,11 +721,9 @@ export const InvoiceDetailModal: React.FC<Props> = ({
                           <td className="py-2 px-2 text-slate-500 font-bold text-center bg-slate-100/60 border-r border-b border-slate-300">{globalIdx}</td>
                           <td className="py-2 px-3 font-sans font-bold text-slate-900 border-r border-b border-slate-300">
                             <span>{item.materialName}</span>
-                            {item.originalName && item.originalName !== item.materialName && (
-                              <div className="text-[10px] text-slate-500 font-mono italic mt-0.5">
-                                {item.originalName}
-                              </div>
-                            )}
+                            <div className="text-[10px] text-indigo-700 font-mono mt-0.5">
+                              🇷🇺 {ensureRussianOriginalName(item.materialName, item.originalName)}
+                            </div>
                           </td>
                           <td className="py-2 px-2 font-sans text-slate-700 text-center border-r border-b border-slate-300">
                             <span className="px-2 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-bold inline-block">

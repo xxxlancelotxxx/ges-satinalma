@@ -118,13 +118,37 @@ export const SPECIAL_CATEGORY_MAP: Record<SpecialCategoryKey, { canonicalCategor
 };
 
 /**
- * Validates invoice status (filters out deleted, cancelled, test invoices)
+ * Returns true if the invoice is an auto-synced Prizma ERP reference record
+ * rather than an invoice entered through GES platform modules (Yeni Satınalma İndirim Girişi,
+ * Karşılaştırmalı Teklif Analizi TDF, AI Otomatik Fatura / Çek Okuma & Muhasebeleştirme).
+ */
+export function isPrizmaAutoSyncedInvoice(inv?: InvoiceRecord | any): boolean {
+  if (!inv) return false;
+  const id = String(inv.id || '').trim();
+  if (id.startsWith('inv_prizma_') || id.startsWith('prizma_')) return true;
+  if (
+    inv.prizmaSource === true &&
+    !id.startsWith('inv_sync_') &&
+    !id.startsWith('inv_cmp_') &&
+    !inv.discountId &&
+    (!inv.uploadedBySupervisorId ||
+      inv.uploadedBySupervisorName === 'Prizma ERP' ||
+      inv.uploadedBySupervisorName === 'automatic.system')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Validates invoice status (filters out deleted, cancelled, test, and Prizma auto-synced reference invoices)
  */
 export function isValidProcurementInvoice(inv?: InvoiceRecord | any): boolean {
   if (!inv) return false;
   if (inv.isDeleted === true || (inv as any).isPermanentlyDeleted === true) return false;
   if (inv.status === 'deleted' || inv.status === 'İptal Edildi' || inv.status === 'Silindi') return false;
   if (inv.test === true) return false;
+  if (isPrizmaAutoSyncedInvoice(inv)) return false;
   return true;
 }
 

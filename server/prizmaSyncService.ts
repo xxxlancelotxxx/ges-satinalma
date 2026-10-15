@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import { prizmaService } from './prizmaService';
 import { normalizeVendorName } from '../src/utils/vendorNormalizer';
+import { normalizeCategoryName, translateRussianMaterialToTurkish, ensureRussianOriginalName } from '../src/utils/categoryClassifier';
 import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore, collection, getDocs, doc, writeBatch } from 'firebase/firestore';
 
@@ -75,11 +76,31 @@ export function cleanRawMaterialName(raw: string): string {
   // 3. Remove accounting tags like "/ФАКТ/", "/FAKT/", "/АВАНС/", "/AVANS/"
   s = s.replace(/\s*[/|\\-]\s*(?:ФАКТ|FAKT|ПЛАН|PLAN|АВАНС|AVANS)\s*[/|\\-]?\s*/gi, ' ');
 
-  // 4. Clean extra punctuation at start/end
-  s = s.replace(/^[\s/|:;,\\-]+|[\s/|:;,\\-]+$/g, '').trim();
+  // 4. Remove Prizma administrative instructions in parentheses
+  s = s.replace(/\(\s*(?:excel\s*dosyas[ıi]n[ae]\s*g[öo]re[^)]*|ad[ıi]na\s+[^)]*|adet|saha\s*genel[^)]*|ofis\s*i[çc]in[^)]*|fatura\s*i[çc]in[^)]*|it\s*sipari[şs][^)]*|kamp\s*ofis[^)]*|villa\s*i[çc]in[^)]*)\s*\)/gi, ' ');
+
+  // 5. Clean extra punctuation at start/end
+  s = s.replace(/^[\s/|:;,\\-]+|[\s/|:;,\\-]+$/g, '').replace(/\s{2,}/g, ' ').trim();
 
   return s;
 }
+
+const isReadyMixConcreteText = (text: string): boolean => {
+  const t = text.toLowerCase();
+  if (/газобетон|gazbeton|пескобетон|peskobeton|бетоноконтакт|betonokontakt|бетоносмесител|бетоновод|бетонолом|бур\s+по|диск|круг|алмазн|коронка|пика|зубило|keski|matkap|пила|testere|саморез|дюбель|анкер|гвозд|крепеж|краск|грунт|растворител|tiner|solvent/i.test(t)) {
+    return false;
+  }
+  return /бетон\s*(?:в\s*\d|b\s*\d|м\s*\d|m\s*\d|товарн|бсг|бст|мелкозерн|гидротехнич)|товарный\s*бетон|hazır\s*beton|hazir\s*beton|\bbeton\s+c\d|\bc\d{2}\/\d{2}\s*beton|grobeton|гробетон|керамзитобетон|бетолюкс|betolux|eurobeton|евробетон|мосбетон|раствор\s+(?:м\s*\d|кладочн|штукатурн|товарн|монтажн|цементн)/i.test(t);
+};
+
+const isShortNoteOrSpecFragment = (s: string): boolean => {
+  const t = (s || '').trim();
+  if (!t || t.length < 4) return true;
+  if (/^(?:\d+(?:[.,]\d+)?\s*(?:шт|м|мм|см|кг|г|л|мл|уп|упак|кор|рул|пл|мпа|м2|м3)\.?|\d+\s*[xх*×]\s*\d+.*)$/i.test(t)) return true;
+  if (/^(?:кж\s*[\d.,-]|к\d\b|корпус|стилобат|блок|вжк|офис|склад|этаж|секция|ось|оси|отм\.|схем|арт\.?\s*\d|спайка|осина|гсп(?:-df)?|тип\s*\d|вид\s*\d|сорт\s*\d|мешок|однодверный|съемный|стандартный|etap|blok|kat)\b/i.test(t)) return true;
+  if (!/[а-яА-ЯёЁ]{4,}/.test(t)) return true;
+  return false;
+};
 
 export function isCleanMaterialRecord(inv: any): boolean {
   if (!inv || inv.isDeleted) return false;
@@ -93,13 +114,13 @@ export function isCleanMaterialRecord(inv: any): boolean {
     (inv.items || []).map((i: any) => (i.materialName || '') + ' ' + (i.originalName || '')).join(' ')
   ).toLowerCase();
 
-  // 1. Beton Eleme
-  if (/beton|бетон|раствор|grobeton|гробетон|бсг|бст|керамзитобетон|бетолюкс|betolux|eurobeton|евробетон|мосбетон/i.test(allText)) {
+  // 1. Beton Eleme (Yalnızca hazır beton / grobeton; пескобетон, растворитель, бетоноконтакт vb. korunur)
+  if (isReadyMixConcreteText(allText)) {
     return false;
   }
 
   // 2. Taşeron / Hizmet / İşçilik / Kira / Nakliye Eleme
-  if (/taseron|tasaron|субподряд|subcontract|hakedis|hakediş|акт\s*выполнен|hizmet|услуг|service|iscilik|işçilik|labor|шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставка|перевозк|nakliye|лоджистик|питани|yemek|проживани|otel|охран|guvenlik|клининг|уборк|виза|vize|перевод|tercüme|нотариус|noter|страхов|sigorta|аванс/i.test(allText)) {
+  if (/taseron|tasaron|субподряд|subcontract|hakedis|hakediş|акт\s*выполнен|hizmet|услуг|service|iscilik|işçilik|labor|шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставка|перевозк|nakliye|лоджистик|питани|yemek|проживани|otel|охран|guvenlik|клининг|уборк|виза|vize|перевод|tercüme|нотариус|noter|страхов|sigorta|аванс/i.test(allText) && !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел|страховочн.*привяз|саморез|крепеж|светильник|прожектор|кабель|труба|арматур|фанер|доска|брус|утеплител|гипсокартон/i.test(allText)) {
     return false;
   }
 
@@ -233,23 +254,74 @@ class PrizmaSyncService {
         ? `https://pm.gescons.ru/process/order-demand/1725/detail/-1/${inv.prizmaOrderDemandId}`
         : (inv.prizmaStfUrl ? inv.prizmaStfUrl.replace(/\/detail\/[^\/]+\//, '/detail/-1/') : undefined);
 
+      const cachedOrderRows = inv.prizmaOrderDemandId ? this.orderRowsCache.get(inv.prizmaOrderDemandId) : undefined;
+      const mappedItems = (inv.items || [])
+        .map((it, idx) => {
+          const matchedRow = Array.isArray(cachedOrderRows)
+            ? (cachedOrderRows.find((r: any) => `prizma_row_${r.id}` === it.id) || cachedOrderRows[idx])
+            : undefined;
+          const rowDesc = matchedRow?.description ? cleanRawMaterialName(matchedRow.description) : '';
+          const rowMatRu = matchedRow?.materialName2 ? cleanRawMaterialName(matchedRow.materialName2) : '';
+          const origRaw = cleanRawMaterialName(it.originalName || it.materialName || '');
+          const matRaw = cleanRawMaterialName(it.materialName || origRaw);
+          const isGenericStockCard = /muhtelif|diğer|diger|sarf\s*malzemeler.*ozel/i.test(matRaw);
+
+          const parenMatch = isGenericStockCard ? origRaw.match(/\(([^()]{4,})\)\s*$/) : null;
+          const fallbackParenDesc = (parenMatch && !/saha\s*genel|excel\s*dosya|fatura\s*icin|it\s*siparis|villa\s*icin|mokr[ıi]y\s*facad|kenar\s*koruma|^https?:/i.test(parenMatch[1]))
+            ? parenMatch[1].trim()
+            : '';
+          const effectiveRowDesc = rowDesc || fallbackParenDesc;
+          const hasMeaningfulRowDesc = !isShortNoteOrSpecFragment(effectiveRowDesc);
+
+          let effectiveTrSource = matRaw || origRaw;
+          if (isGenericStockCard && hasMeaningfulRowDesc) {
+            effectiveTrSource = translateRussianMaterialToTurkish(effectiveRowDesc) || `${matRaw} (${effectiveRowDesc})`;
+          } else if (/[а-яА-ЯёЁ]/.test(matRaw)) {
+            effectiveTrSource = translateRussianMaterialToTurkish(origRaw || matRaw);
+          }
+
+          let russianOrig = '';
+          if (rowMatRu && !isShortNoteOrSpecFragment(rowMatRu)) {
+            russianOrig = hasMeaningfulRowDesc && !effectiveRowDesc.toLowerCase().includes(rowMatRu.toLowerCase().slice(0, 6))
+              ? `${rowMatRu} (${effectiveRowDesc})`
+              : rowMatRu;
+          } else if (isGenericStockCard && hasMeaningfulRowDesc) {
+            russianOrig = effectiveRowDesc;
+          } else if (!isShortNoteOrSpecFragment(origRaw) && origRaw.length >= 10) {
+            russianOrig = origRaw;
+          } else if (hasMeaningfulRowDesc && effectiveRowDesc.length >= 15) {
+            russianOrig = effectiveRowDesc;
+          } else {
+            russianOrig = ensureRussianOriginalName(effectiveTrSource, !isShortNoteOrSpecFragment(origRaw) ? origRaw : '');
+          }
+
+          const itemCat = normalizeCategoryName(
+            it.category && it.category !== 'MALZEME' && !isGenericStockCard ? it.category : '',
+            `${russianOrig} ${effectiveTrSource}`
+          );
+          return {
+            ...it,
+            materialName: effectiveTrSource || origRaw || 'Malzeme',
+            originalName: russianOrig || origRaw || matRaw,
+            category: itemCat
+          };
+        })
+        .filter(it => {
+          const m = `${it.materialName || ''} ${it.originalName || ''}`.toLowerCase();
+          if (isReadyMixConcreteText(m)) return false;
+          if (/шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставка|перевозк|\bnakliye\b|услуги|лаборатор|оплата\s*гу\b|_факт_расходные\s*материалы|korpus.*reviziyon\s*projesi/i.test(m) && !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел/i.test(m)) return false;
+          return true;
+        });
+
+      const dominantCategory = mappedItems[0]?.category || normalizeCategoryName(inv.category, inv.description || '');
+
       return {
         ...inv,
+        category: dominantCategory,
         prizmaUrl: fixedBtf,
         prizmaBtfUrl: fixedBtf,
         prizmaStfUrl: fixedStf,
-        items: (inv.items || [])
-          .map(it => ({
-            ...it,
-            materialName: cleanRawMaterialName(it.materialName),
-            originalName: it.originalName ? cleanRawMaterialName(it.originalName) : cleanRawMaterialName(it.materialName)
-          }))
-          .filter(it => {
-            const m = (it.materialName || '').toLowerCase();
-            if (/beton|бетон|раствор|grobeton|гробетон|бсг|бст/i.test(m)) return false;
-            if (/шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставка|перевозк|nakliye/i.test(m)) return false;
-            return true;
-          })
+        items: mappedItems
       };
     }).filter(inv => inv.items && inv.items.length > 0);
 
@@ -503,21 +575,47 @@ class PrizmaSyncService {
             for (let idx = 0; idx < rows.length; idx++) {
               const r = rows[idx];
               const rawName = r.materialName || d.description || '';
+              const rawRu = cleanRawMaterialName(r.materialName2 || '');
+              const rawDesc = cleanRawMaterialName(r.description || '');
               const cleaned = cleanRawMaterialName(rawName);
 
-              // Beton kalemlerini filtrele
-              if (/beton|бетон|раствор|grobeton|гробетон|бсг|бст/i.test(cleaned)) {
+              // Beton kalemlerini filtrele (Yalnızca hazır beton / grobeton)
+              if (isReadyMixConcreteText(`${cleaned} ${rawDesc}`)) {
                 continue;
               }
-              // Hizmet ve işçilik kalemlerini filtrele
-              if (/шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставка|перевозк|nakliye/i.test(cleaned)) {
+              // Hizmet ve işçilik kalemlerini filtrele (Taşlama makinesi, disk ve montaj malzemeleri hariç)
+              if (/шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставка|перевозк|nakliye/i.test(`${cleaned} ${rawDesc}`) && !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел/i.test(`${cleaned} ${rawDesc}`)) {
                 continue;
               }
+
+              const isGenericCard = /muhtelif|diğer|diger/i.test(cleaned);
+              const hasUsefulDesc = !isShortNoteOrSpecFragment(rawDesc);
+
+              const translatedTr = (isGenericCard && hasUsefulDesc)
+                ? (translateRussianMaterialToTurkish(rawDesc) || `${cleaned} (${rawDesc})`)
+                : translateRussianMaterialToTurkish(cleaned || rawDesc || rawName);
+
+              let russianOrig = '';
+              if (rawRu && !isShortNoteOrSpecFragment(rawRu)) {
+                russianOrig = hasUsefulDesc && !rawDesc.toLowerCase().includes(rawRu.toLowerCase().slice(0, 6))
+                  ? `${rawRu} (${rawDesc})`
+                  : rawRu;
+              } else if (isGenericCard && hasUsefulDesc) {
+                russianOrig = rawDesc;
+              } else if (!isShortNoteOrSpecFragment(cleaned) && cleaned.length >= 10) {
+                russianOrig = cleaned;
+              } else if (hasUsefulDesc && rawDesc.length >= 15) {
+                russianOrig = rawDesc;
+              } else {
+                russianOrig = ensureRussianOriginalName(translatedTr || cleaned, !isShortNoteOrSpecFragment(rawDesc) ? rawDesc : '');
+              }
+
+              const itemCategory = normalizeCategoryName('', `${russianOrig} ${cleaned} ${translatedTr}`);
 
               items.push({
                 id: `prizma_row_${r.id || idx + 1}`,
-                materialName: cleaned || 'Prizma Malzemesi',
-                originalName: rawName || cleaned || 'Prizma Malzemesi',
+                materialName: translatedTr || cleaned || 'Prizma Malzemesi',
+                originalName: russianOrig || cleaned || rawName || 'Prizma Malzemesi',
                 materialCode: r.materialCode || undefined,
                 quantity: Number(r.quantity) || 1,
                 unit: r.unitNameTR || r.unitNameRU || 'Adet',
@@ -525,7 +623,7 @@ class PrizmaSyncService {
                 totalPrice: Number(r.amount) || Number(r.totalWithVat) || 0,
                 vatPercentage: r.vatPercentage !== undefined ? Number(r.vatPercentage) : undefined,
                 activityName: r.activityName || undefined,
-                category: d.paymentTypeNameTR || 'MALZEME'
+                category: itemCategory
               });
             }
           }
@@ -557,7 +655,7 @@ class PrizmaSyncService {
           totalAmount: Number(d.invoiceAmount) || 0,
           currency: d.currencySign || '₽',
           jobsiteName: d.workPlaceNameTR || d.workPlaceNameRU || 'Genel Şantiye',
-          category: d.paymentTypeNameTR || 'MALZEME',
+          category: items[0]?.category || normalizeCategoryName(d.paymentTypeNameTR, d.description || ''),
           description: d.description || undefined,
           prizmaDemandId: d.id,
           prizmaRequestCode: d.requestCode,

@@ -88,10 +88,10 @@ export function extractTechnicalSpecs(text: string): TechnicalSpecs {
     specs.standard = `ГОСТ ${gostMatch[1]}`;
   }
 
-  // 4. Dimensions / Length: e.g. 11.7m, 11700, 600x300x200
-  const dimMatch = normalized.match(/\b(\d{2,4}\s*[xх*×]\s*\d{2,4}(?:\s*[xх*×]\s*\d{2,4})?)\b/i);
+  // 4. Dimensions / Length: e.g. 4x6m, 4х6 м, 11.7m, 11700, 600x300x200
+  const dimMatch = normalized.match(/(?:размер\s*)?\b(\d{1,4}(?:[.,]\d+)?\s*[xх*×]\s*\d{1,4}(?:[.,]\d+)?(?:\s*[xх*×]\s*\d{1,4}(?:[.,]\d+)?)?)\s*(?:м\b|m\b|мм\b|mm\b)?/i);
   if (dimMatch && dimMatch[1]) {
-    specs.dimensions = dimMatch[1].replace(/\s+/g, '');
+    specs.dimensions = dimMatch[1].replace(/\s+/g, '').toLowerCase().replace(/[х*×]/g, 'x');
   } else {
     const lengthMatch = normalized.match(/\b(11[.,]7\s*м|11700\s*(?:мм)?|12\s*м|6\s*м)\b/i);
     if (lengthMatch && lengthMatch[1]) {
@@ -109,6 +109,9 @@ export function detectMaterialType(text: string): string {
   if (!text) return 'Diğer Malzeme';
   const lower = text.toLowerCase();
 
+  if (/тент|полог|оксфорд|тарпаулин|branda|tente|çadır/i.test(lower)) {
+    return 'Yalıtımlı PVC Branda & Tente';
+  }
   if (/арматур|армирован|сталь.*периодическ|a500c|а500с|строительн.*сталь|nervürlü.*demir|inşaat.*demir/i.test(lower)) {
     return 'İnşaat Demiri';
   }
@@ -127,7 +130,7 @@ export function detectMaterialType(text: string): string {
   if (/труб|профил|швеллер|уголок|балк|двутавр|profil|boru/i.test(lower)) {
     return 'Profil & Boru';
   }
-  if (/утеплител|минераловат|минват|пеноплекс|пенополистирол|taşyünü|izolasyon/i.test(lower)) {
+  if (/утеплител|утеплен|минераловат|минват|пеноплекс|пенополистирол|taşyünü|izolasyon|yalıtım/i.test(lower)) {
     return 'Yalıtım & İzolasyon';
   }
   if (/кирпич|tuğla/i.test(lower)) {
@@ -162,7 +165,7 @@ export function calculateMatchScore(
   const reasons: string[] = [];
 
   if (typeA === typeB) {
-    score += 0.20;
+    score += 0.25;
     reasons.push(`Aynı malzeme türü (${typeA})`);
   }
 
@@ -197,9 +200,10 @@ export function calculateMatchScore(
   }
 
   // Dimensions check
+  const normDim = (d?: string) => (d || '').toLowerCase().replace(/[х*×]/g, 'x').replace(/[мm]/g, '').trim();
   if (specsA.dimensions && specsB.dimensions) {
-    if (specsA.dimensions === specsB.dimensions) {
-      score += 0.10;
+    if (normDim(specsA.dimensions) === normDim(specsB.dimensions)) {
+      score += 0.18;
       reasons.push(`Ebat/Uzunluk eşleşiyor (${specsA.dimensions})`);
     }
   }
@@ -210,6 +214,7 @@ export function calculateMatchScore(
   const nameParts = [typeA];
   if (specsA.grade || specsB.grade) nameParts.push(specsA.grade || specsB.grade!);
   if (specsA.diameter || specsB.diameter) nameParts.push(specsA.diameter || specsB.diameter!);
+  if (specsA.dimensions || specsB.dimensions) nameParts.push(specsA.dimensions || specsB.dimensions!);
   if (specsA.standard || specsB.standard) nameParts.push(specsA.standard || specsB.standard!);
 
   return {
@@ -306,22 +311,28 @@ export function calculateComparativeSavings(
     winningSupplierInput = input.winningSupplier || '';
   }
 
+  const formatVendorDisplay = (v?: string): string => {
+    if (!v) return '';
+    let s = String(v).trim();
+    const quoteCount = (s.match(/"/g) || []).length;
+    if (quoteCount % 2 === 1 && !s.endsWith('"')) {
+      s = `${s}"`;
+    }
+    return s;
+  };
+
   // Determine distinct vendors from active non-excluded documents
-  const activeDocs = docs.filter(d => !d.isExcluded);
+  const activeDocs = docs.filter(d => !d.isExcluded).map(d => ({
+    ...d,
+    supplier: formatVendorDisplay(d.supplier)
+  }));
   const distinctVendors = Array.from(new Set(activeDocs.map(d => d.supplier).filter(Boolean)));
   const isSingleVendor = distinctVendors.length <= 1;
 
   // Determine winning/purchased supplier
-  // Priority: 1. Input winningSupplier, 2. Vendor with FINAL_INVOICE or FINAL_OFFER, 3. First vendor
-  let winningSupplier = winningSupplierInput || '';
-  if (!winningSupplier) {
-    const finalDoc = activeDocs.find(d => d.documentRole === 'FINAL_INVOICE' || d.documentRole === 'FINAL_OFFER');
-    if (finalDoc) {
-      winningSupplier = finalDoc.supplier;
-    } else if (distinctVendors.length > 0) {
-      winningSupplier = distinctVendors[0];
-    }
-  }
+  // Priority: 1. Vendor with FINAL_INVOICE or FINAL_OFFER, 2. Input winningSupplier, 3. First vendor
+  const finalDocCandidate = activeDocs.find(d => d.documentRole === 'FINAL_INVOICE' || d.documentRole === 'FINAL_OFFER');
+  let winningSupplier = formatVendorDisplay(finalDocCandidate?.supplier || winningSupplierInput || distinctVendors[0] || '');
 
   let totalFinalPurchase = 0;
   let totalInitialLowestOffer = 0;
@@ -630,13 +641,25 @@ export function calculateComparativeSavings(
     if (updatedMaterials.length === 0 || totalFinalPurchase === 0 || totalInitialLowestOffer === 0) {
       totalFinalPurchase = finalAmount;
       totalInitialLowestOffer = lowestInitialAmount;
-      realMarketSavings = Math.max(0, lowestInitialAmount - finalAmount);
+      realMarketSavings = Math.max(0, Number((lowestInitialAmount - finalAmount).toFixed(2)));
       internalVendorSavings = realMarketSavings;
     } else {
       // Line items exist and represent the agreed purchase scope.
-      // If final purchase sum has slight rounding difference with finalDoc totalAmount (< 10 RUB), align with finalAmount
       if (Math.abs(totalFinalPurchase - finalAmount) > 0.01 && Math.abs(totalFinalPurchase - finalAmount) < 10) {
         totalFinalPurchase = finalAmount;
+      }
+      // If there is a valid lowest initial offer document covering the same item scope whose total is lower than the line-item sum
+      // (e.g. due to unit rounding or an unmatched/differently-packaged single-item competitor offer), enforce the true lowest initial offer (Dip Fiyat)!
+      if (lowestInitialDoc && lowestInitialAmount < totalInitialLowestOffer && (updatedMaterials.length === 1 || (lowestInitialDoc.items?.length || 0) >= updatedMaterials.length)) {
+        totalInitialLowestOffer = lowestInitialAmount;
+        realMarketSavings = Math.max(0, Number((totalInitialLowestOffer - totalFinalPurchase).toFixed(2)));
+        if (updatedMaterials.length === 1) {
+          updatedMaterials[0].realSavingsAmount = realMarketSavings;
+          (updatedMaterials[0] as any).realMarketSavings = realMarketSavings;
+          updatedMaterials[0].realSavingsPercentage = totalInitialLowestOffer > 0
+            ? Number(((realMarketSavings / totalInitialLowestOffer) * 100).toFixed(2))
+            : 0;
+        }
       }
     }
   }
@@ -648,11 +671,11 @@ export function calculateComparativeSavings(
   const isOverThreshold = totalFinalPurchase >= thresholdRub;
 
   const summary: ComparativeAnalysisSummary = {
-    totalInitialLowestOffer: Math.round(totalInitialLowestOffer),
-    totalFinalPurchase: Math.round(totalFinalPurchase),
-    realMarketSavings: Math.round(realMarketSavings),
+    totalInitialLowestOffer: Number(totalInitialLowestOffer.toFixed(2)),
+    totalFinalPurchase: Number(totalFinalPurchase.toFixed(2)),
+    realMarketSavings: Number(realMarketSavings.toFixed(2)),
     realSavingsRate,
-    internalVendorSavings: Math.round(internalVendorSavings),
+    internalVendorSavings: Number(internalVendorSavings.toFixed(2)),
     isAboveBestOfferCount,
     isSingleVendor,
     excludedOffersCount: docs.filter(d => d.isExcluded).length,
@@ -663,9 +686,9 @@ export function calculateComparativeSavings(
     overallConfidence: finalMaterials.length > 0
       ? Number((finalMaterials.reduce((acc, m) => acc + (typeof m.matchConfidence === 'number' ? m.matchConfidence : 0.9), 0) / finalMaterials.length).toFixed(2))
       : 1.0,
-    lowestInitialOfferAmount: Math.round(totalInitialLowestOffer) || lowestInitialAmount || Math.round(totalFinalPurchase),
+    lowestInitialOfferAmount: Number(totalInitialLowestOffer.toFixed(2)) || lowestInitialAmount || Number(totalFinalPurchase.toFixed(2)),
     lowestInitialOfferSupplier: lowestInitialSupplier || winningSupplier,
-    finalPurchaseAmount: finalAmount || Math.round(totalFinalPurchase),
+    finalPurchaseAmount: finalAmount || Number(totalFinalPurchase.toFixed(2)),
     finalPurchaseSupplier: winningSupplier,
     finalInvoiceNumber: finalDoc?.documentNumber || '',
     finalInvoiceDate: finalDoc?.date || '',

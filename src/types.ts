@@ -517,6 +517,7 @@ export interface ComparativeAnalysisSummary {
   finalInvoiceNumber?: string;
   finalInvoiceDate?: string;
   negotiationRoundsCount?: number;
+  internalVendorRate?: number;
   initialOffersList?: InitialOfferDetail[];
   intermediateRoundsList?: NegotiationRoundDetail[];
 }

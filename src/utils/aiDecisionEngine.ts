@@ -1277,17 +1277,17 @@ export function processItem(
     attributes.dimensions = `${angleSpec.leg1}x${angleSpec.leg2}x${angleSpec.thickness} mm`;
   }
   // B1. BAZALT, CAM ELYAF VE DERZ FİLELERİ (Özel Donatı ve Cephe Fileleri)
-  else if (/базальт|bazalt|duvar.*örgü.*file/i.test(combined)) {
+  else if (((/базальт|bazalt/i.test(combined) && /сетк|file/i.test(combined)) || /duvar.*örgü.*file/i.test(combined)) && !/вата|утеплител|плита|yün|yun/i.test(combined)) {
     canonicalName = 'Bazalt Duvar Örgü Filesi 25x25 mm (50 m² Rulo)';
     classification.category = 'Duvar Elemanları & Gazbeton';
     classification.subCategory = 'Gazbeton, Blok & Duvar Örgü Malzemeleri';
   }
-  else if (/стеклоткан|cam elyaf|фасадн.*сетк|dış cephe file/i.test(combined)) {
+  else if (/стеклоткан.*сетк|cam\s*elyaf.*file|фасадн.*сетк|dış\s*cephe\s*file/i.test(combined)) {
     canonicalName = 'Cam Elyaf Dış Cephe Donatı Filesi 165 g/m² (50 m² Rulo)';
     classification.category = 'Yalıtım & Alçıpan';
     classification.subCategory = 'Geotekstil Keçe & Cephe Donatı Filesi';
   }
-  else if (/серпянк|derz file/i.test(combined)) {
+  else if (/серпянк|derz\s*file|derz\s*band/i.test(combined)) {
     canonicalName = 'Kendinden Yapışkanlı Derz Filesi Bandı 50mm x 45m';
     classification.category = 'Yalıtım & Alçıpan';
     classification.subCategory = 'Alçıpan Profilleri & Aksesuarları';
@@ -1306,9 +1306,9 @@ export function processItem(
   }
   // C. KUTU PROFİL / PROFİL BORU
   else if (
-    (/труба.*профильн|профильн.*труб|kutu.*profil|profil.*boru/i.test(combined) ||
+    (/труба.*профильн|профильн.*труб|kutu.*profil|profil.*kutu|profil.*boru/i.test(combined) ||
      (combined.includes('труб') && (combined.includes('40х20') || combined.includes('40x20') || combined.includes('40x40') || combined.includes('50x50') || combined.includes('60x40') || combined.includes('80x80') || combined.includes('100x100')))) &&
-    !/каркас.*ворот|калитка|çit|çevre.*paneli|kapı.*karkası|yaya.*kapısı/i.test(combined)
+    !/каркас.*ворот|калитка|çit|çevre.*paneli|kapı.*karkası|yaya.*kapısı|alçıpan|alcipan|гипсокартон|knauf/i.test(combined)
   ) {
     const pipeSpec = extractProfilePipeSpecs(combined);
     if (pipeSpec) {
@@ -1319,7 +1319,7 @@ export function processItem(
     }
   }
   // D. ŞVELLER (U-PROFİL)
-  else if (/швеллер|şveller|u\s*profil/i.test(combined)) {
+  else if (/швеллер|şveller|u\s*profil/i.test(combined) && !/alçıpan|alcipan|гипсокартон|knauf/i.test(combined)) {
     const chanSpec = extractChannelSpecs(combined);
     if (chanSpec) {
       canonicalName = `U-Profil Şveller ${chanSpec.channelNumber} (GOST 8240-97)`;
@@ -1328,7 +1328,7 @@ export function processItem(
     }
   }
   // E. GAZBETON BLOK
-  else if (/газобетон|gazbeton|bonolit|poritep|ytong|istkult|исткульт/i.test(combined) && !/клей|harç|перемычка|lento/i.test(combined)) {
+  else if (/газобетон|gazbeton|bonolit|poritep|ytong|istkult|исткульт/i.test(combined) && !/клей|harç|harc|yapıştırıcı|yapistirici|перемычка|lento|dübel|dubel|анкер|саморез|testere|ножовка/i.test(combined)) {
     const gazSpec = extractGazbetonDimensions(combined);
     const density = combined.includes('d500') ? 'D500' : 'D600';
     if (gazSpec) {
@@ -1359,10 +1359,18 @@ export function processItem(
     classification.category = 'Yalıtım & Alçıpan';
     classification.subCategory = 'Geotekstil Keçe & Cephe Donatı Filesi';
   }
-  // H. ALÇIPAN
-  else if (/гипсокартон|alçıpan|alcipan|гкл/i.test(combined) && !/саморез|vida|dübel/i.test(combined)) {
-    const isMoisture = /влагостой|suya|gklv|гклв/i.test(combined);
-    canonicalName = isMoisture ? 'Knauf Suya Dayanıklı Alçıpan GKLV 12.5 mm (1.2x2.5 m)' : 'Knauf Standart Alçıpan GKL 12.5 mm (1.2x2.5 m)';
+  // H. ALÇIPAN LEVHA (Sadece gerçek alçıpan plakalar; profil, agraf, vida, testere, freze, müdahale kapağı ve açıklama notları hariç!)
+  else if (
+    /гипсокартон|alçıpan|alcipan|\bгкл(?:в|о)?\b|\bgkl(?:v|o)?\b/i.test(combined) &&
+    !/саморез|vida|dübel|dubel|болт|профил|profil|karkas|agraf|подвес|соединител|краб|bant|лента|серпянк|testere|ножовка|bıçak|bicak|фрез|пила|люк|kapağ|kapak|alçıpan\s*işleri|alcipan\s*isleri|mockup/i.test(combined)
+  ) {
+    const isFire = /огнестой|kırmızı|kirmizi|yangın|yangin|гкло|gklo|гсп-df/i.test(combined);
+    const isMoisture = /влагостой|yeşil|yesil|suya|gklv|гклв/i.test(combined);
+    canonicalName = isFire
+      ? 'Knauf Yangına Dayanıklı Alçıpan GKLO 12.5 mm (1.2x2.5 m)'
+      : isMoisture
+        ? 'Knauf Suya Dayanıklı Alçıpan GKLV 12.5 mm (1.2x2.5 m)'
+        : 'Knauf Standart Alçıpan GKL 12.5 mm (1.2x2.5 m)';
     classification.category = 'Yalıtım & Alçıpan';
     classification.subCategory = 'Isı & Ses Yalıtımı';
   }

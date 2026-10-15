@@ -3,8 +3,9 @@ import { formatRuble } from './format';
 import { processItem } from './aiDecisionEngine';
 import { areVendorsEqual } from './vendorNormalizer';
 import { CANONICAL_28_CATEGORIES, normalizeCategoryName, sortCategoriesByPriority } from './categoryClassifier';
-import { getCategorySpendingSummary, verifyProcurementDataIntegrity } from './procurementAnalyticsCore';
+import { getCategorySpendingSummary, verifyProcurementDataIntegrity, isPrizmaAutoSyncedInvoice } from './procurementAnalyticsCore';
 import { detectSuperIntelligentProcurementAnomalies } from './aiForensicAuditor';
+export { isPrizmaAutoSyncedInvoice };
 const ua = formatRuble;
 
 /* Centralized 28 Canonical Categories - Single Source of Truth */
@@ -72,12 +73,12 @@ export function getPreviousPeriodBounds(_preset: DateRangePreset, start?: string
 export function dedupeSyncedInvoices(invoices: any[] = [], _discounts: any[] = []): any[] {
   if (!Array.isArray(invoices)) return [];
 
-  // Build an index of standalone (manually uploaded or direct) invoices
+  // Build an index of standalone (manually uploaded or direct) GES platform invoices
   const standaloneDiscountIds = new Set<string>();
   const standaloneInvoiceKeys = new Set<string>();
 
   invoices.forEach(inv => {
-    if (!inv || inv.isDeleted || inv.isPermanentlyDeleted) return;
+    if (!inv || inv.isDeleted || inv.isPermanentlyDeleted || isPrizmaAutoSyncedInvoice(inv)) return;
     const invId = String(inv.id || '');
     if (!invId.startsWith('inv_sync_')) {
       if (inv.discountId) {
@@ -91,10 +92,11 @@ export function dedupeSyncedInvoices(invoices: any[] = [], _discounts: any[] = [
     }
   });
 
-  // Include all valid standalone invoices, and include synced invoices UNLESS
+  // Include all valid GES platform standalone invoices, and include synced invoices UNLESS
   // an equivalent standalone invoice already represents the exact same purchase.
+  // Prizma auto-synced invoices are strictly excluded from Dashboard spending calculations.
   return invoices.filter(inv => {
-    if (!inv || inv.isDeleted || inv.isPermanentlyDeleted) return false;
+    if (!inv || inv.isDeleted || inv.isPermanentlyDeleted || isPrizmaAutoSyncedInvoice(inv)) return false;
     const invId = String(inv.id || '');
     if (invId.startsWith('inv_sync_')) {
       const discId = inv.discountId ? String(inv.discountId) : invId.replace(/^inv_sync_/, '');
@@ -278,9 +280,9 @@ function GN(e: any ,t: any ): any {return t===0?e>0?100:0:Number(((e-t)/t*100).t
 function NY(e: any ,t: any ): any {const a=new Set;Array.isArray(e)&&e.forEach(r=>{if(r.isDeleted)return;const n=ps({supplier:r.supplier,notes:r.notes,items:r.items});n&&!j0(n)&&a.add(n),Array.isArray(r.items)&&r.items.forEach(o=>{const u=_s(o.materialName,o.originalName,r.supplier,o.category);u&&!j0(u)&&a.add(u)})}),Array.isArray(t)&&t.forEach(r=>{if(r.isDeleted)return;const n=ps({category:r.category,vendorName:r.vendorName,notes:r.notes,items:r.items});n&&!j0(n)&&a.add(n),Array.isArray(r.items)&&r.items.forEach(o=>{const u=_s(o.materialName,o.originalName,r.vendorName,o.category);u&&!j0(u)&&a.add(u)})});const i=Array.from(a);return i.length===0?Array.from(EP):i.sort()}
 function bY(e: any ): any {
   const{currentInvoices:rawInvoices=[],currentDiscounts:rawDiscounts=[],previousInvoices:rawPrevInvoices=[],previousDiscounts:rawPrevDiscounts=[],jobsites:n=[],supervisors:o=[],anomaliesCount:u=0,categorySpending=[]}=e;
-  const t=rawInvoices.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted);
+  const t=rawInvoices.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted&&!isPrizmaAutoSyncedInvoice(F));
   const a=rawDiscounts.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted);
-  const i=rawPrevInvoices.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted);
+  const i=rawPrevInvoices.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted&&!isPrizmaAutoSyncedInvoice(F));
   const r=rawPrevDiscounts.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted);
   const c=t;
   const catTotalSpend = Array.isArray(categorySpending) && categorySpending.length > 0

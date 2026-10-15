@@ -3,8 +3,8 @@ import './server/envLoader';
 import { processItem } from './src/utils/aiDecisionEngine';
 import { normalizeStandardUnit, getMaterialBenchmarkUnit, convertMaterialUnit, areUnitsConvertible, extractRebarDiameter } from './src/utils/constructionUnitConverter';
 import { normalizeVendorName, getVendorKey, areVendorsEqual } from './src/utils/vendorNormalizer';
-import { normalizeCategoryName, CANONICAL_28_CATEGORIES } from './src/utils/categoryClassifier';
-import { comparativeAnalysesStore, materialSynonymsStore, comparativeConfig, updateComparativeConfig, processComparativeAnalysisBatch, learnApprovedSynonyms } from './server/comparativeEngine';
+import { normalizeCategoryName, CANONICAL_28_CATEGORIES, translateRussianMaterialToTurkish, ensureRussianOriginalName } from './src/utils/categoryClassifier';
+import { comparativeAnalysesStore, materialSynonymsStore, comparativeConfig, updateComparativeConfig, processComparativeAnalysisBatch, learnApprovedSynonyms, recalculateComparativeAnalysis } from './server/comparativeEngine';
 import { prizmaService } from './server/prizmaService';
 import { prizmaSyncService, cleanRawMaterialName } from './server/prizmaSyncService';
 
@@ -84,6 +84,7 @@ import {
   generateContentWithResilience
 } from './server/aiOcrEngine';
 import { processInvoiceTwoStages } from './server/aiTwoStageOcr';
+import { generateArchivePdf } from './server/documentGenerator';
 
 // ============================================================================
 // 1. FIREBASE & STORAGE ENTEGRASYONU
@@ -93,6 +94,7 @@ if (!admin.getApps().length) {
   admin.initializeApp();
 }
 
+const PRIMARY_GCS_BUCKET = 'ai-studio-bucket-88134939798-europe-west2';
 let db: any = null;
 let bucket: any = null;
 try {
@@ -100,10 +102,11 @@ try {
   const firebaseConfig = JSON.parse(configRaw);
   const fbApp = initFirebaseApp(firebaseConfig);
   db = getFirestore(fbApp, firebaseConfig.firestoreDatabaseId || '(default)');
-  if (firebaseConfig.storageBucket) {
-    bucket = getStorage().bucket(firebaseConfig.storageBucket);
-  }
-  console.log('[FIREBASE] Firestore (Web SDK) ve Storage (Admin SDK) başarıyla başlatıldı.');
+  const configuredBucket = (firebaseConfig.storageBucket && !String(firebaseConfig.storageBucket).includes('fatura-botu-505106.firebasestorage.app'))
+    ? firebaseConfig.storageBucket
+    : PRIMARY_GCS_BUCKET;
+  bucket = getStorage().bucket(configuredBucket);
+  console.log(`[FIREBASE] Firestore (Web SDK) ve Storage (${configuredBucket}) başarıyla başlatıldı.`);
   if (db) {
     prizmaSyncService.setDb(db);
   }
@@ -261,7 +264,7 @@ app.get('/api/storage-selftest', async (_req, res) => {
   // Salt-okunur bağlantı testi; üretimde hiçbir test verisi oluşturmaz.
   try {
     if (!db || !bucket) return res.status(503).json({ ok: false, database: !!db, bucket: !!bucket });
-    await Promise.all([getDocs(collection(db, 'settings')), bucket.getMetadata()]);
+    await Promise.all([getDocs(collection(db, 'settings')), bucket.getFiles({ maxResults: 1 })]);
     return res.json({ ok: true, database: true, bucket: true, writesPerformed: 0 });
   } catch (err: any) {
     return res.status(503).json({ ok: false, error: err.message, writesPerformed: 0 });
@@ -351,9 +354,9 @@ app.post(['/api/upload-file', '/api/drive/upload'], async (req, res) => {
       }
     }
 
-    // 3. Firestore bulut yedekleme (GCS doğrudan yazılamadıysa Firestore chunks ile tam bulut koruması)
+    // 3. Firestore çift katmanlı bulut yedekleme (GCS + Firestore chunks ile tam bulut koruması)
     let fsSuccess = false;
-    if (db && !gcsSuccess && buffer.length <= 15 * 1024 * 1024) {
+    if (db && buffer.length <= 10 * 1024 * 1024) {
       try {
         const CHUNK_SIZE = 700 * 1024;
         const b64Data = buffer.toString('base64');
@@ -409,7 +412,7 @@ async function streamStorageFile(
   const displayName = downloadName || safeName;
 
   // a) Dosyayı önce "ai-studio-bucket-88134939798-europe-west2" sepetindeki "faturalar/" klasöründen ara.
-  const targetBucket = bucket || getStorage().bucket('ai-studio-bucket-88134939798-europe-west2');
+  const targetBucket = getStorage().bucket(PRIMARY_GCS_BUCKET);
   if (targetBucket) {
     try {
       for (const objectPath of [`faturalar/${safeName}`, safeName]) {
@@ -433,7 +436,7 @@ async function streamStorageFile(
     }
   }
 
-  // b) Orada yoksa Firestore "storage_files" ve "storage_chunks" tablolarından oku
+  // b) Orada yoksa Firestore "storage_files" ve "storage_chunks" tablolarından oku (ve GCS'e otomatik senkronize et)
   if (db) {
     const keysToTry = [...new Set([safeName, targetName, path.basename(targetName)])];
     for (const key of keysToTry) {
@@ -454,6 +457,12 @@ async function streamStorageFile(
         const buffer = Buffer.from(parts.join(''), 'base64');
         if (!buffer.length) continue;
         const contentType = meta.contentType || (safeName.endsWith('.pdf') ? 'application/pdf' : (safeName.endsWith('.xlsx') ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'application/octet-stream'));
+        if (targetBucket) {
+          targetBucket.file(`faturalar/${safeName}`).save(buffer, {
+            resumable: false,
+            metadata: { contentType, cacheControl: 'private, max-age=3600', metadata: { originalName: meta.originalName || meta.fileName || displayName } }
+          }).catch(() => {});
+        }
         res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Disposition', `${isDownload ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(meta.originalName || meta.fileName || displayName)}`);
         res.setHeader('Cache-Control', 'private, max-age=3600');
@@ -798,6 +807,47 @@ app.get(['/api/files/:filename(*)', '/api/files/drive/:filename(*)'], async (req
       if (served) return;
     }
 
+    // 4. Kayıtlı fatura/indirim için Dijital Arşiv Motoru (GCS + Firestore otomatik iyileştirme)
+    try {
+      const { data: invs } = await getInvoicesCached();
+      const { data: discs } = await getDiscountsCached();
+      const lowerClean = cleanFilename.toLowerCase();
+
+      const matchedInv = (invs || []).find((i: any) =>
+        (i.fileUrl && String(i.fileUrl).toLowerCase().includes(lowerClean)) ||
+        (i.rawFileName && String(i.rawFileName).toLowerCase() === lowerClean) ||
+        (i.id && lowerClean.includes(String(i.id).toLowerCase())) ||
+        uniqueCandidates.includes(String(i.invoiceNumber || '').toLowerCase())
+      );
+
+      const matchedDisc = (discs || []).find((d: any) =>
+        (d.firstOfferFileUrl && String(d.firstOfferFileUrl).toLowerCase().includes(lowerClean)) ||
+        (d.finalOfferFileUrl && String(d.finalOfferFileUrl).toLowerCase().includes(lowerClean)) ||
+        (d.id && lowerClean.includes(String(d.id).toLowerCase())) ||
+        uniqueCandidates.includes(String(d.invoiceNo || '').toLowerCase())
+      );
+
+      const recordToRender = matchedInv
+        ? (matchedDisc ? { ...matchedDisc, ...matchedInv } : matchedInv)
+        : matchedDisc;
+
+      if (recordToRender) {
+        const pdfBuf = await generateArchivePdf(recordToRender, cleanFilename);
+        if (bucket) {
+          bucket.file(`faturalar/${cleanFilename}`).save(pdfBuf, {
+            resumable: false,
+            metadata: { contentType: 'application/pdf', cacheControl: 'private, max-age=3600', metadata: { originalName: cleanFilename, archivalGenerated: 'true' } }
+          }).catch(() => {});
+        }
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `${isDownload ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(cleanFilename)}`);
+        res.setHeader('Cache-Control', 'private, max-age=3600');
+        return res.send(pdfBuf);
+      }
+    } catch (archErr: any) {
+      console.warn('[ARCHIVE PDF FALLBACK NOTICE]:', archErr.message);
+    }
+
     return res.status(404).json({ code: 'ORIGINAL_FILE_MISSING', error: 'Orijinal dosya bulunamadı.', fileName: cleanFilename });
   } catch (err: any) {
     console.error('[FILE SERVE ERROR]:', err);
@@ -915,7 +965,38 @@ const memoryStore: {
   jobsites?: CacheStore<any[]>;
   discounts?: CacheStore<any[]>;
   invoices?: CacheStore<any[]>;
+  deletionLedger?: CacheStore<{ ids: Set<string>; prizmaIds: Set<number>; invoiceKeys: Set<string> }>;
 } = {};
+
+async function getDeletionLedgerCached(): Promise<{ ids: Set<string>; prizmaIds: Set<number>; invoiceKeys: Set<string> }> {
+  const now = Date.now();
+  if (memoryStore.deletionLedger && (now - memoryStore.deletionLedger.timestamp < CACHE_TTL_MS)) {
+    return memoryStore.deletionLedger.data;
+  }
+  const ids = new Set<string>();
+  const prizmaIds = new Set<number>();
+  const invoiceKeys = new Set<string>();
+  if (db) {
+    try {
+      const snap = await getDocs(collection(db, 'deletion_ledger'));
+      snap.docs.forEach(d => {
+        ids.add(d.id);
+        const dt = d.data() || {};
+        if (dt.documentId) ids.add(String(dt.documentId));
+        if (dt.linkedInvoiceId) ids.add(String(dt.linkedInvoiceId));
+        if (dt.linkedDiscountId) ids.add(String(dt.linkedDiscountId));
+        if (dt.prizmaDemandId) prizmaIds.add(Number(dt.prizmaDemandId));
+        const m = String(d.id).match(/^inv_prizma_(\d+)$/);
+        if (m && m[1]) prizmaIds.add(Number(m[1]));
+        const invNo = String(dt.invoiceNumber || dt.invoiceNo || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+        const vend = normalizeVendorName(dt.supplier || dt.vendorName || '');
+        if (invNo && vend) invoiceKeys.add(`${vend}___${invNo}`);
+      });
+      memoryStore.deletionLedger = { data: { ids, prizmaIds, invoiceKeys }, timestamp: now };
+    } catch (_) {}
+  }
+  return { ids, prizmaIds, invoiceKeys };
+}
 
 function isQuotaError(err: any): boolean {
   if (!err) return false;
@@ -1035,10 +1116,13 @@ async function getDiscountsCached() {
     return { data: backup, quotaExceeded: false };
   }
   try {
-    const snapshot = await getDocs(collection(db, 'discounts'));
+    const [snapshot, ledger] = await Promise.all([
+      getDocs(collection(db, 'discounts')),
+      getDeletionLedgerCached()
+    ]);
     const allDocs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
 
-    const allRecords = allDocs.filter((d: any) => d.isPermanentlyDeleted !== true).map(d => {
+    const allRecords = allDocs.filter((d: any) => d.isPermanentlyDeleted !== true && !ledger.ids.has(d.id)).map(d => {
       const cleanVendor = normalizeVendorName(toSafeString(d.vendorName || d.supplier, ''));
       return {
         ...d,
@@ -1108,10 +1192,13 @@ async function getInvoicesCached() {
     return { data: backup, quotaExceeded: false };
   }
   try {
-    const snapshot = await getDocs(collection(db, 'invoices'));
+    const [snapshot, ledger] = await Promise.all([
+      getDocs(collection(db, 'invoices')),
+      getDeletionLedgerCached()
+    ]);
     const allDocs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
 
-    const allRecords = allDocs.filter((i: any) => i.isPermanentlyDeleted !== true).map(i => {
+    const allRecords = allDocs.filter((i: any) => i.isPermanentlyDeleted !== true && !ledger.ids.has(i.id)).map(i => {
       const cleanSupplier = normalizeVendorName(toSafeString(i.supplier || i.vendorName, ''));
       return {
         ...i,
@@ -1327,6 +1414,15 @@ app.post('/api/backup/create', async (req, res) => {
     meta.id = backupId; // sync ID
     
     await syncSnapshotToCloud(db, bucket, meta);
+    if (db) {
+      await setDoc(doc(db, 'system_stats', 'daily_counts'), {
+        invoices: currentData.invoices.length,
+        discounts: currentData.discounts.length,
+        total: currentData.invoices.length + currentData.discounts.length,
+        date: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }, { merge: true }).catch(() => {});
+    }
     res.status(201).json({ success: true, snapshot: meta, missingPdfs: missingFiles.length });
   } catch (err) {
     console.error('[BACKUP CREATE ERROR]:', err);
@@ -2268,14 +2364,51 @@ function _unusedLegacySmartNormalizeCategory(rawCat?: string, matName?: string):
   return rawCat && rawCat.trim() && rawCat.trim() !== 'Diğer' && rawCat.trim() !== 'Diğer Malzeme' ? rawCat.trim() : 'Diğer Malzeme';
 }
 
+function unwrapSyntheticPrefixes(s: string): string {
+  if (!s) return '';
+  return s
+    .replace(/\(\s*excel\s*dosyas[ıi]n[ae]\s*g[öo]re[^)]*\)/gi, ' ')
+    .replace(/^Строительно-монтажный материал\s*\/\s*ТМЦ\s*\((.+)\)$/i, '$1')
+    .replace(/^Канцелярские и Офисные Товары\s*\((.+)\)$/i, '$1')
+    .replace(/^Канцелярские товары и бумага офисная\s*\[(.+)\]$/i, '$1')
+    .replace(/^(?:Пиломатериал обрезной\s*\(брус\s*\/\s*доска\)\s*ГОСТ\s*8486|Диск отрезной\s*\/\s*круг шлифовальный абразивный|Хозяйственно-бытовое обеспечение офиса и площадки|Розетка электрическая\s*\/\s*вилка силовая\s*\/\s*удлинитель|Щит распределительный\s*\/\s*коробка монтажная|Труба полипропиленовая\s*\/\s*ПВХ\s*\/\s*ПНД инженерная|Оборудование стройплощадки,\s*мебель и бытовые модули|Смесь сухая (?:ремонтная|штукатурная)\s*\/\s*(?:штукатурная|шпаклевка) строительная|Гипсокартонный лист\s*\(ГКЛ\s*\/\s*ГКЛВ\)|Инструмент слесарно-монтажный ручной|Электроинструмент\s*\/\s*оснастка[^[]*|Фурнитура дверная[^[]*|Утеплитель теплоизоляционный минераловатный)\s*(?:\([^)]*\))?\s*\[([^\]]+)\]$/i, '$1')
+    .trim();
+}
+
+function isShortDrawingOrSpecNote(s: string): boolean {
+  const t = (s || '').trim();
+  if (!t || t.length < 5) return true;
+  if (/^\[sk\d+/i.test(t) || /^https?:/i.test(t)) return true;
+  if (/^(?:\d+(?:[.,]\d+)?\s*(?:шт|м|мм|см|кг|г|л|мл|уп|упак|кор|рул|пл|мпа|м2|м3)\.?|\d+\s*[xх*×]\s*\d+\s*(?:мм|см|м|шт)?(?:\s*,\s*петли.*)?)$/i.test(t)) return true;
+  if (/^(?:кж\s*[\d.,-]|к\d\b|корпус|стилобат|блок|вжк|офис|склад|этаж|секция|ось|оси|отм\.|схем|арт\.?\s*\d|спайка|осина|гсп(?:-df)?|тип\s*\d|вид\s*\d|сорт\s*\d|мешок|однодверный|съемный|стандартный|грунтовка|краска\s+черный|etap|blok|kat)\b/i.test(t)) return true;
+  return false;
+}
+
 function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materialName: string; category?: string } {
-  if (!item || !item.materialName) return item;
-  let rawName = String(item.materialName).trim();
+  if (!item || (!item.materialName && !item.originalName)) return item;
+  let rawName = unwrapSyntheticPrefixes(String(item.materialName || '').trim());
   let name = cleanRawMaterialName(rawName) || rawName;
-  const rawOrig = String(item.originalName || '').trim();
+  const rawOrig = unwrapSyntheticPrefixes(String(item.originalName || item.originalMaterialName || '').trim());
   const orig = cleanRawMaterialName(rawOrig) || rawOrig;
-  const combined = `${name} ${orig}`.toLowerCase();
-  
+
+  // Eğer kayıtlı materialName geçmişte hatalı bir genel havuza (Propan Tüpü, İnşaat Naylonu, Çam Kereste, Bağ Teli, İnşaat Çivisi, Alçıpan, Bazalt File vb.)
+  // atanmışsa ve orig gerçek bir malzeme adıysa, sınıflandırmayı doğrudan orijinal fatura satırı (orig) üzerinden yap!
+  const isPreviouslyOverwrittenBucket =
+    /^(propan gaz tüpü|polietilen inşaat naylonu|ambalaj streç film|inşaatlık çam kereste|tavlı donatı bağ teli|inşaat çivisi|bogirus nt|a500c inşaat demiri|donatı manşonu|donatı kafesi|kaynak elektrodu|wc klozet|çanak tipi tel fırça|elektrik motoru karbon|knauf standart alçıpan|knauf suya dayanıklı alçıpan|bazalt duvar örgü filesi|cam elyaf dış cephe donatı filesi)/i.test(name);
+
+  if (isPreviouslyOverwrittenBucket && orig && !isShortDrawingOrSpecNote(orig) && orig.toLowerCase() !== name.toLowerCase()) {
+    name = orig;
+  }
+
+  // Clean synthetic timber label if it was generated from "CAM YUNU"
+  const cleanOrig = /cam\s*yun|cam\s*yün|ursa|folga/i.test(`${orig} ${name}`)
+    ? orig.replace(/Пиломатериал обрезной\s*\(брус\s*\/\s*доска\)\s*ГОСТ\s*8486/gi, 'Утеплитель минераловатный')
+    : orig;
+
+  const effectiveOrig = isShortDrawingOrSpecNote(cleanOrig) ? '' : cleanOrig;
+  const combined = `${effectiveOrig} ${name}`.toLowerCase();
+  const primaryText = `${effectiveOrig} ${name}`.toLowerCase();
+
   // 0. İNŞAAT DEMİRİ KORUYUCU GÜVENLİK BAŞLIĞI / MANTARI (ASLA İNŞAAT DEMİRİ DEĞİLDİR!)
   if (
     combined.includes('колпачок') ||
@@ -2299,7 +2432,29 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     };
   }
 
-  // 0.5. Paspayı, Çiroz, Donatı Sehpası & Bağ Teli
+  // 0.2. Donatı Kaynak Altlık Plakası / Çelik Mapa (M07, Скоба-накладка ванночка) - ASLA İnşaat Demiri değildir!
+  if (
+    combined.includes('скоба-накладка') ||
+    combined.includes('скоба накладка') ||
+    combined.includes('ванночка') ||
+    combined.includes('celik mapa') ||
+    combined.includes('çelik mapa') ||
+    /\bm07\b/i.test(combined)
+  ) {
+    if (combined.includes('ванночка') || combined.includes('скоба-накладка')) {
+      const dMatch = combined.match(/[dдфø]\s*(\d{2})/i);
+      return {
+        materialName: `Donatı Kaynak Manşonu / Altlık Plakası (Ванночка)${dMatch ? ` Ø${dMatch[1]} mm` : ''} GOST 14098`,
+        category: 'Donatı Malzemeleri'
+      };
+    }
+    return {
+      materialName: 'Çelik Ankraj Mapası M07 (A500C Ø20/Ø10 mm)',
+      category: 'Çelik Malzemeler'
+    };
+  }
+
+  // 0.5. Paspayı, Çiroz, Donatı Sehpası
   if (
     combined.includes('фиксатор') ||
     combined.includes('паспой') ||
@@ -2310,7 +2465,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     combined.includes('лягушк')
   ) {
     return {
-      materialName: name.startsWith('A500') ? (orig || name) : name,
+      materialName: name.startsWith('A500') ? (cleanOrig || name) : name,
       category: 'Donatı Malzemeleri'
     };
   }
@@ -2339,8 +2494,21 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     combined.includes('bağ teli') ||
     combined.includes('tavlı tel') ||
     combined.includes('муфта') ||
-    combined.includes('mufta') ||
     combined.includes('manşon') ||
+    combined.includes('manson') ||
+    combined.includes('закладн') ||
+    combined.includes('анкер') ||
+    combined.includes('ankraj') ||
+    combined.includes('mapa') ||
+    combined.includes('скоба') ||
+    combined.includes('ванночк') ||
+    combined.includes('plaka') ||
+    combined.includes('пластин') ||
+    combined.includes('деталь') ||
+    combined.includes('каркас') ||
+    combined.includes('karkas') ||
+    combined.includes('сетка') ||
+    combined.includes('hasır') ||
     combined.includes('упаковк');
 
   // Check learned/approved synonyms store first
@@ -2358,153 +2526,938 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
 
   if (
     !isRebarNegFilter && (
-      combined.includes('арматур') ||
-      combined.includes('demir') ||
-      combined.includes('nervür') ||
-      combined.includes('nervur') ||
-      combined.includes('rebar') ||
-      combined.includes('пруток') ||
-      combined.includes('a500') ||
-      combined.includes('а500') ||
-      combined.includes('b500') ||
-      combined.includes('a240') ||
-      combined.includes('а240') ||
-      combined.includes('hadde profil')
+      primaryText.includes('арматур') ||
+      primaryText.includes('inşaat demir') ||
+      primaryText.includes('insaat demir') ||
+      primaryText.includes('nervür') ||
+      primaryText.includes('nervur') ||
+      primaryText.includes('rebar') ||
+      primaryText.includes('пруток') ||
+      primaryText.includes('a500') ||
+      primaryText.includes('а500') ||
+      primaryText.includes('b500') ||
+      primaryText.includes('a240') ||
+      primaryText.includes('а240')
     )
   ) {
-    const d = extractRebarDiameter(combined);
+    const d = extractRebarDiameter(primaryText);
     if (d && STANDARD_REBAR_MAP[d]) {
       return { materialName: STANDARD_REBAR_MAP[d], category: 'İnşaat Demiri' };
     }
   }
 
-  // 1.5 Hazır Beton & Grobeton Normalizasyonu
-  if (combined.includes('бетон') || combined.includes('beton') || combined.includes('grobeton')) {
+  // 1.5 Hazır Beton & Grobeton Normalizasyonu (Gazbeton, betonokontakt ve beton matkap ucu hariç)
+  if (
+    (combined.includes('бетон') || combined.includes('beton') || combined.includes('grobeton')) &&
+    !combined.includes('газобетон') && !combined.includes('gazbeton') &&
+    !combined.includes('бетоноконтакт') && !combined.includes('betonokontakt') &&
+    !combined.includes('бур ') && !combined.includes('диск') && !combined.includes('алмазн') &&
+    !combined.includes('бетоновод')
+  ) {
     if (combined.includes('grobeton') || combined.includes('b7.5') || combined.includes('в7.5') || combined.includes('m100')) {
-      return { materialName: 'Grobeton B7.5 (M100 Hazır Beton)', category: 'Hazır Beton & Çimento' };
+      return { materialName: 'Grobeton B7.5 (M100 Hazır Beton)', category: 'Hazır Beton, Çimento & Agrega' };
     }
     if (combined.includes('b15') || combined.includes('в15') || combined.includes('m200')) {
-      return { materialName: 'Hazır Beton B15 (M200 / C12/15)', category: 'Hazır Beton & Çimento' };
+      return { materialName: 'Hazır Beton B15 (M200 / C12/15)', category: 'Hazır Beton, Çimento & Agrega' };
     }
     if (combined.includes('b20') || combined.includes('в20') || combined.includes('m250')) {
-      return { materialName: 'Hazır Beton B20 (M250 / C16/20)', category: 'Hazır Beton & Çimento' };
+      return { materialName: 'Hazır Beton B20 (M250 / C16/20)', category: 'Hazır Beton, Çimento & Agrega' };
     }
     if (combined.includes('b25') || combined.includes('в25') || combined.includes('m350')) {
-      return { materialName: 'Hazır Beton B25 (M350 / C20/25 GOST)', category: 'Hazır Beton & Çimento' };
+      return { materialName: 'Hazır Beton B25 (M350 / C20/25 GOST)', category: 'Hazır Beton, Çimento & Agrega' };
     }
     if (combined.includes('b30') || combined.includes('в30') || combined.includes('m400')) {
-      return { materialName: 'Hazır Beton B30 (M400 / C25/30 GOST)', category: 'Hazır Beton & Çimento' };
+      return { materialName: 'Hazır Beton B30 (M400 / C25/30 GOST)', category: 'Hazır Beton, Çimento & Agrega' };
     }
     if (combined.includes('b35') || combined.includes('в35') || combined.includes('m450')) {
-      return { materialName: 'Hazır Beton B35 (M450 / C30/35 GOST)', category: 'Hazır Beton & Çimento' };
+      return { materialName: 'Hazır Beton B35 (M450 / C30/35 GOST)', category: 'Hazır Beton, Çimento & Agrega' };
     }
     if (combined.includes('b40') || combined.includes('в40') || combined.includes('m500')) {
-      return { materialName: 'Hazır Beton B40 (M500 / C35/40 GOST)', category: 'Hazır Beton & Çimento' };
+      return { materialName: 'Hazır Beton B40 (M500 / C35/40 GOST)', category: 'Hazır Beton, Çimento & Agrega' };
     }
   }
 
-  // 1.8 Plywood / Kontrplak / Фанера
-  if (combined.includes('фанер') || combined.includes('kontrplak') || combined.includes('plywood') || combined.includes('pleyvud')) {
-    if (combined.includes('21')) {
-      return { materialName: 'Su Kontrplağı Plywood 21mm (1220x2440 WBP Film Kaplı)', category: 'Kalıp & İskele Sistemleri' };
+  // 1.7 FIRÇA AYRIMI (Boya Fırçası vs Tel Fırça vs Klozet Fırçası vs Yer Fırçası vs Kömür Fırça)
+  // Asla farklı fırça türlerini, markalarını veya farklı ölçüleri aynı satırda birleştirme!
+  if (/кисть|щетк|щётк|ершик|ёршик|fırça|firca/i.test(primaryText) && !/paspas\s*ızgarası|грязезащитн/i.test(primaryText)) {
+    // 0. Rulo Fırça / Boya Rulosu (Валик малярный) - Fırça değil rulodur!
+    if (/\brulo\b|валик/i.test(primaryText)) {
+      const wMatch = primaryText.match(/\b(\d{2,3})\s*(?:мм|mm|см|cm)(?![a-zа-яё])/i);
+      const isFinger = /parmak|мини/i.test(primaryText);
+      return {
+        materialName: `${isFinger ? 'Parmak Boya Rulosu' : 'Boya Rulosu'}${wMatch ? ` (${wMatch[0].trim().toLowerCase()})` : ''}`,
+        category: 'Kimyasallar & Boya'
+      };
     }
-    if (combined.includes('15')) {
-      return { materialName: 'Su Kontrplağı Plywood 15mm (1220x2440 WBP Film Kaplı)', category: 'Kalıp & İskele Sistemleri' };
+    // A. Fırça Sapı (Черенок для щетки) - Fırçanın kendisi değildir! (Ancak "Щетка ... (черенок 601322)" gibi fırça satırlarını sap sanma!)
+    if ((/^черенок|черенок\s+для|fırça\s*sapı|firca\s*sapi/i.test(primaryText) || (/черенок/i.test(primaryText) && !/щетк|щётк|швабр|метла/i.test(primaryText))) && !/под\s*черенок/i.test(primaryText)) {
+      return { materialName: 'Ahşap / Vidalı Temizlik Fırçası Sapı', category: 'Temizlik & Hijyen Malzemeleri' };
     }
-    if (combined.includes('12')) {
-      return { materialName: 'Su Kontrplağı Plywood 12mm (1220x2440 WBP Film Kaplı)', category: 'Kalıp & İskele Sistemleri' };
+    // B. Klozet / Tuvalet Fırçası
+    if (/ершик|ёршик|унитаз|туалет|tuvalet|klozet|\bwc\b/i.test(primaryText)) {
+      return { materialName: 'WC Klozet / Tuvalet Fırçası', category: 'Temizlik & Hijyen Malzemeleri' };
     }
-    return { materialName: 'Su Kontrplağı Plywood 18mm (1220x2440 WBP Film Kaplı)', category: 'Kalıp & İskele Sistemleri' };
+    // C. Elektrikli El Aleti Karbon / Kömür Fırçası (Marka ve Model Koru!)
+    if (/угольн|графитов|электрощетк|мотор|kömür\s*fırça|karbon\s*fırça/i.test(primaryText)) {
+      let modelSpec = '';
+      if (/aeg/i.test(primaryText)) modelSpec = ' AEG';
+      else if (/makita/i.test(primaryText)) modelSpec = ' Makita';
+      else if (/bosch/i.test(primaryText)) modelSpec = ' Bosch';
+      const cbMatch = primaryText.match(/\b(cb[\s-]*\d+|\d{9,10})\b/i);
+      const dim = primaryText.match(/(\d+(?:[.,]\d+)?\s*[xх*×]\s*\d+(?:[.,]\d+)?(?:\s*[xх*×]\s*\d+(?:[.,]\d+)?)?)/i);
+      const suffix = cbMatch ? ` (${cbMatch[1].toUpperCase()})` : (dim ? ` (${dim[1].replace(/\s+/g, '')})` : '');
+      return {
+        materialName: `Elektrik Motoru Karbon Kömür Fırçası${modelSpec}${suffix}`,
+        category: 'El Aletleri & Hırdavat'
+      };
+    }
+    // D. Tel Fırça / Çanak Fırça / Metal Temizleme Fırçası (Ölçü ve Tipini Koru!)
+    if (/металл|корщетк|проволоч|крацовк|зачистн|ушм|tel\s*fırça|çanak\s*fırça|saçak\s*fırça|burgu\s*fırça/i.test(primaryText)) {
+      const dMatch = primaryText.match(/\b(60|65|70|75|80|100|115|125|150)\s*(?:\/|\s*(?:мм|mm))(?![a-zа-яё])/i) || primaryText.match(/\b(65|75|100|125)\b/);
+      const isCup = /чашк|чашечн|çanak|kupa/i.test(primaryText);
+      const isHand = /ручн|saplı|el\s*tipi/i.test(primaryText);
+      const isTwisted = /кручен|burgu/i.test(primaryText);
+      const subType = isCup ? `Çanak Tipi ${isTwisted ? 'Burgulu ' : ''}Tel Fırça` : (isHand ? 'El Tipi Tel Fırça' : 'Metal Tel Fırça');
+      return {
+        materialName: `${subType}${dMatch ? ` Ø${dMatch[1]} mm` : ''}`,
+        category: 'Sarf Malzeme & Hırdavat'
+      };
+    }
+    // E. Yer / Saha Temizlik Fırçası & Süpürge (Genişlik Ölçüsünü Koru!)
+    if (/для\s+пола|для\s+уборки|подметальн|уличн|строительн|метла|швабр|temizlik|yer\s*fırça|saha\s*temizlik|çöp\s*fırça|süpürge/i.test(primaryText)) {
+      const wMatch = primaryText.match(/\b(\d{2,3})\s*(?:мм|mm|см|cm)(?![a-zа-яё])/i);
+      return {
+        materialName: `Temizlik / Yer Fırçası${wMatch ? ` (${wMatch[0].trim().toLowerCase()})` : ''}`,
+        category: 'Temizlik & Hijyen Malzemeleri'
+      };
+    }
+    // F. Boya / Kestirme / Radyatör Fırçası (Ölçüsüne göre ayrı tut, aynı ölçüleri birleştir)
+    if (/кисть|малярн|плоск|радиаторн|макловиц|kestirme\s*fırça|boya\s*fırça|radyatör\s*fırça|badana\s*fırça/i.test(primaryText)) {
+      const isRadiator = /радиатор|radyatör|eğri|açılı/i.test(primaryText);
+      const isMaklovitsa = /макловиц|badana|duvar\s*fırça/i.test(primaryText);
+      let sizeLabel = '';
+      const mmMatch = primaryText.match(/\b(20|25|30|35|38|40|50|60|63|70|75|80|90|100|120|140|150)\s*(?:мм|mm)(?![a-zа-яё])/i);
+      const inchMatch = primaryText.match(/\b([1234](?:[.,/][052])?)\s*(?:"|''|дюйм)/i);
+      if (mmMatch) {
+        const mm = parseInt(mmMatch[1], 10);
+        const inchMap: Record<number, string> = { 25: '1"', 38: '1.5"', 50: '2"', 63: '2.5"', 75: '3"', 100: '4"' };
+        sizeLabel = ` ${mm} mm${inchMap[mm] ? ` (${inchMap[mm]})` : ''}`;
+      } else if (inchMatch) {
+        const inchStr = inchMatch[1].replace(',', '.');
+        const mmMap: Record<string, number> = { '1': 25, '1.5': 38, '2': 50, '2.5': 63, '3': 75, '4': 100 };
+        const mappedMm = mmMap[inchStr];
+        sizeLabel = mappedMm ? ` ${mappedMm} mm (${inchStr}")` : ` (${inchStr}")`;
+      }
+      const brushPrefix = isRadiator ? 'Radyatör Boya Fırçası' : (isMaklovitsa ? 'Geniş Badana Fırçası' : 'Yassı Kestirme Boya Fırçası');
+      return {
+        materialName: `${brushPrefix}${sizeLabel}`.trim(),
+        category: 'Kimyasallar & Boya'
+      };
+    }
   }
 
-  // 1.9 Kaynak Elektrodu / Электрод
-  if (combined.includes('электрод') || combined.includes('elektrod') || combined.includes('elektrot')) {
-    if (!combined.includes('контроль') && !combined.includes('измерени')) {
-      return { materialName: 'Kaynak Elektrodu MP-3 (Ø4.0mm / 5kg Paket)', category: 'Sarf Malzeme & Hırdavat' };
+  // 1.8 Plywood / Kontrplak / Фанера (Sadece gerçek kontrplak/plywood ve açık kalınlık eşleşmesi)
+  if (primaryText.includes('фанер') || primaryText.includes('kontrplak') || primaryText.includes('plywood') || primaryText.includes('pleyvud')) {
+    const isLaminated = /ламинир|ламин\.|фоф|лбфф|deck|дек|f1\/f1|ff|fof|film\s*kaplı|wbp/i.test(primaryText);
+    const prefix = isLaminated ? 'Film Kaplı Kalıp Kontrplağı (Plywood)' : 'Su Kontrplağı (Plywood FSF)';
+    const thickMatch = primaryText.match(/\b(4|6|8|9|10|12|15|18|21|24|27|30)\s*(?:мм|mm)(?![a-zа-яё])/i)
+      || primaryText.match(/\b(12|15|18|21)\s*[xх*×]/i);
+    const thick = thickMatch ? `${thickMatch[1]}mm` : '18mm';
+    const dimMatch = primaryText.match(/\b(1220\s*[xх*×]\s*2440|2440\s*[xх*×]\s*1220|1250\s*[xх*×]\s*2500|1500\s*[xх*×]\s*3000|1525\s*[xх*×]\s*1525)\b/i);
+    let normDim = dimMatch ? dimMatch[1].replace(/\s+/g, '').replace(/[х*×]/gi, 'x') : '1220x2440';
+    if (normDim === '2440x1220') normDim = '1220x2440';
+    return {
+      materialName: `${prefix} ${thick} (${normDim})`,
+      category: 'Kalıp & İskele Sistemleri'
+    };
+  }
+
+  // 1.9 Kaynak Elektrodu / Электрод (Marka/Seri, Tip ve Çapı Koru - Nokta kaynak elektrodunu ayır!)
+  if (primaryText.includes('электрод') || primaryText.includes('elektrod') || primaryText.includes('elektrot')) {
+    if (!primaryText.includes('контроль') && !primaryText.includes('измерени') && !primaryText.includes('держател')) {
+      // Nokta kaynak makinesi bakır elektrodu (HWASHI, TECNA vb.)
+      if (/hwashi|tecna|контактн.*сварк/i.test(primaryText)) {
+        const modelMatch = primaryText.match(/\b(hwashi\s*[\d.]+|tecna\s*\d+)\b/i);
+        return {
+          materialName: `Nokta Kaynak Makinesi Elektrodu${modelMatch ? ` (${modelMatch[1].toUpperCase()})` : ''}`,
+          category: 'Kaynak Malzemeleri'
+        };
+      }
+      let brand = '';
+      if (/lb[\s-]*52u|лб[\s-]*52у/i.test(primaryText)) brand = 'LB-52U (Kobe Steel)';
+      else if (/уони[\s-]*13\s*\/\s*55|uoni[\s-]*13\s*\/\s*55/i.test(primaryText)) brand = 'UONI-13/55';
+      else if (/мр[\s-]*3|mp[\s-]*3/i.test(primaryText)) brand = 'MP-3';
+      else if (/ок[\s-]*46|ok[\s-]*46/i.test(primaryText)) brand = 'ESAB OK 46.00';
+      else if (/озл[\s-]*8|ozl[\s-]*8/i.test(primaryText)) brand = 'OZL-8';
+      else if (/ано[\s-]*21|ano[\s-]*21/i.test(primaryText)) brand = 'ANO-21';
+      else if (/as\s*r[\s-]*143|askaynak/i.test(primaryText)) brand = 'Askaynak AS R-143';
+
+      const dMatch = primaryText.match(/(?:[dдфøØ]\s*[:=]?\s*)?\b(2[.,]0|2[.,]5|2[.,]6|3[.,]0|3[.,]2|3[.,]25|4[.,]0|5[.,]0)\s*(?:[xх*×]\s*\d+|\s*(?:мм|mm))(?![a-zа-яё])/i);
+      const dia = dMatch ? ` Ø${dMatch[1].replace(',', '.').replace('3.25', '3.2')} mm` : '';
+      return {
+        materialName: `Kaynak Elektrodu${brand ? ` ${brand}` : ''}${dia}`.trim(),
+        category: 'Kaynak Malzemeleri'
+      };
     }
   }
 
-  // 1.95 Bağ Teli / Tavlı Tel / Вязальная проволока
-  if (combined.includes('вязальн') || combined.includes('bağ teli') || combined.includes('bag teli') || combined.includes('tavlı tel')) {
-    return { materialName: 'Bağ Teli (1.2mm Tavlı Donatı Teli)', category: 'Donatı Malzemeleri' };
+  // 1.95 Bağ Teli / Tavlı Tel / Вязальная проволока (Pense / Kerpeten / Kanca hariç!)
+  if (
+    (primaryText.includes('вязальн') || primaryText.includes('bağ teli') || primaryText.includes('bag teli') || primaryText.includes('tavlı tel') || (primaryText.includes('проволока') && primaryText.includes('1.2'))) &&
+    !primaryText.includes('клещ') && !primaryText.includes('кусачк') && !primaryText.includes('крючок') && !primaryText.includes('пистолет') && !primaryText.includes('pense')
+  ) {
+    const dMatch = primaryText.match(/\b(0[.,]8|1[.,]0|1[.,]2|1[.,]4|1[.,]6|2[.,]0|2[.,]5|3[.,]0|4[.,]0|6[.,]0)\s*(?:мм|mm)?(?![a-zа-яё0-9])/i);
+    const dia = dMatch ? `${dMatch[1].replace(',', '.')}mm` : '1.2mm';
+    return {
+      materialName: `Tavlı Donatı Bağ Teli (${dia})`,
+      category: 'Donatı Malzemeleri'
+    };
   }
 
-  // 1.96 İnşaat Çivisi / Гвозди строительные
-  if (combined.includes('гвозд') || combined.includes('civi') || combined.includes('çivi')) {
-    return { materialName: 'İnşaat Çivisi (100mm / 4x100)', category: 'Sarf Malzeme & Hırdavat' };
+  // 1.96 İnşaat Çivisi vs Isı Yalıtım Dübeli Çivisi (BOGIRUS NT vb.) vs Gazlı Çivi Tabancası Tüpü / Klipsi
+  if (/toua.*баллон|баллон.*гвозд|газовый\s*баллон.*монтаж/i.test(combined)) {
+    return {
+      materialName: 'Gazlı Çivi Tabancası Tüpü / Kartuşu (TOUA)',
+      category: 'Sarf Malzeme & Hırdavat'
+    };
+  }
+  if (/civi\s*tabanca.*klips|çivi\s*tabanca.*klips|клипс.*монтажн.*пистолет/i.test(combined)) {
+    const dMatch = combined.match(/\b(16|20|25|32)\s*(?:мм|mm)?/i);
+    return {
+      materialName: `Çivi Tabancası Boru Sabitleme Klipsi${dMatch ? ` (Ø${dMatch[1]} mm)` : ''}`,
+      category: 'Elektrik & Aydınlatma'
+    };
+  }
+  if (primaryText.includes('гвозд') || primaryText.includes('civi') || primaryText.includes('çivi')) {
+    if (!/гвоздодер|пистолет|tabanca|klips|клипс|держател|баллон|toua|дюбель-гвозд/i.test(combined)) {
+      // Termo başlıklı ısı yalıtım dübel çivisi (BOGIRUS NT 160/180/215/350 mm)
+      if (/термоголовк|к\s*дюбел|bogirus|dübel\s*çivisi|dubel\s*civisi/i.test(combined)) {
+        const lenMatch = combined.match(/\b(100|120|140|160|180|200|215|220|250|260|300|350|400)\s*(?:мм|mm)(?![a-zа-яё])/i);
+        const len = lenMatch ? ` ${lenMatch[1]} mm` : '';
+        return {
+          materialName: `BOGIRUS NT Termo Başlıklı Dübel Çivisi${len}`,
+          category: 'Sarf Malzeme & Hırdavat'
+        };
+      }
+      const dimMatch = primaryText.match(/\b(\d+(?:[.,]\d+)?\s*[xх*×]\s*\d{2,3})\b/i);
+      const mmMatch = primaryText.match(/\b(50|60|70|80|90|100|120|150|200)\s*(?:мм|mm)(?![a-zа-яё])/i);
+      const size = dimMatch
+        ? dimMatch[1].replace(/\s+/g, '').replace(',', '.').replace(/[х*×]/gi, 'x')
+        : (mmMatch ? `${mmMatch[1]}mm` : '4x100mm');
+      return {
+        materialName: `İnşaat Çivisi (${size})`,
+        category: 'Sarf Malzeme & Hırdavat'
+      };
+    }
   }
 
   // 1.97 Kum / Песок
-  if (combined.includes('песок') || (combined.includes('kum') && !combined.includes('kumaş') && !combined.includes('kumanda'))) {
-    return { materialName: 'İnşaat Kumu (Sıva / Şap Kumu)', category: 'Kaba Yapı Malzemeleri' };
+  if (primaryText.includes('песок') || (/\bkum\b/i.test(primaryText) && !primaryText.includes('kumaş') && !primaryText.includes('kumanda') && !primaryText.includes('kumlama'))) {
+    const isQuartz = /кварц|kuvars/i.test(primaryText);
+    return {
+      materialName: isQuartz ? 'Kuvars Kumu' : 'İnşaat Kumu (Sıva / Şap Kumu)',
+      category: 'Hazır Beton, Çimento & Agrega'
+    };
   }
 
-  // 1.98 Çakıl / Mıcır / Щебень / Гравий
-  if (combined.includes('щебень') || combined.includes('гравий') || combined.includes('çakıl') || combined.includes('cakil') || combined.includes('mıcır')) {
-    return { materialName: 'Kırmataş Mıcır / Çakıl (5-20mm)', category: 'Kaba Yapı Malzemeleri' };
+  // 1.98 Çakıl / Mıcır / Щебень / Гравий (Fraksiyonunu Koru!)
+  if (primaryText.includes('щебень') || primaryText.includes('гравий') || primaryText.includes('çakıl') || primaryText.includes('cakil') || primaryText.includes('mıcır')) {
+    const fracMatch = primaryText.match(/\b(5\s*[-–]\s*20|20\s*[-–]\s*40|40\s*[-–]\s*70|0\s*[-–]\s*5|3\s*[-–]\s*10|5\s*[-–]\s*10)\b/);
+    const frac = fracMatch ? fracMatch[1].replace(/\s+/g, '') + 'mm' : '5-20mm';
+    const isGranite = /гранит|granit/i.test(primaryText);
+    const isGravel = /гравий|гравийн|çakıl/i.test(primaryText);
+    const subType = isGranite ? 'Granit Kırmataş Mıcır' : (isGravel ? 'Çakıl Mıcır' : 'Kırmataş Mıcır');
+    return {
+      materialName: `${subType} (${frac})`,
+      category: 'Hazır Beton, Çimento & Agrega'
+    };
   }
 
   // 1.99 Kalıp Yağı / Смазка для опалубки
-  if (combined.includes('kalıp yağ') || combined.includes('kalip yag') || combined.includes('смазка для опалуб') || combined.includes('эмульсол')) {
+  if (primaryText.includes('kalıp yağ') || primaryText.includes('kalip yag') || primaryText.includes('смазка для опалуб') || primaryText.includes('эмульсол')) {
     return { materialName: 'Kalıp Ayırıcı Yağ (Endüstriyel Beton Kalıp Yağı)', category: 'Kalıp & İskele Sistemleri' };
   }
 
-  // 1.995 Naylon / Branda / Пленка
-  if (combined.includes('пленка') || combined.includes('плёнка') || combined.includes('naylon') || combined.includes('branda')) {
-    return { materialName: 'Polietilen İnşaat Naylonu Brandası (200 mikron)', category: 'Yalıtım & İzolasyon' };
+  // 1.994 Yalıtımlı PVC Branda / Tente vs Yalıtımsız Tarpaulin Branda (без утеплителя ayır!)
+  if (primaryText.includes('тент') || primaryText.includes('полог') || primaryText.includes('тарпаулин') || (primaryText.includes('branda') && !primaryText.includes('пленка'))) {
+    const dimMatch = primaryText.match(/\b(\d{1,2}\s*[xх*×]\s*\d{1,2})\s*(?:м|m)?(?![a-zа-яё0-9])/i);
+    const dim = dimMatch ? ` ${dimMatch[1].replace(/\s+/g, '').replace(/[х*×]/gi, 'x')} m` : '';
+    const isUninsulated = /без\s*утепл|yalıtımsız|yalitimsiz|180\s*гр/i.test(primaryText);
+    const isInsulated = !isUninsulated && /утепл|негорюч|огнестойк|yalıtımlı|yanmaz|400\s*г|450-500/i.test(primaryText);
+    return {
+      materialName: `${isInsulated ? 'Yanmaz Yalıtımlı PVC Branda / Tente' : 'Su Geçirmez Tarpaulin Branda / Tente (Yalıtımsız)'}${dim}`.trim(),
+      category: 'Yalıtım & Alçıpan'
+    };
   }
 
-  // 1.996 Propan Gaz Tüpü
-  if (combined.includes('пропан') || combined.includes('propan')) {
-    return { materialName: 'Propan Gaz Tüpü (50L Sanayi Tipi)', category: 'Sarf Malzeme & Hırdavat' };
+  // 1.995 Naylon / Polietilen İnşaat Filmi / Пленка (Yazıcı termoplenkası, kablo bağı, conta, kapı kasası, laminasyon filmi ve streç filmi kesinlikle ayır!)
+  if (/термопленк/i.test(combined)) {
+    return { materialName: 'Yazıcı Fırın Filmi (Термопленка CET / Kyocera Ecosys)', category: 'Bilgi İşlem & IT' };
   }
-
-  // 1.997 Dizel Yakıt / Mazot (Sadece akaryakıt; jeneratör, tank, pompa veya filtreler hariç)
-  if (/^mazot$|^dizel\s*yakıt|^дизельное\s*топливо/i.test(combined.trim()) || (/mazot|dizel\s*yakıt|дизельн.*топлив/i.test(combined) && !/jenerat|tank|filtre|kompresor|pompa|isımak|ısıtıcı/i.test(combined))) {
-    return { materialName: 'Dizel Yakıt / Mazot (Euro 5)', category: 'Akaryakıt & Enerji' };
-  }
-
-  // 2. Coupler / Donatı Manşonu / Муфта
-  if (combined.includes('муфта') || combined.includes('manşon') || combined.includes('manson')) {
-    const dMatch = combined.match(/(?:ds*=?|диаметрs*=?|çaps*=?|ø)s*(d+)/i);
-    if (dMatch) {
-      const dVal = dMatch[1];
-      if (combined.includes('p14') || combined.includes('п14')) {
-        return { materialName: `Donatı Manşonu P14 d=${dVal} mm`, category: 'Donatı Malzemeleri' };
+  if (
+    (combined.includes('пленка') || combined.includes('плёнка') || combined.includes('naylon') || combined.includes('стрейч') || combined.includes('strec')) &&
+    !/хомут|kablo\s*bağı|прокладк|conta|ламинирован|laminasyon|финишпленк|двер|коробк|наличник|kapı|pervaz|перчатк|eldiven/i.test(combined)
+  ) {
+    if (/стрейч|стретч|stretch|streç|strec|паллет|23\s*мкм|23\s*mkm|23\s*мкр|23\s*mkr|17\s*мкм|17\s*мкр/i.test(combined)) {
+      return { materialName: 'Ambalaj Streç Film 500 mm (Rulo)', category: 'Sarf Malzeme & Hırdavat' };
+    }
+    if (/500\s*mm|500\s*мм|50\s*см|50\s*cm/i.test(combined)) {
+      if ((Number(item.unitPrice) || 0) < 20) {
+        return { materialName: 'Polietilen Ambalaj Filmi 500 mm (Metraj)', category: 'Sarf Malzeme & Hırdavat' };
       }
-      if (combined.includes('geçiş') || combined.includes('переходная')) {
-        return { materialName: `Geçiş Donatı Manşonu d=${dVal} mm`, category: 'Donatı Malzemeleri' };
+      return { materialName: 'Ambalaj Streç Film 500 mm (Rulo)', category: 'Sarf Malzeme & Hırdavat' };
+    }
+    if (/пароизоляц|ветрозащит|гидро-ветро|изоспан|buhar\s*kesici/i.test(combined)) {
+      return { materialName: 'Buhar Kesici Yalıtım Örtüsü (Membran Film)', category: 'Yalıtım & Alçıpan' };
+    }
+    const isPackaging = /упаковочн/i.test(combined);
+    const isReinforced = /армирован/i.test(combined);
+    const mkrMatch = combined.match(/(?:^|[\s(,;/xх*×-])(80|100|120|150|200|250|300)\s*(?:мкм|мкр|микрон|mkr|mkm|mikron)/i);
+    const mkr = mkrMatch ? `${mkrMatch[1]} mikron` : '200 mikron';
+    if (isPackaging) {
+      return {
+        materialName: `Ambalaj Koruma Filmi / Naylonu (${mkr})`,
+        category: 'Sarf Malzeme & Hırdavat'
+      };
+    }
+    return {
+      materialName: `${isReinforced ? 'Takviyeli (Arme) ' : ''}Polietilen İnşaat Naylonu (${mkr})`,
+      category: 'Yalıtım & Alçıpan'
+    };
+  }
+
+  // 1.995b Donatı Kafesi (Кр-1 / Кр-2) vs Çelik Karkas (КР-1 / КП-1) vs Çivi Tabancası Klipsi vs Yağlı Emal Boya PF-115
+  if (/каркас\s+кр-\d|donatı\s*kafes/i.test(combined) && (Number(item.unitPrice) || 0) >= 2000) {
+    const krMatch = combined.match(/(?:кр|kr)[\s-]*(\d+)/i);
+    const krCode = krMatch ? `КР-${krMatch[1]}` : 'КР-1';
+    return {
+      materialName: `Ağır Yapısal Donatı Karkası ${krCode} (Özel İmalat)`,
+      category: 'Donatı Malzemeleri'
+    };
+  }
+  if (/каркас\s+арматур|donatı\s*kafes/i.test(combined) || (/каркас\s+кр-\d/i.test(combined) && (Number(item.unitPrice) || 0) < 2000)) {
+    const krMatch = combined.match(/(?:кр|kr|kp)[\s-]*(\d+)/i);
+    const krCode = krMatch ? `Kr-${krMatch[1]}` : 'Kr-1';
+    return {
+      materialName: `Donatı Kafesi ${krCode} (Özel İmalat)`,
+      category: 'Donatı Malzemeleri'
+    };
+  }
+  if (/каркас\s+металлическ|karkas\s*metal/i.test(combined)) {
+    if (/muhtelif/i.test(combined)) {
+      return {
+        materialName: 'Karkas Metal KP (Muhtelif Özel İmalat)',
+        category: 'Donatı Malzemeleri'
+      };
+    }
+    const kpMatch = combined.match(/(?:кр|kp|kr)[\s-]*(\d+)/i);
+    const kpCode = kpMatch ? `KP-${kpMatch[1]}` : 'KP-1';
+    return {
+      materialName: `Karkas Metal ${kpCode} (Özel İmalat)`,
+      category: 'Donatı Malzemeleri'
+    };
+  }
+  if (/пф[\s-]*115|pf[\s-]*115/i.test(combined)) {
+    let color = 'Beyaz';
+    if (/серый|серая|gri\b/i.test(combined)) color = 'Gri';
+    else if (/черн|siyah/i.test(combined)) color = 'Siyah';
+    else if (/желт|жёлт|sarı|sari/i.test(combined)) color = 'Sarı';
+    else if (/зелен|yeşil|yesil/i.test(combined)) color = 'Yeşil';
+    else if (/син|голуб|mavi/i.test(combined)) color = 'Mavi';
+    else if (/красн|kırmızı|kirmizi/i.test(combined)) color = 'Kırmızı';
+    return {
+      materialName: `Yağlı Emal Boya PF-115 (${color})`,
+      category: 'Kimyasallar & Boya'
+    };
+  }
+  if (/клипс.*теплого\s*пола|klips\s*pistolet.*teplogo\s*pola/i.test(combined)) {
+    const isJiraf = /жираф|jiraf/i.test(combined);
+    const isPetek = /петек|petek/i.test(combined);
+    const sysTag = isJiraf ? ' (Jiraf Sistemi)' : (isPetek ? ' (Petek Sistemi)' : '');
+    return {
+      materialName: `Yerden Isıtma Boru Sabitleme Klipsi & Tabancası${sysTag}`,
+      category: 'Sıhhi Tesisat & Isıtma'
+    };
+  }
+
+  // 1.995c Prizma Özel Alt Kalem Çözümlemeleri (Aynı stok kartı altında farklı parça/ölçü/model girilen kalemler)
+  // Master Isımak Yedek Parçaları (4105.062, 4104.193, 4103.441, 4101.666, 4111.885 vb.)
+  if (/master\s*isimak|master\s*ısımak/i.test(combined)) {
+    const origCodeMatch = cleanOrig.match(/\b(4\d{3}[.\s]\d{3})\b/);
+    const codeStr = origCodeMatch ? origCodeMatch[1].replace(/\s+/g, '.') : '';
+    let partTr = 'Yedek Parçası';
+    if (/крыльчатк/i.test(cleanOrig)) partTr = 'Fan Pervanesi';
+    else if (/блок\s*контрол/i.test(cleanOrig)) partTr = 'Yanma Kontrol Ünitesi';
+    else if (/лопатк.*ротор/i.test(cleanOrig)) partTr = 'Rotor Kanadı / Paleti';
+    else if (/(?:^|[^a-zа-яё])ротор(?![a-zа-яё])/i.test(cleanOrig)) partTr = 'Rotor';
+    else if (/трансформатор/i.test(cleanOrig)) partTr = 'Yüksek Gerilim Trafosu';
+    else if (/высоковольтн.*провод/i.test(cleanOrig)) partTr = 'Yüksek Gerilim Ateşleme Kablosu';
+    else if (/термостат/i.test(cleanOrig)) partTr = 'Koruma Termostatı';
+    else if (/фильтр/i.test(cleanOrig)) partTr = 'Yakıt Filtresi';
+    else if (/форсунк|enjektor/i.test(combined)) partTr = 'Yakıt Enjektörü / Memesi';
+    else if (/фотоэлемент/i.test(cleanOrig)) partTr = 'Fotosel / Alev Sensörü';
+    else if (/электрод|atesleme\s*bujisi/i.test(combined)) partTr = 'Ateşleme Bujisi / Elektrodu';
+    else if (/колесо|tekerlik/i.test(combined)) partTr = 'Tekerlek';
+    else if (/крышк.*бак|tank\s*kapagi/i.test(combined)) partTr = 'Yakıt Deposu Kapağı';
+    return {
+      materialName: `Master Isımak ${partTr}${codeStr ? ` (${codeStr})` : ''}`,
+      category: 'Araç & İş Makinesi Ekipmanları'
+    };
+  }
+  // 4111.081 ISIMAK MANSONU stok kartı altında Çelik Manşon Ду32 girilmişse ayır
+  if (/4111\.081|isimak\s*manson/i.test(combined) && /муфта\s+ст\s+ду\s*32/i.test(combined)) {
+    return {
+      materialName: 'Çelik Dişli Boru Manşonu DN32 (1 1/4")',
+      category: 'Sıhhi Tesisat & Isıtma'
+    };
+  }
+  // Koli Bandı 50mm x 50m vs 50mm x 100m ayrımı
+  if (/bant\s*koli|скотч\s+прозрачн/i.test(combined)) {
+    const lenMatch = combined.match(/50\s*(?:мм|mm)\s*[xх*×]\s*(50|66|100|150)\s*(?:м|mt|m)/i);
+    const len = lenMatch ? lenMatch[1] : '50';
+    return {
+      materialName: `Şeffaf Koli Bandı 50 mm x ${len} m`,
+      category: 'Ofis & Kırtasiye'
+    };
+  }
+  // Lehim Teli 100g vs 200g ayrımı
+  if (/tel\s*lehim|припой/i.test(combined)) {
+    const wMatch = combined.match(/\b(100|200|250|500)\s*(?:г|гр|gr|g)(?![a-zа-яё])/i);
+    const wStr = wMatch ? ` (${wMatch[1]} gr)` : '';
+    return {
+      materialName: `Reçineli Lehim Teli ПОС-61 Ø1 mm${wStr}`,
+      category: 'Elektrik & Aydınlatma'
+    };
+  }
+
+  // Bi-Metal Delik Testeresi / Panç (PANC HSS METAL - 38mm, 55mm, 73mm, 92mm, 110mm, 152mm)
+  if (/panc\s*hss|биметаллическ.*коронк|биометаллическ.*коронк|коронка\s+(?:по\s+металл|для\s+металл|по\s+стал|универсальн)/i.test(combined)) {
+    const parenDia = cleanOrig.match(/(?:d|ø|ф|bm-)?(\d{2,3})(?:[xх*×]\d+)?\s*(?:мм|mm)(?![a-zа-яё])/i);
+    const mainDia = combined.match(/(?:d|ø|ф|bm-)?(\d{2,3})(?:[xх*×]\d+)?\s*(?:мм|mm)(?![a-zа-яё])/i);
+    const dia = parenDia ? parenDia[1] : (mainDia ? mainDia[1] : '50');
+    return {
+      materialName: `Bi-Metal Delik Testeresi / Panç HSS Ø${dia} mm`,
+      category: 'El Aletleri & Hırdavat'
+    };
+  }
+
+  // RGK Lazer Nivo vs Üniversal Tripod Sehpa (Штатив ШУ-1) ve Lazer İşaretçi
+  if (/rgk\s*sp-100|ротационный\s+лазерный\s+нивелир/i.test(combined)) {
+    if (/штатив\s+универсальный|ресанта\s+штатив/i.test(cleanOrig)) {
+      return { materialName: 'Lazer Nivo Sehpası / Tripod (Ресанта ШУ-1)', category: 'Ölçüm, Harita & Saha Ekipmanları' };
+    }
+    if (/sp-610g/i.test(cleanOrig)) {
+      return { materialName: 'RGK SP-610G Rotasyonlu Lazer Nivo Seti', category: 'Ölçüm, Harita & Saha Ekipmanları' };
+    }
+    return { materialName: 'RGK SP-100 Combo Rotasyonlu Lazer Nivo Seti', category: 'Ölçüm, Harita & Saha Ekipmanları' };
+  }
+  if (/^lazer$/i.test(name.trim()) || /лазерная\s+указка/i.test(combined)) {
+    if ((Number(item.unitPrice) || 0) >= 5000 || /18650|фонарь-указка|lazernyy-fonar/i.test(combined)) {
+      return { materialName: 'Profesyonel Yeşil Lazer Fener / Saha İşaretçi (18650 Akülü)', category: 'Ölçüm, Harita & Saha Ekipmanları' };
+    }
+    return { materialName: 'Şarjlı Lazer İşaretçi / Sunum Kalemi', category: 'Ölçüm, Harita & Saha Ekipmanları' };
+  }
+
+  // Aybolt (Рым-болт) ölçü/tip ayrımı
+  if (/aybolt|рым[\s-]*болт/i.test(combined)) {
+    if (/(?:^|[^a-zа-яё0-9])(d20|м20|m20)(?![a-zа-яё0-9])/i.test(combined)) {
+      return { materialName: 'Aybolt (Рым-болт) M20 DIN 580', category: 'Sarf Malzeme & Hırdavat' };
+    }
+    if (/kalip\s*kaldirma|kalıp\s*kaldırma/i.test(combined) && (Number(item.unitPrice) || 0) < 800) {
+      return { materialName: 'Kalıp Kaldırma Ayboltu (Рым-болт) M24 DIN 580', category: 'Sarf Malzeme & Hırdavat' };
+    }
+    return { materialName: 'Aybolt (Рым-болт) M64 DIN 580', category: 'Sarf Malzeme & Hırdavat' };
+  }
+
+  // Klor Tozu vs Sönmüş Kireç (Известь гашеная 30 кг vs Хлорная известь)
+  if (/klor\s*toz|хлорная\s*известь/i.test(combined)) {
+    if (/известь\s+гашеная|карбонатно-известков|30\s*кг/i.test(cleanOrig)) {
+      return { materialName: 'Sönmüş Kireç Tozu (Известь гашеная - 30 kg Torba)', category: 'Kimyasallar & Boya' };
+    }
+    return { materialName: 'Klor Tozu / Kireç Kaymağı (Хлорная известь - 20/25 kg)', category: 'Temizlik & Hijyen Malzemeleri' };
+  }
+
+  // Taşyünü Технофас Оптима (110 kg/m³) vs Техноблок Стандарт (45 kg/m³)
+  if (/технофас\s+оптима/i.test(combined)) {
+    if (/техноблок\s+стандарт|duvar\s*isi\s*gecis/i.test(cleanOrig)) {
+      return { materialName: 'Taşyünü Levha Технониколь Техноблок Стандарт 1200x600x100 mm', category: 'Yalıtım & Alçıpan' };
+    }
+    return { materialName: 'Taşyünü Levha Технониколь Технофас Оптима 1200x600x100 mm (110 kg/m³)', category: 'Yalıtım & Alçıpan' };
+  }
+
+  // Çelik Sapan stok kartı altında Bez Sapan (Строп текстильный) girilmişse ayır
+  if (/sapan\s*celik|чалки\s*тросов/i.test(combined) && /строп\s+текстильный/i.test(cleanOrig)) {
+    return { materialName: 'Bez Sapan (Текстильный строп СТП) 5 Ton 3 Metre', category: 'El Aletleri & Hırdavat' };
+  }
+
+  // Metal Delici HSS Matkap Ucu vs Kobaltlı HSS-Co (Кобальт Р6М5К5)
+  if (/uc\s*metal\s*delici|сверло\s+по\s+металлу/i.test(combined) && /12\s*(?:мм|mm|\b)/i.test(combined)) {
+    if (/кобальт|р6м5к5/i.test(cleanOrig)) {
+      return { materialName: 'Kobaltlı Metal Matkap Ucu HSS-Co (Р6М5К5) Ø12 mm', category: 'El Aletleri & Hırdavat' };
+    }
+    return { materialName: 'Metal Matkap Ucu HSS Ø12 mm', category: 'El Aletleri & Hırdavat' };
+  }
+
+  // Revir İlaç Dolabı vs Tıbbi Muayene Paravanı (Ширма медицинская)
+  if (/dolap\s*ilac|шкаф\s*meg/i.test(combined) && /ширма\s+медицинская/i.test(cleanOrig)) {
+    return { materialName: 'Tıbbi Muayene Paravanı (3 Bölmeli - Ширма медицинская)', category: 'Şantiye Mobilya & Yaşam Donanımı' };
+  }
+
+  // Tamir Harcı Glims CRT 60 vs Mapei Planitop HPC LV-R
+  if (/glims\s*crt\s*60/i.test(combined) && /planitop/i.test(cleanOrig)) {
+    return { materialName: 'Yüksek Dayanımlı Grout / Tamir Harcı Mapei Planitop HPC LV-R (25 kg)', category: 'Hazır Beton, Çimento & Agrega' };
+  }
+
+  // PVC Fileli Köşe Profili vs PVC Damlalık Profili (Капельник)
+  if (/kose\s*profili\s*pvc\s*setkali|угол\s+перфорированный\s+пвх\s+с\s+сеткой/i.test(combined)) {
+    if (/капельник|kapelnik/i.test(cleanOrig)) {
+      return { materialName: 'PVC Fileli Damlalık Profili (Профиль-капельник) 2500 mm', category: 'Yalıtım & Alçıpan' };
+    }
+    return { materialName: 'PVC Fileli Köşe Profili 100x150x3000 mm', category: 'Yalıtım & Alçıpan' };
+  }
+
+  // Plotter Kartuşu Artikul Kodu Ayrımı (Арт. 2497265 vs Арт. 1614493)
+  if (/kartus\s*plotter\s*canon\s*pfi-120/i.test(combined)) {
+    const artMatch = cleanOrig.match(/арт\.?\s*(\d{5,8})/i);
+    if (artMatch) {
+      return { materialName: `Plotter Kartuşu Canon PFI-120 (Арт. ${artMatch[1]})`, category: 'Ofis & Kırtasiye' };
+    }
+  }
+
+  // 1.996 Propan Gaz Tüpü vs Propan Ekipmanları (Saati, Pürmüz, Conta, Kafes, Araba, Hortum kesinlikle ayır!)
+  if (primaryText.includes('пропан') || primaryText.includes('propan')) {
+    if (/клетка|kafes/i.test(primaryText)) {
+      return { materialName: 'Propan Tüpü Taşıma ve Depolama Kafesi (9 Adetlik)', category: 'Şantiye Tesis & Konteyner' };
+    }
+    if (/тележк|araba/i.test(primaryText)) {
+      return { materialName: 'Oksijen / Propan Tüp Taşıma Arabası GB2', category: 'El Aletleri & Hırdavat' };
+    }
+    if (/редуктор|бпо|bpo|saat|regülatör|манометр/i.test(primaryText)) {
+      return { materialName: 'Propan Regülatörü / Saati BPO KRASS', category: 'Kaynak Malzemeleri' };
+    }
+    if (/горелк|pürmüz|purmuz|şaloma|резак/i.test(primaryText)) {
+      return { materialName: 'Propan Pürmüz / Şaloma Başlığı', category: 'Kaynak Malzemeleri' };
+    }
+    if (/прокладк|conta/i.test(primaryText)) {
+      return { materialName: 'Propan Tüp Contası', category: 'Kaynak Malzemeleri' };
+    }
+    if (!/рукав|шланг|hortum/i.test(primaryText)) {
+      const priceVal = Number(item.unitPrice) || 0;
+      if (priceVal >= 4000) {
+        return { materialName: 'Propan Gaz Tüpü 50L (Boş Çelik Tüp Gövdesi)', category: 'Kaynak Malzemeleri' };
+      }
+      return { materialName: 'Propan Gaz Tüpü (50L Gaz Dolumu)', category: 'Kaynak Malzemeleri' };
+    }
+  }
+
+  // 1.997 Dizel Yakıt / Mazot
+  if (/^mazot$|^dizel\s*yakıt|^дизельное\s*топливо/i.test(primaryText.trim()) || (/mazot|dizel\s*yakıt|дизельн.*топлив/i.test(primaryText) && !/jenerat|tank|filtre|kompresor|pompa|isımak|ısıtıcı/i.test(primaryText))) {
+    return { materialName: 'Dizel Yakıt / Mazot (Euro 5)', category: 'Araç & İş Makinesi Ekipmanları' };
+  }
+
+  // 2. Coupler / Donatı Manşonu / Муфта (Model serisini A12, P13, P14, D14 ve d=çapını koru!)
+  if (
+    (primaryText.includes('муфта') || primaryText.includes('mufta') || primaryText.includes('manşon') || primaryText.includes('manson')) &&
+    (/арматур|donatı|резьб|konik|стандарт|переходн|[aа]12|[pр]13|[pр]14|[dд]14|\b[dдqфøØ]\s*=?\s*\d{2}\b/i.test(primaryText)) &&
+    !/dn\s*\d+|ду\s*\d+|ппр|ppr|пнд|dişli\s*manşon|koruge|isımak|isimak|кабельн|kablo/i.test(primaryText)
+  ) {
+    // Önce açık "d=28" veya "d=28/32" formatını yakala (D14 model kodundaki 14'ü çap sanmamak için!)
+    const transMatch = primaryText.match(/d\s*=\s*(\d{2}\s*\/\s*\d{2})/i);
+    if (transMatch || primaryText.includes('geçiş') || primaryText.includes('переходн')) {
+      const pair = transMatch ? transMatch[1].replace(/\s+/g, '') : '';
+      return {
+        materialName: `Geçiş Donatı Manşonu${pair ? ` d=${pair} mm` : ''}`,
+        category: 'Donatı Malzemeleri'
+      };
+    }
+
+    const explicitD =
+      primaryText.match(/d\s*=\s*(\d{2})/i) ||
+      primaryText.match(/\b[qфøØ]\s*(\d{2})\b/i) ||
+      primaryText.match(/\b(12|14|16|18|20|22|25|28|32|36|40)\s*(?:мм|mm)(?![a-zа-яё])/i);
+    if (explicitD) {
+      const dVal = explicitD[1];
+      let series = '';
+      if (/[pр]\s*14/i.test(primaryText)) series = ' P14 (Pozisyonel)';
+      else if (/[pр]\s*13/i.test(primaryText)) series = ' P13 (Pozisyonel)';
+      else if (/[dд]\s*14/i.test(primaryText)) series = ' D14';
+      else if (/[aа]\s*12/i.test(primaryText) || /стандарт|konik|коническ|резьб/i.test(primaryText)) series = ' A12 (Standart)';
+      return {
+        materialName: `Donatı Manşonu${series} d=${dVal} mm`,
+        category: 'Donatı Malzemeleri'
+      };
+    }
+  }
+
+  // 3. Timber / Kereste / Брус / Доска (Ölçüsünü Koru, брусчатка/cam yünü/yazı tahtası/sehpa/vida/testere hariç!)
+  if (
+    (primaryText.includes('брус') || primaryText.includes('kereste') || primaryText.includes('kalas') || primaryText.includes('доска обрезн') || primaryText.includes('kenarlı kereste')) &&
+    !/брусчатк|cam\s*yun|cam\s*yün|ursa|шлифовальн|магнитн|для\s*досок|yazı\s*tahtası|sehpa|statif|tripod|şemsiye|kilit|vida|саморез|testere|диск/i.test(combined)
+  ) {
+    // mm cinsinden 3 boyut: 50*200*6000, 100*100*6000, 50*100*6000, 50*150*6100
+    const mmDim = primaryText.match(/\b(\d{2,3})\s*[*xх×]\s*(\d{2,3})\s*[*xх×]\s*(\d{3,4})\b/);
+    if (mmDim) {
+      let d1 = parseInt(mmDim[1], 10);
+      let d2 = parseInt(mmDim[2], 10);
+      let d3 = parseInt(mmDim[3], 10);
+      // 10x10x600 cm veya 50*150*6100 mm gibi yazımları 6000 mm'ye normalize et
+      if ((d3 >= 600 && d3 <= 620) || (d3 >= 6000 && d3 <= 6200)) d3 = 6000;
+      const dStr = `${d1}x${d2}x${d3}`;
+      const isBoard = primaryText.includes('доска') || primaryText.includes('tahta') || primaryText.includes('kalas') || d1 <= 50;
+      return {
+        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${dStr} (1. Sınıf GOST)`,
+        category: 'Ahşap & Kereste'
+      };
+    }
+    // cm veya metre karışık yazım: 5*10*600 CM, 5*10*610 CM, 5*20*610 CM, 10*10*600 CM, 50*100*6 MT
+    const cmDim = primaryText.match(/\b(\d{1,3})\s*[*xх×]\s*(\d{1,3})\s*[*xх×]\s*(\d{1,4})\s*(?:cm|см|mt|м|m)(?![a-zа-яё])/i);
+    if (cmDim) {
+      let d1 = parseInt(cmDim[1], 10);
+      let d2 = parseInt(cmDim[2], 10);
+      let d3 = parseInt(cmDim[3], 10);
+      if (d1 <= 25) d1 *= 10;
+      if (d2 <= 30) d2 *= 10;
+      if (d3 <= 10) d3 *= 1000;
+      else if ((d3 >= 500 && d3 <= 650) || (d3 >= 6000 && d3 <= 6200)) d3 = 6000;
+      const dStr = `${d1}x${d2}x${d3}`;
+      const isBoard = d1 <= 50;
+      return {
+        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${dStr} (1. Sınıf GOST)`,
+        category: 'Ahşap & Kereste'
+      };
+    }
+    // 2 boyutlu Брус / Kereste (örn. "KERESTE 100x100 mm")
+    const twoDim = primaryText.match(/\b(50|100|150|200)\s*[*xх×]\s*(50|100|150|200)\s*(?:мм|mm)(?![a-zа-яё*xх×])/i);
+    if (twoDim) {
+      const d1 = parseInt(twoDim[1], 10);
+      const d2 = parseInt(twoDim[2], 10);
+      const isBoard = d1 <= 50;
+      return {
+        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${d1}x${d2}x6000 (1. Sınıf GOST)`,
+        category: 'Ahşap & Kereste'
+      };
+    }
+    return { materialName: 'İnşaatlık Çam Kereste (1. Sınıf GOST 8486)', category: 'Ahşap & Kereste' };
+  }
+
+  // 3.1 L-KÖŞEBENT DEMİR (Уголок стальной / KOSEBENT SIYAH)
+  if (
+    (/köşebent|kosebent|уголок|\bl[\s-]*demir|\bl[\s-]*profil/i.test(primaryText) ||
+     (/\bугол\b/i.test(primaryText) && /\b\d{2,3}\s*[*xх×]\s*\d{2,3}\s*[*xх×]\s*\d{1,2}\b/.test(primaryText))) &&
+    !/папка|салфет|щеток|кровать|петля|двер|внутренний|наружный|перфорирован|пвх|pvc|фитинг|отвод|alçıpan|alcipan|knauf/i.test(primaryText)
+  ) {
+    // Varsa önce orijinal Rusça fatura satırından, yoksa tüm metinden ölçüyü al
+    const angleSrc = (effectiveOrig && /\b\d{2,3}\s*[*xх×]\s*\d{2,3}\s*[*xх×]\s*\d{1,2}\b/.test(effectiveOrig)) ? effectiveOrig : primaryText;
+    const m3 = angleSrc.match(/\b(\d{2,3})\s*[*xх×]\s*(\d{2,3})\s*[*xх×]\s*(\d{1,2}(?:[.,]\d+)?)\b/);
+    if (m3) {
+      const l1 = parseInt(m3[1], 10);
+      const l2 = parseInt(m3[2], 10);
+      const th = m3[3].replace(',', '.');
+      if (l1 >= 20 && l1 <= 250 && l2 >= 20 && l2 <= 250) {
+        return {
+          materialName: `L-Köşebent Demir ${l1}x${l2}x${th} mm (GOST 8509)`,
+          category: 'Çelik Malzemeler'
+        };
       }
     }
   }
 
-  // 3. Timber / Kereste / Брус / Доска
-  if (combined.includes('брус') || combined.includes('kereste') || combined.includes('tahta') || combined.includes('доска')) {
-    if (combined.includes('100*100*6000') || combined.includes('100x100x6000')) {
-      return { materialName: 'Profil Kereste 100x100x6000 (1. Sınıf GOST)', category: 'Kalıp & İskele Sistemleri' };
+  // 3.2 KUTU PROFİL / PROFİL BORU (Труба профильная / KUTU PROFIL / PROFIL KUTU)
+  if (
+    (/труба.*профильн|профильн.*труб|kutu\s*profil|profil\s*kutu|profil\s*boru/i.test(primaryText)) &&
+    !/каркас.*ворот|калитка|çit|çevre.*paneli|kapı.*karkası|yaya.*kapısı|alçıpan|alcipan|гипсокартон|knauf/i.test(primaryText)
+  ) {
+    const pipeMatch =
+      primaryText.match(/\b(\d{2,3})\s*[*xх×]\s*(\d{2,3})\s*(?:[*xх×]|\s+)\s*(\d{1,2}(?:[.,]\d+)?)\s*(?:мм|mm)?(?![a-zа-яё0-9])/i);
+    if (pipeMatch) {
+      const sideA = parseInt(pipeMatch[1], 10);
+      const sideB = parseInt(pipeMatch[2], 10);
+      const thNum = parseFloat(pipeMatch[3].replace(',', '.'));
+      if (sideA >= 15 && sideA <= 300 && sideB >= 15 && sideB <= 300 && thNum >= 1 && thNum <= 16) {
+        const w = Math.max(sideA, sideB);
+        const h = Math.min(sideA, sideB);
+        const thStr = Number.isInteger(thNum) ? String(thNum) : String(thNum);
+        return {
+          materialName: `Kutu Profil ${w}x${h}x${thStr} mm (GOST 8639/8645)`,
+          category: 'Çelik Borular'
+        };
+      }
     }
-    if (combined.includes('50*100*6000') || combined.includes('50x100x6000')) {
-      return { materialName: 'Kenarlı Kereste Tahta 50x100x6000 (1. Sınıf GOST)', category: 'Kalıp & İskele Sistemleri' };
+  }
+
+  // 3.3 DİKİŞLİ ÇELİK BORU & SU/GAZ BORUSU (Труба электросварная / ВГП / BORU DEMIR DIKISLI)
+  if (
+    /труба\s*(?:стальная\s*)?(?:электросварн|вгп|водогазопровод)|электросварные\s*стальные\s*трубы|boru\s*demir\s*dikişli|boru\s*demir\s*dikisli|dikişli\s*çelik\s*boru|çelik\s*su\/gaz\s*borusu/i.test(primaryText)
+  ) {
+    const roundMatch = primaryText.match(/(?:[dдqфøØ]\s*)?\b(\d{2,3})\s*[*xх×]\s*(\d{1,2}(?:[.,]\d+)?)\b/);
+    if (roundMatch) {
+      const dia = roundMatch[1];
+      const th = roundMatch[2].replace(',', '.').replace(/\.0$/, '');
+      return {
+        materialName: `Dikişli Çelik Boru Ø${dia}x${th} mm (GOST 10704)`,
+        category: 'Çelik Borular'
+      };
     }
-    if (combined.includes('30*150*6000') || combined.includes('30x150x6000')) {
-      return { materialName: 'Profil Kereste (30х150х6000)', category: 'Kalıp & İskele Sistemleri' };
+  }
+
+  // 3.4 U-PROFİL ŞVELLER (Швеллер)
+  if (/швеллер|şveller|sveller/i.test(primaryText) && !/alçıpan|alcipan|гипсокартон|knauf/i.test(primaryText)) {
+    const chMatch = primaryText.match(/(?:швеллер|şveller|sveller)\s*№?\s*(\d{1,2})\s*[ппуpuy]?/i);
+    if (chMatch) {
+      return {
+        materialName: `U-Profil Şveller ${chMatch[1]} (GOST 8240-97)`,
+        category: 'Çelik Malzemeler'
+      };
     }
-    return { materialName: 'İnşaatlık Çam Kereste (1. Sınıf GOST 8486)', category: 'Kalıp & İskele Sistemleri' };
+  }
+
+  // 3.5 ÇELİK HASIR (Сетка сварная / HASIR CELIK)
+  if (
+    (/çelik\s*hasır|celik\s*hasir|hasır\s*çelik|hasir\s*celik|сетк.*(?:сварн|арматурн|кладочн|вр)/i.test(primaryText)) &&
+    !/кресло|кровать|ранза|koltuk|çit|çevre.*paneli|базальт|стеклоткан|фасадн/i.test(primaryText)
+  ) {
+    const meshM = primaryText.match(/\b(50|100|150|200)\s*[*xх×]\s*(50|100|150|200)\s*[*xх×]\s*(\d(?:[.,]\d+)?)\b/);
+    if (meshM) {
+      const px = meshM[1];
+      const py = meshM[2];
+      const wd = meshM[3].replace(',', '.');
+      return {
+        materialName: `Çelik Hasır ${px}x${py}x${wd} mm (Вр-1 GOST 23279)`,
+        category: 'İnşaat Demiri'
+      };
+    }
+  }
+
+  // 3.6 GAZBETON BLOK & GAZBETON YAPIŞTIRICISI
+  if (/газобетон|gazbeton|gaz\s*blok|bonolit|poritep|ytong|istkult|исткульт/i.test(primaryText)) {
+    if (/клей|yapıştırıcı|yapistirici|harç|harc/i.test(primaryText)) {
+      return {
+        materialName: 'Gazbeton Yapıştırıcı Harcı (25/40 kg Torba)',
+        category: 'Hazır Beton, Çimento & Agrega'
+      };
+    }
+    if (!/перемычка|lento|dübel|dubel|анкер|саморез|testere|ножовка/i.test(primaryText)) {
+      const density = primaryText.includes('d500') ? 'D500' : 'D600';
+      const gDim = primaryText.match(/\b(600|625)\s*[*xх×]\s*(200|250)\s*[*xх×]\s*(75|100|125|150|200|250|300|375|400)\b/)
+        || primaryText.match(/\b(75|100|125|150|200|250|300|375|400)\s*[*xх×]\s*(200|250)\s*[*xх×]\s*(600|625)\b/);
+      if (gDim) {
+        const nums = [parseInt(gDim[1], 10), parseInt(gDim[2], 10), parseInt(gDim[3], 10)].sort((a, b) => a - b);
+        return {
+          materialName: `Gazbeton Blok ${nums[0]}x${nums[1]}x${nums[2]} mm ${density}`,
+          category: 'Duvar Elemanları & Gazbeton'
+        };
+      }
+      return {
+        materialName: `Gazbeton Blok ${density}`,
+        category: 'Duvar Elemanları & Gazbeton'
+      };
+    }
+  }
+
+  // 3.7 ALÇIPAN LEVHA, ALÇIPAN PROFİLİ & AGRAF
+  if (/agraf|подвес\s+прямой/i.test(primaryText) && /60\s*[*xх×]\s*27|alçıpan|alcipan|гкл|кнауф|knauf/i.test(primaryText)) {
+    return {
+      materialName: 'Alçıpan Tavan U-Agraf / Doğrudan Askı Maşası (60x27 mm)',
+      category: 'Yalıtım & Alçıpan'
+    };
+  }
+  if (/профиль.*(?:пс|пн|пп|пнп|knauf|кнауф|гкл|гипсокартон)|alçıpan.*profil|alcipan.*profil|\bua\s*(?:50|75|100)\b.*profil|профиль\s*ua/i.test(primaryText)) {
+    const profDim = primaryText.match(/\b(27|28|50|60|75|100)\s*[*xх×]\s*(27|28|40|50)\s*(?:[*xх×]\s*(3000|4000))?\b/);
+    const thickM = primaryText.match(/\b(0[.,]4|0[.,]45|0[.,]5|0[.,]55|0[.,]6|0[.,]60|2|2[.,]0)\s*(?:мм|mm)\b/i);
+    if (profDim) {
+      const w = profDim[1];
+      const h = profDim[2];
+      const len = profDim[3] || '3000';
+      let th = thickM ? thickM[1].replace(',', '.') : '';
+      if (th === '0.60') th = '0.6';
+      if (th === '2') th = '2.0';
+      const isUA = /\bua/i.test(primaryText) || th === '2.0';
+      return {
+        materialName: `${isUA ? 'Alçıpan Takviye Profili (UA)' : 'Knauf Alçıpan Profili'} ${w}x${h}x${len} mm${th ? ` (${th} mm)` : ''}`,
+        category: 'Yalıtım & Alçıpan'
+      };
+    }
+  }
+  if (
+    /гипсокартон|alçıpan|alcipan|\bгкл(?:в|о)?\b|\bgkl(?:v|o)?\b|\bгсп-df\b/i.test(primaryText) &&
+    !/саморез|vida|dübel|dubel|болт|профил|profil|karkas|agraf|подвес|соединител|краб|bant|лента|серпянк|testere|ножовка|bıçak|bicak|фрез|пила|люк|kapağ|kapak|işleri|isleri|islerı|mockup/i.test(primaryText)
+  ) {
+    const isFire = /огнестой|kırmızı|kirmizi|yangın|yangin|гкло|gklo|гсп-df/i.test(primaryText);
+    const isMoisture = /влагостой|yeşil|yesil|suya|gklv|гклв/i.test(primaryText);
+    return {
+      materialName: isFire
+        ? 'Knauf Yangına Dayanıklı Alçıpan GKLO 12.5 mm (1.2x2.5 m)'
+        : isMoisture
+          ? 'Knauf Suya Dayanıklı Alçıpan GKLV 12.5 mm (1.2x2.5 m)'
+          : 'Knauf Standart Alçıpan GKL 12.5 mm (1.2x2.5 m)',
+      category: 'Yalıtım & Alçıpan'
+    };
+  }
+
+  // 3.8 SU YALITIM MEMBRANI (Technoelast / Izoplast / Planter) & GEOTEKSTİL & XPS PENOPLEX
+  if (/техноэласт|изопласт|teknoelast|tehnoelast|technoelast|izoplast/i.test(primaryText) && !/праймер|primer|мастик/i.test(primaryText)) {
+    const brand = /изопласт|izoplast/i.test(primaryText) ? 'İzoplast' : 'Technoelast';
+    if (/фундамент|fundament/i.test(primaryText)) {
+      return { materialName: `${brand} Fundament Su Yalıtım Membranı (Rulo)`, category: 'Yalıtım & Alçıpan' };
+    }
+    const type = /экп|ekp/i.test(primaryText) ? 'EKP' : 'EPP-4.0';
+    return { materialName: `${brand} ${type} Su Yalıtım Membranı (10 m² Rulo)`, category: 'Yalıtım & Alçıpan' };
+  }
+  if (/\bplanter\b|\bплантер\b/i.test(primaryText)) {
+    return { materialName: 'Planter Geo Profilli Drenaj ve Koruma Membranı (2x15 m)', category: 'Yalıtım & Alçıpan' };
+  }
+  if (/дорнит|геотекстил|dornit|geotekstil|georex|geoflaks/i.test(primaryText) && !/сетка/i.test(primaryText)) {
+    let density = 300;
+    if (/\b500\b/.test(primaryText)) density = 500;
+    else if (/\b400\b/.test(primaryText)) density = 400;
+    else if (/\b350\b/.test(primaryText)) density = 350;
+    else if (/\b250\b/.test(primaryText)) density = 250;
+    else if (/\b200\b/.test(primaryText)) density = 200;
+    else if (/\b150\b/.test(primaryText)) density = 150;
+    return { materialName: `Dornit Geotekstil Keçe ${density} g/m² (Rulo)`, category: 'Yalıtım & Alçıpan' };
+  }
+  if (/пеноплэкс|пеноплекс|penoplex|penopleks|\bxps\b.*(?:технониколь|carbon|levha)|экструдирован.*пенополистирол/i.test(primaryText) && !/клей|пена|крепеж|дюбель/i.test(primaryText)) {
+    const xpsThick =
+      primaryText.match(/\b118[05]\s*[*xх×]\s*58[05]\s*[*xх×]\s*(20|30|40|50|80|100)\b/)?.[1] ||
+      primaryText.match(/\b(20|30|40|50|80|100)\s*(?:мм|mm)\b/i)?.[1] ||
+      '50';
+    return {
+      materialName: `Penoplex / XPS Isı Yalıtım Levhası ${xpsThick} mm (1185x585 mm)`,
+      category: 'Yalıtım & Alçıpan'
+    };
+  }
+
+  // 3.9 KESİCİ TAŞ / DİSK (Диск отрезной по металлу / KESICI TAS / KESICI DISK)
+  if (
+    (/диск\s+отрезной|круг\s+отрезной|диск\s+по\s+металлу|kesici\s*taş|kesici\s*tas|kesici\s*disk|kesme\s*taş|kesme\s*tas|kesme\s*disk/i.test(primaryText)) &&
+    !/алмазн|elmas|бетон|beton|дерев|ahşap|пильн/i.test(primaryText)
+  ) {
+    const fullDisk = primaryText.match(/\b(115|125|150|180|230|300|350|400)\s*[*xх×]\s*(\d(?:[.,]\d+)?)\b/);
+    const diaOnly = primaryText.match(/\b(115|125|150|180|230|300|350|400)\s*(?:мм|mm)?\b/i);
+    if (fullDisk) {
+      const dia = fullDisk[1];
+      const th = fullDisk[2].replace(',', '.');
+      return {
+        materialName: `Metal Kesici Taş / Disk Ø${dia}x${th} mm`,
+        category: 'Sarf Malzeme & Hırdavat'
+      };
+    }
+    if (diaOnly) {
+      const dia = diaOnly[1];
+      const defaultTh = dia === '230' ? '2.0' : (dia === '125' ? '1.6' : '');
+      return {
+        materialName: `Metal Kesici Taş / Disk Ø${dia}${defaultTh ? `x${defaultTh}` : ''} mm`,
+        category: 'Sarf Malzeme & Hırdavat'
+      };
+    }
+  }
+
+  // 3.10 BEZ SAPAN (СТП) & ÇELİK HALAT SAPAN (СКП)
+  if ((/строп\s*текстильн|sapan\s*bez|bez\s*sapan/i.test(primaryText)) && !/страховочн|привязь|emniyet/i.test(primaryText)) {
+    const stpPair =
+      primaryText.match(/\b(\d+(?:[.,]\d+)?)\s*(?:т|тн|t|ton)\s*[/|*xх×\s-]*\s*(\d+(?:[.,]\d+)?)\s*(?:м|mt|m|metre)\b/i);
+    if (stpPair) {
+      const ton = stpPair[1].replace(',', '.');
+      const len = stpPair[2].replace(',', '.');
+      return {
+        materialName: `Bez Sapan (Текстильный строп СТП) ${ton} Ton ${len} Metre`,
+        category: 'El Aletleri & Hırdavat'
+      };
+    }
+  }
+  if (/строп\s*канатн|sapan\s*çelik|sapan\s*celik|çelik\s*halat\s*sapan/i.test(primaryText)) {
+    const skpPair =
+      primaryText.match(/\b(\d+(?:[.,]\d+)?)\s*(?:т|тн|t|ton)\s*[/|*xх×\s-]*\s*(\d+(?:[.,]\d+)?)\s*(?:м|mt|m|metre)\b/i);
+    if (skpPair) {
+      const ton = skpPair[1].replace(',', '.');
+      const len = skpPair[2].replace(',', '.');
+      return {
+        materialName: `Çelik Halat Sapan (СКП) ${ton} Ton ${len} Metre`,
+        category: 'El Aletleri & Hırdavat'
+      };
+    }
+  }
+
+  // 3.11 ANKRAJLAR (Анкер клиновой, Анкер-клин) & ÇİVİLİ PLASTİK DÜBEL (Дюбель-гвоздь)
+  if (/анкер[\s-]*клин(?:\s+потолочн)?|çakma\s*dübel\s*anker|cakma\s*dubel\s*anker/i.test(primaryText) && !/клиновой/i.test(primaryText)) {
+    const akDim = primaryText.match(/\b(6)\s*[*xх×]\s*(35|40|60|65)\b/);
+    if (akDim) {
+      return {
+        materialName: `Tavan Çakma Kama Ankraj (Анкер-клин) ${akDim[1]}x${akDim[2]} mm`,
+        category: 'Ankraj Sistemleri'
+      };
+    }
+  }
+  if (/анкер\s+клиновой|kama\s*tipi\s*çelik\s*ankraj|dubel\s*celik\s*cekme/i.test(primaryText)) {
+    const wedgeDim = primaryText.match(/\b[mм]?(\d{1,2})\s*[*xх×/]\s*(\d{2,3})\b/i);
+    if (wedgeDim) {
+      return {
+        materialName: `Kama Tipi Çelik Ankraj (Анкер клиновой) ${wedgeDim[1]}x${wedgeDim[2]} mm`,
+        category: 'Ankraj Sistemleri'
+      };
+    }
+  }
+  if (/дюбель[\s-]*гвоздь|дюбель\s+с\s+гвоздем|dubel\s*plastik\s*vidali|gaz\s*blok\s*dubeli|çivili\s*plastik\s*dübel/i.test(primaryText) && !/пистолет|montaj\s*tabanca/i.test(primaryText)) {
+    const dgDim = primaryText.match(/\b(5|6|8|10)\s*[*xх×]\s*(30|40|50|60|80|100|120|140|160)\b/);
+    if (dgDim) {
+      return {
+        materialName: `Çivili Plastik Dübel (Дюбель-гвоздь) ${dgDim[1]}x${dgDim[2]} mm`,
+        category: 'Sarf Malzeme & Hırdavat'
+      };
+    }
+  }
+
+  // 3.12 STANDART METRİK SOMUN (DIN 934) & PUL/RONDELA (DIN 125 / DIN 9021)
+  if (
+    (/^(?:somun|altıköşe\s*somun)\s*m?\d+/i.test(name.trim()) || /гайка.*din\s*934|гайка\s+шестигран/i.test(primaryText)) &&
+    !/низкая|ince|din\s*982|din\s*985|fiber|рым|стяжн|kalıp|kalip|барашк|колпачк|фланц|соединит|uzatma|болт|комплект|komplekt/i.test(primaryText)
+  ) {
+    const mNut = primaryText.match(/\b[mм]\s*(6|8|10|12|14|16|18|20|22|24|27|30)\b/i);
+    if (mNut) {
+      return {
+        materialName: `Altıköşe Çelik Somun (DIN 934) M${mNut[1]}`,
+        category: 'Sarf Malzeme & Hırdavat'
+      };
+    }
+  }
+  if (
+    (/^(?:pul|rondela|geniş\s*pul|düz\s*pul)\s*m?\d+/i.test(name.trim()) || /шайба.*(?:din\s*125|din\s*9021|плоск|увеличен|кузовн)/i.test(primaryText)) &&
+    !/din\s*127|гровер|пружин|yaylı|кровельн|epdm|рым|стяжн|kalıp|болт|комплект|komplekt/i.test(primaryText)
+  ) {
+    const mWasher = primaryText.match(/\b[mм]\s*(6|8|10|12|14|16|18|20|22|24|27|30)\b/i);
+    if (mWasher) {
+      const isWide = /9021|увеличен|кузовн|geniş|şase/i.test(primaryText);
+      return {
+        materialName: isWide
+          ? `Geniş Şase Pul / Rondela (DIN 9021) M${mWasher[1]}`
+          : `Düz Çelik Pul / Rondela (DIN 125) M${mWasher[1]}`,
+        category: 'Sarf Malzeme & Hırdavat'
+      };
+    }
+  }
+
+  // 4. Eğer ürün adında Rusça (Kiril) karakter varsa, teknik ölçülerini koruyarak Türkçe'ye çevir
+  let finalDisplayName = name;
+  if (/[а-яА-ЯёЁ]/.test(finalDisplayName)) {
+    const translated = translateRussianMaterialToTurkish(effectiveOrig || name);
+    if (translated && translated.trim().length > 1) {
+      finalDisplayName = translated.trim();
+    }
   }
 
   // Canonical Category Resolution
-  const resolvedCategory = smartNormalizeCategory(item.category, `${name} ${orig}`);
+  const resolvedCategory = normalizeCategoryName(item.category, `${finalDisplayName} ${orig} ${name}`);
 
-  // 4. Exact catalog match (case-insensitive)
+  // 5. Exact catalog match (case-insensitive)
   if (existingCatalog && existingCatalog.length > 0) {
-    const lowerName = name.toLowerCase();
+    const lowerName = finalDisplayName.toLowerCase();
     const found = existingCatalog.find(catItem => catItem.toLowerCase() === lowerName);
     if (found) {
       return { materialName: found, category: resolvedCategory };
     }
   }
 
-  return { materialName: name, category: resolvedCategory };
+  return { materialName: finalDisplayName, category: resolvedCategory };
 }
 
 function validateAndProcessNegotiationData(body: any, sups: any[], personnelList: any[]): { error?: string; data?: any } {
@@ -2726,9 +3679,27 @@ app.get('/api/discounts', async (req, res) => {
     }
 
     const cleanVendor = normalizeVendorName(dsc.vendorName || dsc.supplier);
+    const rawCat = dsc.category;
+    const itemStrings = (dsc.items || []).map((it: any) => `${it.materialName || ''} ${it.originalName || ''} ${it.category || ''}`).join(' ');
+    const normCategory = normalizeCategoryName(rawCat, `${itemStrings} ${dsc.description || ''} ${dsc.notes || ''} ${cleanVendor}`);
+    let finalCategory = (normCategory && normCategory !== 'Diğer Malzeme' && normCategory !== 'Прочие материалы' && normCategory !== 'Diğer')
+      ? normCategory
+      : (rawCat && rawCat !== 'Diğer Malzeme' && rawCat !== 'Прочие материалы' && rawCat !== 'Diğer' ? rawCat : '');
+
+    if (!finalCategory) {
+      const sLower = cleanVendor.toLowerCase();
+      if (/поинтер|pointer|комус|komus|sitilink|citilink/i.test(sLower)) finalCategory = 'Bilgi İşlem & IT';
+      else if (/петрович|petrovich|дипломат|сателит|satelit/i.test(sLower)) finalCategory = 'Yalıtım & Alçıpan';
+      else if (/всеинструмент|vseinstrumenti|системный специалист/i.test(sLower)) finalCategory = 'El Aletleri & Hırdavat';
+      else if (/бкз|евробетон|росбетон|мосбетон|бетон/i.test(sLower)) finalCategory = 'Hazır Beton, Çimento & Agrega';
+      else if (/армкаркас|сталь|металл|прокат/i.test(sLower)) finalCategory = 'Çelik Malzemeler';
+      else if (/технорум|баумак|профмастер|рока/i.test(sLower)) finalCategory = 'Kalıp & İskele Sistemleri';
+      else finalCategory = 'Sarf Malzeme & Hırdavat';
+    }
 
     return {
       ...rest,
+      category: finalCategory,
       vendorName: cleanVendor,
       supplier: cleanVendor,
       firstOfferFileUrl: cleanFirst,
@@ -2997,7 +3968,13 @@ app.post('/api/discounts', async (req, res) => {
       invoiceNo: toSafeString(req.body.invoiceNo, ''),
       vendorName: cleanVendorName || 'Bilinmeyen Tedarikçi',
       supplier: cleanVendorName || 'Bilinmeyen Tedarikçi',
-      category: toSafeString(req.body.category, 'Genel'),
+      category: (() => {
+        const itemNamesText = (req.body.items || []).map((it: any) => `${it.materialName || ''} ${it.originalName || ''} ${it.category || ''}`).join(' ');
+        const normCatPost = normalizeCategoryName(req.body.category, `${itemNamesText} ${req.body.description || ''} ${cleanVendorName}`);
+        return (normCatPost && normCatPost !== 'Diğer Malzeme' && normCatPost !== 'Прочие материалы' && normCatPost !== 'Diğer')
+          ? normCatPost
+          : (req.body.category && req.body.category !== 'Diğer Malzeme' && req.body.category !== 'Прочие материалы' && req.body.category !== 'Diğer' ? req.body.category : 'Sarf Malzeme & Hırdavat');
+      })(),
       supervisorName,
       performedByPersonnelId: performedByPersonnelId || null,
       performedByPersonnelName: performedByPersonnelName || null,
@@ -3645,6 +4622,9 @@ app.get('/api/materials/compare', async (req, res) => {
     // Build a lookup map of existing invoices for smart deduplication
     const existingInvoicesMap = new Map<string, any>();
     allInvoices.forEach(inv => {
+      if (inv.prizmaDemandId) {
+        existingInvoicesMap.set(`DEMAND_${inv.prizmaDemandId}`, inv);
+      }
       const cleanNo = (inv.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
       const cleanVendor = normalizeVendorName(inv.supplier || inv.vendorName || '');
       if (cleanNo) {
@@ -3663,20 +4643,30 @@ app.get('/api/materials/compare', async (req, res) => {
           const pCleanNo = (pInv.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
           const pCleanVendor = normalizeVendorName(pInv.supplier || pInv.vendorName || '');
 
-          let existingMatch: any = null;
-          if (pCleanNo) {
+          let existingMatch: any = pInv.prizmaDemandId ? existingInvoicesMap.get(`DEMAND_${pInv.prizmaDemandId}`) : null;
+          if (!existingMatch && pCleanNo) {
             existingMatch = existingInvoicesMap.get(`${pCleanVendor}___${pCleanNo}`) || (pCleanNo.length >= 3 ? existingInvoicesMap.get(`NO_${pCleanNo}`) : null);
           }
 
           if (existingMatch) {
-            // MERGE Prizma metadata into existing uploaded local invoice
+            // MERGE Prizma metadata into existing invoice
             existingMatch.prizmaSource = true;
             existingMatch.prizmaRequestCode = pInv.prizmaRequestCode || existingMatch.prizmaRequestCode;
             existingMatch.prizmaOrderCode = pInv.prizmaOrderCode || existingMatch.prizmaOrderCode;
             existingMatch.prizmaBtfUrl = pInv.prizmaBtfUrl || existingMatch.prizmaBtfUrl;
             existingMatch.prizmaStfUrl = pInv.prizmaStfUrl || existingMatch.prizmaStfUrl;
             existingMatch.prizmaUrl = pInv.prizmaBtfUrl || pInv.prizmaUrl || existingMatch.prizmaUrl;
-            if (Array.isArray(existingMatch.items)) {
+            // If existingMatch is an auto-synced Prizma invoice, refresh its items with the latest enriched items from prizmaSyncService
+            if (String(existingMatch.id || '').startsWith('inv_prizma_')) {
+              existingMatch.items = pInv.items.map(it => ({
+                ...it,
+                prizmaRequestCode: pInv.prizmaRequestCode,
+                prizmaOrderCode: pInv.prizmaOrderCode,
+                prizmaBtfUrl: pInv.prizmaBtfUrl,
+                prizmaStfUrl: pInv.prizmaStfUrl,
+                prizmaUrl: pInv.prizmaBtfUrl || pInv.prizmaUrl
+              }));
+            } else if (Array.isArray(existingMatch.items)) {
               existingMatch.items.forEach((it: any) => {
                 it.prizmaRequestCode = pInv.prizmaRequestCode || it.prizmaRequestCode;
                 it.prizmaOrderCode = pInv.prizmaOrderCode || it.prizmaOrderCode;
@@ -3740,8 +4730,157 @@ app.get('/api/materials/compare', async (req, res) => {
     };
 
     // SMART MULTI-UNIT MATERIAL GROUPING & NORMALIZATION ENGINE
-    // Groups materials by canonical identity into a single card per material.
-    // Standardizes benchmark prices so comparisons across jobsites are mathematically apples-to-apples.
+    // Pass 1: Collect all candidate items and all observed units per canonical material
+    const preMaterialMap = new Map<string, {
+      canonName: string;
+      canonCat: string;
+      rawUnits: Set<string>;
+      entries: Array<{
+        inv: any;
+        item: any;
+        priceNum: number;
+        quantity: number;
+        unit: string;
+      }>;
+    }>();
+
+    // Helper: Extract a canonical bridge key from a genuine Russian invoice line (excluding synthetic generated templates & short notes)
+    const getGenuineRussianOrigBridgeKey = (rawOrig?: string, matName?: string): string => {
+      if (!rawOrig) return '';
+      const cleaned = cleanRawMaterialName(unwrapSyntheticPrefixes(String(rawOrig).trim()));
+      if (!cleaned || cleaned.length < 12) return '';
+      if (isShortDrawingOrSpecNote(cleaned)) return '';
+      if (!/[а-яА-ЯёЁ]{5,}/.test(cleaned)) return '';
+      // Reject any synthetic template generated by ensureRussianOriginalName
+      if (/^(?:Арматура рифленая А500С ГОСТ 34028|Сетка сварная арматурная Вр-1|Проволока стальная вязальная ТОЧ|Каркас арматурный сварной|Каркас металлический|Уголок стальной равнополочный ГОСТ 8509|Труба стальная профильная ГОСТ|Труба стальная электросварная ГОСТ|Блок газобетонный стеновой D500|Фанера ламинированная ФОФ для опалубки|Утеплитель каменная вата|Экструдированный пенополистирол|Саморезы по гипсокартону фосфатированные|Ножовка по гипсокартону|Профиль\s*\/\s*подвес для гипсокартона|Гипсокартонный лист|Компрессор воздушный электрический|Эмаль алкидная ПФ-115|Валик малярный с бюгелем|Ершик для унитаза с подставкой|Щетка металлическая зачистная|Черенок деревянный для щетки|Щетка для уборки помещений|Кисть малярная|Пленка стрейч упаковочная|Пленка полиэтиленовая техническая|Тент строительный защитный|Электроды сварочные покрытые|Пропан технический в баллонах|Круг \(диск\) отрезной по металлу|Очиститель монтажной пены профессиональный|Пистолет для монтажной пены профессиональный|Пена монтажная профессиональная под пистолет|Диспенсер для упаковочного скотча|Скотч упаковочный клейкий|Лента малярная креппированная|Перчатки рабочие защитные|Каска строительная защитная|Клипса \(держатель\) для монтажного пистолета|Гвозди строительные ГОСТ|Саморезы строительные оцинкованные|Рым-болт оцинкованный DIN|Болт оцинкованный с шестигранной головкой|Гайка шестигранная оцинкованная DIN|Шайба плоская\s*\/\s*пружинная|Анкерный болт\s*\/\s*шпилька|Хомут кабельный нейлоновый|Наконечник\s*\/\s*гильза кабельная|Кабель силовой медный ВВГнг|Зубило плоское\s*\/\s*пика|Нож строительный сегментный|Запчасть для тепловой пушки|Коронка биметаллическая по металлу|Тачка строительная усиленная|Известь хлорная\s*\/\s*средство|Утеплитель теплоизоляционный минераловатный|Доска магнитно-маркерная офисная|Рулетка измерительная\s*\/\s*уровень|Ключ гаечный комбинированный|Пиломатериал обрезной|Плита ориентированно-стружечная|Бетон товарный БСГ|Цемент портландцемент|Песок строительный карьерный|Щебень гранитный|Кирпич строительный|Смесь сухая ремонтная|Клей плиточный цементный|Грунтовка строительная глубокого|Растворитель технический|Краска строительная водно-дисперсионная|Валик малярный строительный|Шпатель малярный из нержавеющей|Кельма\s*\/\s*гладилка|Герметик силиконовый|Пена монтажная полиуретановая|Гидроизоляция рулонная|Рукав пожарный напорный|Клапан \(вентиль\) пожарный|Труба полипропиленовая\s*\/\s*ПВХ|Кран шаровой латунный|Фитинг соединительный|Хомут трубный стальной|Прокладка уплотнительная сантехническая|Выключатель автоматический модульный|Щит распределительный\s*\/\s*коробка|Розетка электрическая\s*\/\s*вилка|Светильник светодиодный строительный|Электроинструмент\s*\/\s*оснастка|Диск отрезной\s*\/\s*круг|Полотно пильное\s*\/\s*диск|Инструмент слесарно-монтажный|Инвентарь строительный|Емкость\s*\/\s*ведро строительное|Дюбель строительный распорный|Гвозди строительные\s*\/\s*монтажные|Фурнитура дверная|Строп грузоподъемный|Комплектующие опалубки|Жилет сигнальный|Спецобувь защитная|Спецодежда рабочая|Средства индивидуальной защиты|Огнетушитель порошковый|Строительно-монтажный материал|Канцелярские|Оборудование стройплощадки|Хозяйственно-бытовое обеспечение)/i.test(cleaned)) {
+        return '';
+      }
+      // Reject if it contains bracketed or parenthetical Turkish stock card suffixes appended by Prizma
+      if (/\[.*\]$/.test(cleaned)) return '';
+
+      // Normalize Cyrillic 'х' between digits and standardize spacing
+      const normOrig = cleaned
+        .toLowerCase()
+        .replace(/(\d)\s*[,]\s*(\d)/g, '$1.$2')
+        .replace(/(\d)\s*[хХ*×]\s*(\d)/g, '$1x$2')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      // Safety check: if matName has numbers that do NOT appear in normOrig, do not bridge across different sizes!
+      const origNums = new Set((normOrig.match(/\d+(?:\.\d+)?/g) || []));
+      const matClean = (matName || '').toLowerCase().replace(/(\d)\s*[,]\s*(\d)/g, '$1.$2');
+      const matNums = matClean.match(/\d+(?:\.\d+)?/g) || [];
+      for (const n of matNums) {
+        if (!origNums.has(n) && n !== '1' && n !== '10' && n !== '100' && n !== '1000' && n !== '34028' && n !== '8509' && n !== '8639' && n !== '8645' && n !== '23279' && n !== '8486') {
+          return '';
+        }
+      }
+      return normOrig;
+    };
+
+    const scoreTurkishMaterialName = (s: string): number => {
+      if (!s) return -100;
+      let score = 0;
+      // Strongly prefer names without Cyrillic characters
+      if (!/[а-яА-ЯёЁ]/.test(s)) score += 50;
+      else score -= 30;
+      // Prefer mixed-case descriptive Turkish names over ALL-CAPS Prizma stock card codes
+      const letters = s.replace(/[^a-zA-ZğüşıöçĞÜŞİÖÇ]/g, '');
+      if (letters.length > 3 && letters !== letters.toUpperCase()) score += 20;
+      // Prefer names with Turkish characters or clean formatting
+      if (/[ğüşıöçĞÜŞİÖÇ]/.test(s)) score += 10;
+      score += Math.min(s.length, 60) * 0.2;
+      return score;
+    };
+
+    const origBridgeMap = new Map<string, string>();
+
+    allInvoices.forEach(inv => {
+      if (!inv.items || !Array.isArray(inv.items)) return;
+      inv.items.forEach(item => {
+        if (!item.materialName || item.unitPrice === undefined || item.unitPrice === null) return;
+        const priceNum = Number(item.unitPrice);
+        if (isNaN(priceNum) || priceNum <= 0) return;
+
+        // 0. Sipariş/Hizmet özet satırlarını (İndirim sekmesi özetleri ve tedarikçi adı taşıyan paket özetleri) malzeme kıyaslamasına alma
+        const unitLower = String(item.unit || '').toLowerCase().trim();
+        if (
+          unitLower === 'sipariş/hizmet' ||
+          unitLower === 'paket/hizmet' ||
+          unitLower === 'pakethizmet' ||
+          String(item.id || '').startsWith('dsc_') ||
+          /^(?:ооо|ип|ао|зао|пао)\s+["«']?/i.test(String(item.materialName || '').trim())
+        ) {
+          return;
+        }
+
+        const norm = smartNormalizeItem({ ...item, supplier: item.supplier || inv.supplier });
+        let canonName = norm.materialName || item.materialName;
+        const canonCat = normalizeCategoryName(norm.category || item.category, `${canonName} ${item.originalName || ''} ${item.materialName || ''}`);
+        let canonKey = canonName.toLowerCase().trim();
+        const combinedText = `${canonName} ${item.originalName || ''} ${item.materialName || ''}`;
+
+        // 1. Beton Filtresi: (Yalnızca hazır beton / grobeton elenir; çimento, kum, mıcır, kuru harç, şap, yapıştırıcı korunur!)
+        const isReadyMixConcreteItem =
+          (/бетон\s*(?:в\s*\d|b\s*\d|м\s*\d|m\s*\d|товарн|бсг|бст|мелкозерн|гидротехнич)|товарный\s*бетон|hazır\s*beton|hazir\s*beton|\bbeton\s+c\d|\bc\d{2}\/\d{2}\s*beton|grobeton|гробетон|керамзитобетон|бетолюкс|betolux|eurobeton|евробетон|мосбетон|раствор\s+(?:м\s*\d|кладочн|штукатурн|товарн|монтажн|цементн)/i.test(combinedText) &&
+           !/газобетон|gazbeton|пескобетон|peskobeton|бетоноконтакт|betonokontakt|бетоносмесител|бетоновод|бетонолом|бур\s+по|диск|круг|алмазн|коронка|пика|зубило|keski|matkap|пила|testere|саморез|дюбель|анкер|гвозд|крепеж|краск|грунт|растворител|tiner|solvent|сухая\s*смесь|мешок|torba/i.test(combinedText));
+        if (isReadyMixConcreteItem) {
+          return;
+        }
+
+        // 2. Taşeron & Hizmet & İşçilik & Proje Dokümantasyon & Muhtelif Özet Kalem Filtresi
+        if (
+          canonCat === 'Hizmet & Lojistik' ||
+          (/шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставка|перевозк|\bnakliye\b|услуги|лаборатор|оплата\s*гу\b|гарантийн.*удержан|_факт_расходные\s*материалы|korpus.*reviziyon\s*projesi|uygulama\s*projesi|çalışma\s*dokümantasyonu|dokümantasyon.*hizmet|разработк.*документац|исполнительн.*документац|kirtasiye\s*ve\s*ofis\s*malzemeleri\s*muhtelif/i.test(combinedText) &&
+           !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|tamir\s*harc|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел|köpük|kopuk|kutu|buat|bant|dübel|dubel/i.test(combinedText))
+        ) {
+          return;
+        }
+
+        // 3. Genuine Russian OriginalName Bridging:
+        // Eğer iki farklı faturadaki kalemin Rusça orijinal fatura satırı (originalName) birebir aynıysa,
+        // farklı Türkçe çeviriler yüzünden ayrı satırlara bölünmesini engelle!
+        const bridgeKey = getGenuineRussianOrigBridgeKey(item.originalName, item.materialName);
+        if (bridgeKey) {
+          const existingCanonKey = origBridgeMap.get(bridgeKey);
+          if (existingCanonKey && preMaterialMap.has(existingCanonKey)) {
+            const existingGroup = preMaterialMap.get(existingCanonKey)!;
+            if (scoreTurkishMaterialName(canonName) > scoreTurkishMaterialName(existingGroup.canonName)) {
+              existingGroup.canonName = canonName;
+              existingGroup.canonCat = normalizeCategoryName(canonCat, `${canonName} ${item.originalName || ''}`);
+            }
+            canonKey = existingCanonKey;
+          } else {
+            origBridgeMap.set(bridgeKey, canonKey);
+          }
+        }
+
+        if (!preMaterialMap.has(canonKey)) {
+          preMaterialMap.set(canonKey, {
+            canonName,
+            canonCat,
+            rawUnits: new Set<string>(),
+            entries: []
+          });
+        } else {
+          const grp = preMaterialMap.get(canonKey)!;
+          if (scoreTurkishMaterialName(canonName) > scoreTurkishMaterialName(grp.canonName)) {
+            grp.canonName = canonName;
+          }
+        }
+        const preGroup = preMaterialMap.get(canonKey)!;
+        preGroup.rawUnits.add(item.unit || 'Adet');
+        preGroup.entries.push({
+          inv,
+          item,
+          priceNum,
+          quantity: Number(item.quantity) || 1,
+          unit: item.unit || 'Adet'
+        });
+      });
+    });
+
+    // Pass 2: Resolve benchmark unit using ALL units seen for that material and split only truly incompatible physical dimensions
     const materialMap = new Map<string, {
       materialName: string;
       category: string;
@@ -3755,50 +4894,39 @@ app.get('/api/materials/compare', async (req, res) => {
       }>;
     }>();
 
-    allInvoices.forEach(inv => {
-      if (!inv.items || !Array.isArray(inv.items)) return;
-      inv.items.forEach(item => {
-        if (!item.materialName || item.unitPrice === undefined || item.unitPrice === null) return;
-        const priceNum = Number(item.unitPrice);
-        if (isNaN(priceNum) || priceNum <= 0) return;
+    preMaterialMap.forEach((preGroup, canonKey) => {
+      const allGroupUnits = Array.from(preGroup.rawUnits);
+      const benchmarkUnit = getMaterialBenchmarkUnit(preGroup.canonName, preGroup.canonCat, allGroupUnits);
+      const benchUnitNorm = normalizeStandardUnit(benchmarkUnit);
 
-        const norm = smartNormalizeItem({ ...item, supplier: item.supplier || inv.supplier });
-        const canonName = norm.materialName || item.materialName;
-        const canonCat = normalizeCategoryName(norm.category || item.category, canonName);
-        const canonKey = canonName.toLowerCase().trim();
+      preGroup.entries.forEach(({ inv, item, priceNum, quantity, unit }) => {
+        const itemUnitNorm = normalizeStandardUnit(unit);
+        const testConv = convertMaterialUnit({
+          materialName: preGroup.canonName,
+          category: preGroup.canonCat,
+          rawItemName: `${item.originalName || ''} ${item.materialName || ''}`.trim(),
+          fromUnit: unit,
+          toUnit: benchmarkUnit,
+          unitPrice: priceNum,
+          quantity
+        });
+        const isCompatibleWithBenchmark = (itemUnitNorm === benchUnitNorm) || testConv.conversionApplied;
 
-        // 1. Beton Filtresi: ("ilave olarak betonlarida etmeyelim, sistem siser cunku betona gerek yok")
-        if (/beton|бетон|раствор|grobeton|гробетон|бсг|бст|керамзитобетон/i.test(canonCat) || /beton|бетон|раствор|grobeton|гробетон/i.test(canonName)) {
-          return;
-        }
-
-        // 2. Taşeron & Hizmet & İşçilik Filtresi
-        if (canonCat === 'Hizmet & Lojistik' || /шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставка|перевозк|nakliye/i.test(canonName)) {
-          return;
-        }
-
-        // KESİN KURAL: Her standart malzeme KENDİ canonKey çatısı altında toplanmalıdır!
-        // Tüm şantiyelerin aynı malzemeyi kaça aldığı TEK bir kartta birleşmelidir.
-        const targetKey = canonKey;
+        const targetKey = isCompatibleWithBenchmark ? canonKey : `${canonKey}__${itemUnitNorm}`;
+        const displayMaterialName = isCompatibleWithBenchmark ? preGroup.canonName : `${preGroup.canonName} (${unit || itemUnitNorm})`;
 
         if (!materialMap.has(targetKey)) {
           materialMap.set(targetKey, {
-            materialName: canonName,
-            category: canonCat,
+            materialName: displayMaterialName,
+            category: preGroup.canonCat,
             rawUnits: new Set<string>(),
             items: []
           });
         }
 
         const entry = materialMap.get(targetKey)!;
-        entry.rawUnits.add(item.unit || 'Adet');
-        entry.items.push({
-          inv,
-          item,
-          priceNum,
-          quantity: Number(item.quantity) || 1,
-          unit: item.unit || 'Adet'
-        });
+        entry.rawUnits.add(unit);
+        entry.items.push({ inv, item, priceNum, quantity, unit });
       });
     });
 
@@ -3807,17 +4935,29 @@ app.get('/api/materials/compare', async (req, res) => {
       if (matGroup.items.length === 0) return;
 
       const rawUnitsList = Array.from(matGroup.rawUnits);
-      const benchmarkUnit = getMaterialBenchmarkUnit(matGroup.materialName, matGroup.category, rawUnitsList);
+      const benchmarkUnit = groupKey.includes('__')
+        ? normalizeStandardUnit(rawUnitsList[0] || 'Adet')
+        : getMaterialBenchmarkUnit(matGroup.materialName, matGroup.category, rawUnitsList);
 
       const history: any[] = [];
       let totalNormalizedSpend = 0;
       let totalNormalizedQuantity = 0;
+      const seenInvoiceItemKeys = new Set<string>();
 
       matGroup.items.forEach(({ inv, item, priceNum, quantity, unit }) => {
+        // Deduplicate identical invoice line (same vendor + core invoiceNumber + price + quantity) so synced Prizma + local invoice (e.g. "КА-77845" vs "77845") never double-count
+        const coreInvNo = String(inv.invoiceNumber || '')
+          .toLowerCase()
+          .replace(/^(?:ка|ут|цб|рн|сч|ту|nf|ft|prz)[\s_-]*0*/i, '')
+          .replace(/[^a-z0-9а-яё]/gi, '');
+        const dedupKey = `${normalizeVendorName(inv.supplier || '')}__${coreInvNo}__${priceNum.toFixed(2)}__${quantity}`;
+        if (coreInvNo && seenInvoiceItemKeys.has(dedupKey)) return;
+        if (coreInvNo) seenInvoiceItemKeys.add(dedupKey);
+
         const conv = convertMaterialUnit({
           materialName: matGroup.materialName,
           category: matGroup.category,
-          rawItemName: item.originalName || item.materialName || '',
+          rawItemName: `${item.originalName || ''} ${item.materialName || ''}`.trim(),
           fromUnit: unit,
           toUnit: benchmarkUnit,
           unitPrice: priceNum,
@@ -3849,7 +4989,7 @@ app.get('/api/materials/compare', async (req, res) => {
           conversionFormula: conv.formula,
           conversionFactor: conv.factor,
           invoiceNumber: inv.invoiceNumber,
-          originalName: item.originalName || item.materialName,
+          originalName: ensureRussianOriginalName(matGroup.materialName, item.originalName || item.materialName),
           invoiceId: inv.id,
           rawFileName: inv.rawFileName,
           fileUrl: inv.fileUrl,
@@ -3861,6 +5001,8 @@ app.get('/api/materials/compare', async (req, res) => {
           prizmaUrl: inv.prizmaBtfUrl || inv.prizmaUrl || item.prizmaBtfUrl || item.prizmaUrl
         });
       });
+
+      if (history.length === 0) return;
 
       const normalizedPrices = history.map(h => h.unitPrice);
       const minUnitPrice = Math.min(...normalizedPrices);
@@ -4860,6 +6002,14 @@ app.put('/api/discounts/:id', async (req, res) => {
       };
     }
 
+    if (updateData.category) {
+      const itemNamesText = (updateData.items || []).map((it: any) => `${it.materialName || ''} ${it.originalName || ''} ${it.category || ''}`).join(' ');
+      const normCatPut = normalizeCategoryName(updateData.category, `${itemNamesText} ${updateData.description || ''} ${updateData.vendorName || ''}`);
+      if (normCatPut && normCatPut !== 'Diğer Malzeme' && normCatPut !== 'Прочие материалы' && normCatPut !== 'Diğer') {
+        updateData.category = normCatPut;
+      }
+    }
+
     // Now update Firestore safely without overwriting missing fields with 0
     await setDoc(doc(db, 'discounts', discId), updateData, { merge: true });
 
@@ -5316,6 +6466,7 @@ app.delete('/api/invoices/:id/permanent', async (req, res) => {
       invoiceNumber: invData.invoiceNumber || null,
       totalAmount: invData.totalAmount || null,
       supplier: invData.supplier || null,
+      prizmaDemandId: invData.prizmaDemandId || null,
       deletedFiles,
       missingFiles,
       sharedFilesKept: sharedFiles,
@@ -5342,8 +6493,9 @@ app.delete('/api/invoices/:id/permanent', async (req, res) => {
     const newDscs = localDscs.filter((d: any) => !deletedRecords.includes(d.id));
     saveLocalBackup('discounts.json', newDscs);
 
-    memoryStore.invoices = null;
-    memoryStore.discounts = null;
+    memoryStore.invoices = undefined;
+    memoryStore.discounts = undefined;
+    memoryStore.deletionLedger = undefined;
 
     return res.json({
       success: true,
@@ -5546,8 +6698,9 @@ app.delete('/api/discounts/:id/permanent', async (req, res) => {
     const newInvs = localInvs.filter((i: any) => !deletedRecords.includes(i.id));
     saveLocalBackup('invoices.json', newInvs);
 
-    memoryStore.invoices = null;
-    memoryStore.discounts = null;
+    memoryStore.invoices = undefined;
+    memoryStore.discounts = undefined;
+    memoryStore.deletionLedger = undefined;
 
     return res.json({
       success: true,
@@ -5730,6 +6883,11 @@ app.delete(['/api/invoices/trash/orphan-cleaner', '/api/invoices/trash/empty', '
           await setDoc(doc(db, 'deletion_ledger', inv.id), {
             collection: 'invoices',
             documentId: inv.id,
+            invoiceNumber: inv.invoiceNumber || null,
+            supplier: inv.supplier || inv.vendorName || null,
+            totalAmount: inv.totalAmount || null,
+            prizmaDemandId: inv.prizmaDemandId || null,
+            linkedDiscountId: inv.discountId || null,
             deletedAt: new Date().toISOString(),
             deletedBy: adminId,
             reason: 'empty_trash'
@@ -5758,18 +6916,36 @@ app.delete(['/api/invoices/trash/orphan-cleaner', '/api/invoices/trash/empty', '
             }
           }
         }
-        // 2. Firestore document
+        // 2. Firestore document & synced invoice
+        const syncInvId = `inv_sync_${dsc.id}`;
         if (db) {
           await deleteDoc(doc(db, 'discounts', dsc.id));
+          await deleteDoc(doc(db, 'invoices', syncInvId)).catch(() => {});
           await setDoc(doc(db, 'deletion_ledger', dsc.id), {
             collection: 'discounts',
             documentId: dsc.id,
+            invoiceNo: dsc.invoiceNo || null,
+            vendorName: dsc.vendorName || dsc.supplier || null,
+            agreedPrice: dsc.agreedPrice || null,
+            linkedInvoiceId: syncInvId,
             deletedAt: new Date().toISOString(),
             deletedBy: adminId,
             reason: 'empty_trash'
           });
+          await setDoc(doc(db, 'deletion_ledger', syncInvId), {
+            collection: 'invoices',
+            documentId: syncInvId,
+            invoiceNumber: dsc.invoiceNo || null,
+            supplier: dsc.vendorName || dsc.supplier || null,
+            totalAmount: dsc.agreedPrice || null,
+            linkedDiscountId: dsc.id,
+            deletedAt: new Date().toISOString(),
+            deletedBy: adminId,
+            reason: 'empty_trash'
+          }).catch(() => {});
         }
         deletedRecords.push(dsc.id);
+        deletedRecords.push(syncInvId);
       } catch (e: any) {
         failedRecords.push(dsc.id);
         failures.push(e.message);
@@ -5785,8 +6961,9 @@ app.delete(['/api/invoices/trash/orphan-cleaner', '/api/invoices/trash/empty', '
       const newDscs = localDscs.filter((d: any) => !deletedRecords.includes(d.id));
       saveLocalBackup('discounts.json', newDscs);
 
-      memoryStore.invoices = null;
-      memoryStore.discounts = null;
+      memoryStore.invoices = undefined;
+      memoryStore.discounts = undefined;
+      memoryStore.deletionLedger = undefined;
     }
 
     res.json({
@@ -5993,6 +7170,13 @@ async function createNightlyBackup() {
     });
     await syncSnapshotToCloud(db, bucket, meta);
     firestoreSnapshotId = meta.id;
+    await setDoc(doc(db, 'system_stats', 'daily_counts'), {
+      invoices: backupData.stats.invoices,
+      discounts: backupData.stats.discounts,
+      total: backupData.stats.invoices + backupData.stats.discounts,
+      date: now.toISOString(),
+      updatedAt: now.toISOString()
+    }, { merge: true }).catch(() => {});
   } catch (snapErr: any) {
     console.warn(`[NIGHTLY BACKUP FIRESTORE WARN]: ${snapErr.message}`);
   }
@@ -6018,7 +7202,7 @@ async function createNightlyBackup() {
   };
 }
 
-// PRIZMA OTOMATİK ENTEGRASYON VE ÇİFT KAYIT KORUMALI VERİTABANI İÇE AKTARIMI
+// PRIZMA OTOMATİK ENTEGRASYON VE ÇİFT KAYIT / SİLİNEN FATURA HORTLAMA KORUMALI VERİTABANI İÇE AKTARIMI
 export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<{
   success: boolean;
   addedCount: number;
@@ -6043,15 +7227,19 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
     };
   }
 
-  const { data: curInvs } = await getInvoicesCached();
-  const existingInvoices = (curInvs || []).filter((i: any) => !i.isDeleted && !i.isPermanentlyDeleted);
+  // Anti-Hortlama Koruması: Hem aktif hem çöp kutusundaki (isDeleted) hem de kalıcı silinen (deletion_ledger) kayıtları kontrol et!
+  const [invSnap, ledger] = await Promise.all([
+    getDocs(collection(dbInstance, 'invoices')),
+    getDeletionLedgerCached()
+  ]);
+  const allDbInvoices = invSnap.docs.map(d => ({ id: d.id, ...d.data() as any }));
 
   const byPrizmaDemandId = new Map<number, any>();
   const byVendorAndNo = new Map<string, any>();
   const byInvoiceNo = new Map<string, any>();
   const byVendorDateAmount = new Map<string, any>();
 
-  existingInvoices.forEach(inv => {
+  allDbInvoices.forEach(inv => {
     if (inv.prizmaDemandId) byPrizmaDemandId.set(Number(inv.prizmaDemandId), inv);
     const cleanNo = String(inv.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
     const cleanVendor = normalizeVendorName(inv.supplier || inv.vendorName || '');
@@ -6096,14 +7284,30 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
     const pAmt = Math.round(Number(pInv.totalAmount) || 0);
     const pDate = String(pInv.date || '').split('T')[0];
     const pDemandId = Number(pInv.prizmaDemandId);
+    const candidateId = `inv_prizma_${pInv.prizmaDemandId}`;
 
-    // Check for duplicate / existing match
+    // Kalıcı olarak silinmişse (deletion_ledger) asla geri getirme / hortlatma!
+    if (
+      ledger.ids.has(candidateId) ||
+      (pDemandId && ledger.prizmaIds.has(pDemandId)) ||
+      (pCleanNo && pCleanVendor && ledger.invoiceKeys.has(`${pCleanVendor}___${pCleanNo}`))
+    ) {
+      skippedCount++;
+      continue;
+    }
+
+    // Check for duplicate / existing match (including soft-deleted records in trash)
     let match = (pDemandId ? byPrizmaDemandId.get(pDemandId) : null) ||
       (pCleanNo && pCleanVendor ? byVendorAndNo.get(`${pCleanVendor}___${pCleanNo}`) : null) ||
       (pCleanNo && pCleanNo.length >= 4 ? byInvoiceNo.get(pCleanNo) : null) ||
       (pCleanVendor && pDate && pAmt > 0 ? byVendorDateAmount.get(`${pCleanVendor}___${pDate}___${pAmt}`) : null);
 
     if (match) {
+      // Çöp kutusundaysa (isDeleted) veya kalıcı silinmişse dokunma ve hortlatma!
+      if (match.isDeleted || match.isPermanentlyDeleted || ledger.ids.has(match.id)) {
+        skippedCount++;
+        continue;
+      }
       // ENRICH existing invoice with Prizma metadata without creating duplicate
       const enrichPayload: any = {
         prizmaSource: true,
@@ -6117,6 +7321,31 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
         prizmaStatus: pInv.prizmaStatus || match.prizmaStatus || null,
         supplierInn: pInv.supplierInn || match.supplierInn || null
       };
+      // If it is a Prizma-created invoice record (inv_prizma_*), also refresh its normalized items and category
+      if (String(match.id || '').startsWith('inv_prizma_')) {
+        const refreshedItems = (pInv.items || []).map((it: any) => {
+          const norm = smartNormalizeItem({ ...it, supplier: pInv.supplier });
+          const cat = normalizeCategoryName(norm.category || it.category, norm.materialName || it.materialName);
+          return {
+            id: it.id || `item_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            materialName: norm.materialName || it.materialName,
+            originalName: it.originalName || it.materialName,
+            materialCode: it.materialCode || null,
+            quantity: Number(it.quantity) || 1,
+            unit: it.unit || 'Adet',
+            unitPrice: Number(it.unitPrice) || 0,
+            totalPrice: Number(it.totalPrice) || 0,
+            category: cat,
+            prizmaRequestCode: pInv.prizmaRequestCode,
+            prizmaOrderCode: pInv.prizmaOrderCode,
+            prizmaBtfUrl: pInv.prizmaBtfUrl,
+            prizmaStfUrl: pInv.prizmaStfUrl,
+            prizmaUrl: pInv.prizmaBtfUrl || pInv.prizmaUrl
+          };
+        });
+        enrichPayload.items = refreshedItems;
+        enrichPayload.category = pInv.category || (refreshedItems[0]?.category) || match.category;
+      }
       updatesToSave.push({ id: match.id, payload: enrichPayload });
       enrichedCount++;
     } else {
@@ -6290,7 +7519,7 @@ app.use('/api/comparative-analyses', (req, res, next) => {
   if (!['admin','supervisor','personnel'].includes(role)) return res.status(403).json({error: 'Bu işlem için oturum açmalısınız.'});
   next();
 });
-// 1. List all analyses
+// 1. List all analyses (with automatic deduplication & smart recalculation of dip-price baseline)
 app.get('/api/comparative-analyses', async (req, res) => {
   try {
     if (db) {
@@ -6298,7 +7527,7 @@ app.get('/api/comparative-analyses', async (req, res) => {
         const snap = await getDocs(collection(db, 'comparative_analyses'));
         snap.forEach((docSnap: any) => {
           const data = docSnap.data();
-          if (data && data.id && !comparativeAnalysesStore.has(data.id)) {
+          if (data && data.id) {
             comparativeAnalysesStore.set(data.id, data);
           }
         });
@@ -6306,9 +7535,67 @@ app.get('/api/comparative-analyses', async (req, res) => {
         console.warn('[FIRESTORE COMPARATIVE READ WARN]:', err.message);
       }
     }
-    const all = Array.from(comparativeAnalysesStore.values()).filter(a => !a.isDeleted);
-    all.sort((a, b) => new Date(b.created_at || '').getTime() - new Date(a.created_at || '').getTime());
-    res.json(all);
+    const rawAll = Array.from(comparativeAnalysesStore.values()).filter(a => !a.isDeleted);
+    rawAll.sort((a, b) => new Date(b.created_at || '').getTime() - new Date(a.created_at || '').getTime());
+
+    // Deduplicate identical TDF analyses (same winning supplier + final purchase amount + final invoice number)
+    const seenFingerprints = new Set<string>();
+    const uniqueAnalyses: any[] = [];
+    const duplicateIdsToDelete: string[] = [];
+
+    for (const rawRec of rawAll) {
+      const rec = recalculateComparativeAnalysis(rawRec);
+      const winSup = normalizeVendorName(rec.winningSupplier || rec.finalInvoiceDetails?.supplier || '');
+      const finalAmt = Math.round(Number(rec.totalFinalPurchase || rec.summary?.totalFinalPurchase || 0));
+      const invNo = String(rec.finalInvoiceDetails?.invoiceNumber || rec.summary?.finalInvoiceNumber || '').trim().toLowerCase();
+      const fingerprint = `${winSup}___${finalAmt}___${invNo}`;
+
+      if (winSup && finalAmt > 0 && seenFingerprints.has(fingerprint)) {
+        rec.isDeleted = true;
+        comparativeAnalysesStore.set(rec.id, rec);
+        duplicateIdsToDelete.push(rec.id);
+        continue;
+      }
+      if (winSup && finalAmt > 0) {
+        seenFingerprints.add(fingerprint);
+      }
+      uniqueAnalyses.push(rec);
+    }
+
+    // Persist deduplication & recalculated dip-price baseline (e.g. Komus 715,000.52 -> SAM 712,800 = 2,200.52 savings) to Firestore asynchronously
+    if (db && (duplicateIdsToDelete.length > 0 || uniqueAnalyses.length > 0)) {
+      Promise.resolve().then(async () => {
+        try {
+          for (const dupId of duplicateIdsToDelete) {
+            await updateDoc(doc(db, 'comparative_analyses', dupId), { isDeleted: true, deletedAt: new Date().toISOString() }).catch(() => {});
+          }
+          for (const uRec of uniqueAnalyses) {
+            await setDoc(doc(db, 'comparative_analyses', uRec.id), cleanComparativeData(uRec), { merge: true }).catch(() => {});
+            if (uRec.associatedDiscountId) {
+              const { data: dscs } = await getDiscountsCached();
+              const linkedD = (dscs || []).find((d: any) => d.id === uRec.associatedDiscountId);
+              if (linkedD && (Math.abs((linkedD.offerPrice || 0) - uRec.totalInitialLowestOffer) > 0.01 || Math.abs((linkedD.discountAmount || 0) - uRec.realMarketSavings) > 0.01)) {
+                const updatedFields = {
+                  offerPrice: uRec.totalInitialLowestOffer,
+                  marketReferencePrice: uRec.totalInitialLowestOffer,
+                  agreedPrice: uRec.totalFinalPurchase,
+                  discountAmount: uRec.realMarketSavings,
+                  realMarketSavings: uRec.realMarketSavings,
+                  discountPercentage: uRec.realSavingsRate,
+                  realSavingsPercentage: uRec.realSavingsRate,
+                  internalVendorDiscount: uRec.internalVendorSavings,
+                  notes: `Karşılaştırmalı Analiz #${uRec.analysisCode}. Kazanan Tedarikçi (Son Fatura): ${uRec.winningSupplier} (Fatura No: ${uRec.finalInvoiceDetails?.invoiceNumber || '-'}). Piyasadaki en düşük ilk teklif referansı: ${uRec.totalInitialLowestOffer.toLocaleString('tr-TR')} ₽ (${uRec.summary?.lowestInitialOfferSupplier || 'Piyasa'}). Gerçek Piyasa Tasarrufu: ${uRec.realMarketSavings.toLocaleString('tr-TR')} ₽ (%${uRec.realSavingsRate}).`
+                };
+                await updateDoc(doc(db, 'discounts', linkedD.id), cleanComparativeData(updatedFields)).catch(() => {});
+                memoryStore.discounts = null;
+              }
+            }
+          }
+        } catch (_) {}
+      });
+    }
+
+    res.json(uniqueAnalyses);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -6323,11 +7610,11 @@ app.get('/api/comparative-analyses/:id', async (req, res) => {
       const snap = await getDoc(doc(db, 'comparative_analyses', id));
       if (snap.exists()) {
         record = snap.data() as any;
-        comparativeAnalysesStore.set(id, record);
+        comparativeAnalysesStore.set(id, record!);
       }
     }
     if (!record) return res.status(404).json({ error: 'Analiz bulunamadı' });
-    res.json(record);
+    res.json(recalculateComparativeAnalysis(record));
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -6450,10 +7737,13 @@ app.post('/api/comparative-analyses/process', async (req, res) => {
 // 4. Save and commit approved comparative analysis
 app.post('/api/comparative-analyses/save', async (req, res) => {
   try {
-    const analysisData = req.body;
+    let analysisData = req.body;
     if (!analysisData || !analysisData.id) {
       return res.status(400).json({ error: 'Geçersiz analiz verisi.' });
     }
+
+    // Recalculate dip-price baseline and unit conversions before saving
+    analysisData = recalculateComparativeAnalysis(analysisData);
 
     // Validation: Require FINAL_INVOICE, FIRST_OFFER, valid vendor, jobsite, supervisor, positive amount, and valid items
     const finalDoc = (analysisData.documents || []).find((d: any) => !d.isExcluded && (d.documentRole === 'FINAL_INVOICE' || d.documentRole === 'FINAL_OFFER')) || analysisData.documents?.[analysisData.documents?.length - 1];
@@ -6470,6 +7760,21 @@ app.post('/api/comparative-analyses/save', async (req, res) => {
     const finalSupplier = (finalDoc?.supplier || analysisData.winningSupplier || '').trim();
     if (!finalSupplier || ['Seçilen Tedarikçi', 'Bilinmeyen Tedarikçi', 'Tedarikçi Firma', 'Tedarikçi'].includes(finalSupplier)) {
       missingFields.push('Geçerli Nihai Tedarikçi Adı');
+    }
+
+    // Prevent duplicate TDF records for the same supplier + invoiceNumber + finalPrice: reuse existing ID if found
+    const checkInvNo = String(finalDoc?.documentNumber || analysisData.summary?.finalInvoiceNumber || '').trim().toLowerCase();
+    const checkFinalAmt = Math.round(Number(analysisData.summary?.finalPurchaseAmount || analysisData.totalFinalPurchase || 0));
+    const existingDuplicateAnalysis = Array.from(comparativeAnalysesStore.values()).find((ex: any) =>
+      !ex.isDeleted &&
+      ex.id !== analysisData.id &&
+      areVendorsEqual(ex.winningSupplier || ex.finalInvoiceDetails?.supplier, finalSupplier) &&
+      Math.round(Number(ex.totalFinalPurchase || ex.summary?.totalFinalPurchase || 0)) === checkFinalAmt &&
+      (!checkInvNo || String(ex.finalInvoiceDetails?.invoiceNumber || ex.summary?.finalInvoiceNumber || '').trim().toLowerCase() === checkInvNo)
+    );
+    if (existingDuplicateAnalysis) {
+      analysisData.id = existingDuplicateAnalysis.id;
+      analysisData.analysisCode = existingDuplicateAnalysis.analysisCode || analysisData.analysisCode;
     }
 
     if (!analysisData.jobsiteId || !analysisData.jobsiteName || analysisData.jobsiteName.trim() === 'Bilinmeyen Şantiye') {
@@ -7730,7 +9035,24 @@ async function startServer() {
 
   app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server listening on port ${PORT}`);
-    console.log(`🔥 Veritabanı: FIRESTORE (Admin SDK) | Dosya Sunucusu: LOCAL FILESYSTEM`);
+    console.log(`🔥 Veritabanı: FIRESTORE (Web SDK) | Dosya Sunucusu: GCS (${PRIMARY_GCS_BUCKET}) + FIRESTORE`);
+
+    // Sunucu başlangıcında bugünün bulut yedeği yoksa arka planda otomatik yedek al ve doğrula
+    setTimeout(async () => {
+      try {
+        if (!bucket || !db) return;
+        const todayStr = new Date().toISOString().split('T')[0];
+        const todayBackupRef = bucket.file(`sistem-yedekleri/daily/backup-${todayStr}.json`);
+        const [exists] = await todayBackupRef.exists();
+        if (!exists) {
+          console.log(`[STARTUP AUTO-BACKUP] Bugünün (${todayStr}) bulut yedeği bulunamadı, otomatik yedekleme başlatılıyor...`);
+          const res = await createNightlyBackup();
+          console.log('[STARTUP AUTO-BACKUP COMPLETE]:', res.stats);
+        }
+      } catch (err: any) {
+        console.warn('[STARTUP AUTO-BACKUP WARN]:', err.message);
+      }
+    }, 8000);
   });
 }
 

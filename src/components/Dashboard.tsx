@@ -22,6 +22,7 @@ import {
   DashboardFilterState,
   DateRangePreset,
   dedupeSyncedInvoices,
+  isPrizmaAutoSyncedInvoice,
   getDateRangeBounds,
   getPreviousPeriodBounds,
   filterInvoices,
@@ -254,10 +255,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [backupSuccessMessage, setBackupSuccessMessage] = useState<string | null>(null);
 
   // Full transparent visibility across all roles (Admin, Supervisor, Personnel) to foster healthy team competition
+  // Only include GES platform invoices (Yeni Satınalma İndirim Girişi, 1M+ ₽ TDF, AI Fatura / Çek Okuma); exclude Prizma reference invoices
   const effectiveInvoices = useMemo(() => {
     const validInvoices = invoices.filter(i => 
       !i.isDeleted && 
       !i.isPermanentlyDeleted && 
+      !isPrizmaAutoSyncedInvoice(i) &&
       (i.supplier || (i.items && i.items.length > 0) || i.totalAmount > 0)
     );
     return dedupeSyncedInvoices(validInvoices, discounts);
@@ -1335,7 +1338,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     %{kpiStats.spendChangePercentage}
                   </span>
                 )}
-                <span className="text-slate-400 text-[11px]">önceki döneme göre</span>
+                <span className="text-slate-400 text-[11px]" title="Yalnızca İndirim Girişi, 1M+ ₽ TDF ve AI Fatura Okuma modüllerinden girilen faturalar dahildir (Prizma arşiv referansları hariç)">GES modülleri (Prizma hariç)</span>
               </div>
             </div>
           </div>

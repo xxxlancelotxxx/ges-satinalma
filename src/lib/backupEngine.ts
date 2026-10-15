@@ -533,13 +533,9 @@ async function isGcsBucketAvailable(bucket: any): Promise<boolean> {
   if (!bucket || gcsBucketUnavailable) return false;
   if (gcsBucketVerified) return true;
   try {
-    const [exists] = await bucket.exists();
-    if (exists) {
-      gcsBucketVerified = true;
-      return true;
-    }
-    gcsBucketUnavailable = true;
-    return false;
+    await bucket.getFiles({ maxResults: 1 });
+    gcsBucketVerified = true;
+    return true;
   } catch {
     gcsBucketUnavailable = true;
     return false;

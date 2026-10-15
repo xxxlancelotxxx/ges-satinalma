@@ -417,8 +417,12 @@ export async function processComparativeAnalysisBatch(
             { description: cand.originalName, specs: candSpecs }
           );
 
-          if (matchResult.score > bestScore) {
-            bestScore = matchResult.score;
+          const effectiveScore = (agreedDoc.items.length === 1 && otherDoc.items.length === 1 && matchResult.score >= 0.40)
+            ? Math.max(matchResult.score, 0.88)
+            : matchResult.score;
+
+          if (effectiveScore > bestScore) {
+            bestScore = effectiveScore;
             bestCand = cand;
             bestCandIdx = candIdx;
             bestReason = matchResult.reason;
@@ -433,7 +437,9 @@ export async function processComparativeAnalysisBatch(
             cand.quantity,
             cand.unitPrice,
             cand.unit,
-            standardUnit
+            standardUnit,
+            `${cand.originalName || ''} ${agreedItem.originalName || ''}`.trim(),
+            cand.category || agreedType
           );
           const { normalizedPrice: candVatNorm } = normalizeVatPrice(
             candNorm.normalizedUnitPrice,
@@ -788,3 +794,130 @@ export function learnApprovedSynonyms(materials: CanonicalMaterial[], approvedBy
     }
   }
 }
+
+export function recalculateComparativeAnalysis(
+  record: ComparativeAnalysisRecord,
+  userId = 'system',
+  userName = 'Sistem',
+  actionNote = 'Otomatik yeniden hesaplama ve birim normalizasyonu'
+): ComparativeAnalysisRecord {
+  const activeDocs = (record.documents || []).filter(d => !d.isExcluded);
+  const finalDoc = activeDocs.find(d => d.documentRole === 'FINAL_INVOICE' || d.documentRole === 'FINAL_OFFER') || activeDocs[activeDocs.length - 1];
+  const winningSupplierName = finalDoc?.supplier || record.winningSupplier || '';
+
+  if (finalDoc && Array.isArray(record.canonicalMaterials) && record.canonicalMaterials.length > 0) {
+    const otherDocs = activeDocs.filter(d => d.id !== finalDoc.id);
+    record.canonicalMaterials = record.canonicalMaterials.map((mat, idx) => {
+      const existingLines = Array.isArray(mat.lines) ? [...mat.lines] : [];
+      const standardUnit = normalizeUnit(mat.standardUnit || finalDoc.items?.[idx]?.unit || 'adet');
+      const agreedDesc = finalDoc.items?.[idx]?.originalName || mat.commonName || mat.canonicalName || '';
+      const agreedSpecs = extractTechnicalSpecs(agreedDesc);
+      const agreedType = mat.materialType || detectMaterialType(agreedDesc);
+
+      otherDocs.forEach(otherDoc => {
+        const alreadyHasDoc = existingLines.some(l => l.documentId === otherDoc.id);
+        if (alreadyHasDoc || !Array.isArray(otherDoc.items) || otherDoc.items.length === 0) return;
+
+        let bestCand: ComparativeDocumentItem | null = null;
+        let bestScore = -1;
+        let bestReason = '';
+
+        otherDoc.items.forEach((cand) => {
+          const candSpecs = extractTechnicalSpecs(cand.originalName);
+          const matchResult = calculateMatchScore(
+            { description: agreedDesc, specs: agreedSpecs },
+            { description: cand.originalName, specs: candSpecs }
+          );
+          const effectiveScore = (record.canonicalMaterials.length === 1 && otherDoc.items.length === 1 && matchResult.score >= 0.40)
+            ? Math.max(matchResult.score, 0.88)
+            : matchResult.score;
+          if (effectiveScore > bestScore) {
+            bestScore = effectiveScore;
+            bestCand = cand;
+            bestReason = matchResult.reason;
+          }
+        });
+
+        if (bestCand && bestScore >= 0.55) {
+          const cand = bestCand as ComparativeDocumentItem;
+          const candNorm = normalizeQuantityAndPrice(
+            cand.quantity,
+            cand.unitPrice,
+            cand.unit,
+            standardUnit,
+            `${cand.originalName || ''} ${agreedDesc}`.trim(),
+            cand.category || agreedType
+          );
+          const { normalizedPrice: candVatNorm } = normalizeVatPrice(
+            candNorm.normalizedUnitPrice,
+            otherDoc.isVatIncluded,
+            true
+          );
+          existingLines.push({
+            documentId: otherDoc.id,
+            documentRole: otherDoc.documentRole,
+            supplierName: otherDoc.supplier,
+            originalDescription: cand.originalName,
+            quantity: cand.quantity,
+            unit: cand.unit,
+            normalizedQuantity: candNorm.normalizedQty,
+            normalizedUnit: standardUnit,
+            rawUnitPrice: cand.unitPrice,
+            normalizedUnitPrice: candVatNorm,
+            totalPrice: cand.totalPrice,
+            isVatIncluded: otherDoc.isVatIncluded,
+            matchConfidence: bestScore,
+            matchReason: bestReason,
+            isApprovedByUser: bestScore >= 0.85,
+            lineIndex: existingLines.length,
+            isCompetitor: otherDoc.supplier !== winningSupplierName,
+            isInitialOffer: otherDoc.documentRole === 'FIRST_OFFER' || otherDoc.documentRole === 'COMPETITOR_FIRST_OFFER'
+          });
+        }
+      });
+
+      return {
+        ...mat,
+        lines: existingLines
+      };
+    });
+  }
+
+  const calcOutput = calculateComparativeSavings({
+    canonicalMaterials: record.canonicalMaterials,
+    documents: record.documents,
+    winningSupplier: winningSupplierName,
+    thresholdRub: record.thresholdApplied?.thresholdRub || comparativeConfig.thresholdRub
+  });
+
+  const updated: ComparativeAnalysisRecord = {
+    ...record,
+    winningSupplier: calcOutput.winningSupplier,
+    totalFinalPurchase: calcOutput.summary.totalFinalPurchase,
+    totalInitialLowestOffer: calcOutput.summary.totalInitialLowestOffer,
+    realMarketSavings: calcOutput.summary.realMarketSavings,
+    realSavingsRate: calcOutput.summary.realSavingsRate,
+    internalVendorSavings: calcOutput.summary.internalVendorSavings,
+    isSingleVendor: calcOutput.isSingleVendor,
+    isAboveBestOffer: calcOutput.summary.isAboveBestOfferCount > 0,
+    negotiationRoundsCount: calcOutput.summary.negotiationRoundsCount || 0,
+    negotiationStages: calcOutput.summary.intermediateRoundsList || [],
+    initialOffersComparison: calcOutput.summary.initialOffersList || [],
+    finalInvoiceDetails: {
+      supplier: calcOutput.winningSupplier,
+      amount: calcOutput.summary.finalPurchaseAmount || calcOutput.summary.totalFinalPurchase,
+      invoiceNumber: calcOutput.summary.finalInvoiceNumber || finalDoc?.documentNumber || record.finalInvoiceDetails?.invoiceNumber || '',
+      date: calcOutput.summary.finalInvoiceDate || finalDoc?.date || record.finalInvoiceDetails?.date || '',
+      fileName: finalDoc?.fileName || record.finalInvoiceDetails?.fileName,
+      fileUrl: finalDoc?.fileUrl || record.finalInvoiceDetails?.fileUrl
+    },
+    canonicalMaterials: calcOutput.canonicalMaterials,
+    summary: calcOutput.summary,
+    thresholdApplied: calcOutput.thresholdApplied,
+    updated_at: new Date().toISOString()
+  };
+
+  comparativeAnalysesStore.set(updated.id, updated);
+  return updated;
+}
+

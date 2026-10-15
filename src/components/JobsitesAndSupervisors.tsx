@@ -60,15 +60,12 @@ export const JobsitesAndSupervisors: React.FC<Props> = ({
   const { user } = useAuth();
   
   const canEditJobsite = user?.role === 'admin';
-  const canEditSupervisor = (supId: string) => user?.role === 'admin' || (user?.role === 'supervisor' && user.supervisorId === supId);
-  const canEditPersonnel = (persId: string, persSupId: string) => 
-    user?.role === 'admin' || 
-    (user?.role === 'supervisor' && user.supervisorId === persSupId) || 
-    (user?.role === 'personnel' && user.personnelId === persId);
+  const canEditSupervisor = (_supId: string) => user?.role === 'admin';
+  const canEditPersonnel = (_persId: string, _persSupId: string) => user?.role === 'admin';
 
   const canAddJobsite = user?.role === 'admin';
   const canAddSupervisor = user?.role === 'admin';
-  const canAddPersonnel = user?.role === 'admin' || user?.role === 'supervisor';
+  const canAddPersonnel = user?.role === 'admin';
 
   const activeSupervisors = (supervisors && supervisors.length > 0) ? supervisors : INITIAL_SUPERVISORS;
   const activeJobsites = (jobsites && jobsites.length > 0) ? jobsites : INITIAL_JOBSITES;

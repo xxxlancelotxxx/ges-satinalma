@@ -143,6 +143,8 @@ export interface AuditEvaluationInput {
   discountPercentage?: number;
   category?: string;
   vendorName?: string;
+  orderDate?: string;
+  invoiceNo?: string;
   items?: any[];
   existingAuditStatus?: string;
   existingIsFrozen?: boolean;
@@ -210,40 +212,71 @@ export function evaluateDiscountAudit(
         continue; // Emsal fiyat kıyaslamasından kesinlikle muaf tut, sahte şüpheli fiyat uyarısı üretme!
       }
 
-      const comp = comparisons.find(
-        (v: any) =>
-          v?.materialName &&
-          (v.materialName.toLowerCase().trim() === desc ||
-           (desc.length > 3 && v.materialName.toLowerCase().includes(desc)) ||
-           (v.materialName.length > 3 && desc.includes(v.materialName.toLowerCase())))
-      );
-      if (!comp) continue;
+      const itemPrice = Number(item.unitPrice || 0);
+      const itemQty = Number(item.quantity || 1);
+      const itemTotal = Number(item.totalPrice || (itemPrice * itemQty));
+      const invAgreedTotal = Number(input.agreedPrice || input.offerPrice || 0);
 
-      const benchmarkAvg = Number(comp?.avgUnitPrice || comp?.avgPrice || 0);
-      if (benchmarkAvg > 0) {
-        const itemPrice = Number(item.unitPrice || 0);
-        const itemUnit = item.unit || 'adet';
-        const benchmarkUnit = comp.standardUnit || comp.unit || 'adet';
+      // Materiality guard: ignore minor ancillary items (< 5,000 ₽ or < 3% of invoice total) so tiny items never falsely taint a major invoice
+      if (itemTotal < 5000 || (invAgreedTotal > 50000 && itemTotal < invAgreedTotal * 0.03)) {
+        continue;
+      }
 
-        // Akıllı şantiye birim dönüşümü (Örn: Rulo -> m², Metre -> Ton)
-        const conv = convertMaterialUnit({
-          materialName: item.description || item.materialName || comp.materialName,
-          category: input.category || comp.category,
-          fromUnit: itemUnit,
-          toUnit: benchmarkUnit,
-          unitPrice: itemPrice,
-          quantity: Number(item.quantity) || 1
+      // Exact canonical material match only (never substring match!)
+      const comp = comparisons.find((v: any) => {
+        if (!v?.materialName) return false;
+        const vName = v.materialName.toLowerCase().trim();
+        const vBase = vName.replace(/\s*\([^)]+\)\s*$/, '').trim();
+        const dBase = desc.replace(/\s*\([^)]+\)\s*$/, '').trim();
+        return vName === desc || (vBase.length >= 6 && vBase === dBase && !/\b\d+/.test(vName.replace(vBase, '')) && !/\b\d+/.test(desc.replace(dBase, '')));
+      });
+      if (!comp || !Array.isArray(comp.history) || comp.history.length < 2) continue;
+
+      const itemUnit = item.unit || 'adet';
+      const benchmarkUnit = comp.standardUnit || comp.unit || 'adet';
+
+      // Akıllı şantiye birim dönüşümü (Örn: Rulo -> m², Metre -> Ton)
+      const conv = convertMaterialUnit({
+        materialName: item.description || item.materialName || comp.materialName,
+        category: input.category || comp.category,
+        fromUnit: itemUnit,
+        toUnit: benchmarkUnit,
+        unitPrice: itemPrice,
+        quantity: itemQty
+      });
+
+      // Yalnızca birimler özdeşse veya başarıyla normalize edilebildiyse kıyasla
+      if (conv.conversionApplied || normalizeStandardUnit(itemUnit) === normalizeStandardUnit(benchmarkUnit)) {
+        const effectivePrice = conv.conversionApplied ? conv.convertedUnitPrice : itemPrice;
+        const curDateMs = input.orderDate ? new Date(input.orderDate).getTime() : 0;
+
+        // Sadece kendisi dışındaki ve bu faturadan ÖNCE veya aynı dönemde alınmış emsal faturaları baz al
+        const otherHistory = comp.history.filter((h: any) => {
+          const hPrice = Number(h.normalizedUnitPrice || h.unitPrice || 0);
+          if (hPrice <= 0) return false;
+          if (input.invoiceNo && h.invoiceNumber && String(h.invoiceNumber).trim() === String(input.invoiceNo).trim()) return false;
+          if (curDateMs > 0 && h.date) {
+            const hMs = new Date(h.date).getTime();
+            // Kendisinden >15 gün sonra alınmış gelecekteki faturaları geçmiş baz fiyatı yapma
+            if (hMs > curDateMs + 15 * 86400000) return false;
+          }
+          return true;
         });
 
-        // Yalnızca birimler özdeşse veya başarıyla normalize edilebildiyse kıyasla
-        if (conv.conversionApplied || normalizeStandardUnit(itemUnit) === normalizeStandardUnit(benchmarkUnit)) {
-          const effectivePrice = conv.conversionApplied ? conv.convertedUnitPrice : itemPrice;
+        if (otherHistory.length === 0) continue;
+
+        const otherPrices = otherHistory.map((h: any) => Number(h.normalizedUnitPrice || h.unitPrice));
+        const benchmarkAvg = otherPrices.reduce((s: number, p: number) => s + p, 0) / otherPrices.length;
+        const benchmarkMin = Math.min(...otherPrices);
+        const benchmarkMax = Math.max(...otherPrices);
+
+        if (benchmarkAvg > 0) {
           const diff = ((effectivePrice - benchmarkAvg) / benchmarkAvg) * 100;
-          if (diff > 30) {
+          if (diff > 35 && (effectivePrice - benchmarkAvg) * (conv.conversionApplied ? conv.convertedQuantity : itemQty) >= 5000) {
             isSuspiciousPrice = true;
             const convNote = conv.conversionApplied ? ` (${itemPrice} ₽/${itemUnit} -> normalize: ${effectivePrice} ₽/${benchmarkUnit} [${conv.formula}])` : '';
             auditFlags.push(
-              `'${item.description || item.materialName}' birim fiyatı (${effectivePrice} ₽/${benchmarkUnit}${convNote}) piyasa ortalamasından (${benchmarkAvg.toFixed(0)} ₽/${benchmarkUnit}) %${diff.toFixed(0)} daha yüksek.`
+              `'${item.description || item.materialName}' birim fiyatı (${effectivePrice.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} ₽/${benchmarkUnit}${convNote}) emsal piyasa ortalamasından (${benchmarkAvg.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} ₽/${benchmarkUnit}) %${diff.toFixed(1)} daha yüksek.`
             );
             benchmarkComparison = {
               materialName: item.description || item.materialName,
@@ -251,8 +284,8 @@ export function evaluateDiscountAudit(
               offeredUnitPrice: effectivePrice,
               currentUnitPrice: effectivePrice,
               benchmarkAvgPrice: benchmarkAvg,
-              benchmarkMinPrice: comp.minPrice || comp.minUnitPrice,
-              benchmarkMaxPrice: comp.maxPrice || comp.maxUnitPrice,
+              benchmarkMinPrice: benchmarkMin,
+              benchmarkMaxPrice: benchmarkMax,
               diffPercentage: diff,
               confidence: 'HIGH'
             };

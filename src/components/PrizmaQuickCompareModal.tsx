@@ -585,6 +585,12 @@ export const PrizmaQuickCompareModal: React.FC<Props> = ({ invoice, onClose, onN
                                 <div className="font-bold text-slate-100 max-w-xs sm:max-w-md truncate" title={item.materialName}>
                                   {item.materialName}
                                 </div>
+                                {item.originalName && item.originalName !== item.materialName && (
+                                  <div className="text-[11px] text-amber-300/90 font-mono mt-0.5 max-w-xs sm:max-w-md truncate" title={item.originalName}>
+                                    <span className="text-[9px] text-slate-500 font-sans font-bold uppercase mr-1">RU:</span>
+                                    <span className="italic">{item.originalName}</span>
+                                  </div>
+                                )}
                                 <div className="flex items-center space-x-2 text-[10px] text-slate-400 mt-0.5">
                                   {item.materialCode && <span>Kod: {item.materialCode}</span>}
                                   {item.category && <span className="text-slate-500">| {item.category}</span>}

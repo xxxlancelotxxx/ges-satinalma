@@ -37,6 +37,8 @@ interface Props {
   supervisors: Supervisor[];
   personnelList: Personnel[];
   onAnalysisSaved: (savedAnalysis: ComparativeAnalysisRecord) => void;
+  inline?: boolean;
+  initialAnalysis?: ComparativeAnalysisRecord | null;
   onApplyToForm?: (data: {
     vendorName: string;
     offerPrice: number;
@@ -82,6 +84,8 @@ export const ComparativeOfferAnalysisModal: React.FC<Props> = ({
   supervisors,
   personnelList,
   onAnalysisSaved,
+  inline = false,
+  initialAnalysis = null,
   onApplyToForm
 }) => {
   const { language } = useLanguage();
@@ -103,19 +107,61 @@ export const ComparativeOfferAnalysisModal: React.FC<Props> = ({
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
   const isSavingRef = React.useRef<boolean>(false);
 
-  // Reset state whenever modal is opened
+  const [entryMode, setEntryMode] = useState<'AI' | 'MANUAL'>('AI');
+
+  // Manual TDF Entry State
+  const [manualVendorName, setManualVendorName] = useState<string>('');
+  const [manualRefVendorName, setManualRefVendorName] = useState<string>('');
+  const [manualOfferAmount, setManualOfferAmount] = useState<string>('');
+  const [manualAgreedAmount, setManualAgreedAmount] = useState<string>('');
+  const [manualInvoiceNo, setManualInvoiceNo] = useState<string>('');
+  const [manualInvoiceDate, setManualInvoiceDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [manualRounds, setManualRounds] = useState<string>('2');
+  const [manualMaterials, setManualMaterials] = useState<Array<{
+    name: string;
+    unit: string;
+    quantity: string;
+    offerUnitPrice: string;
+    agreedUnitPrice: string;
+  }>>([
+    { name: '', unit: 'adet', quantity: '1', offerUnitPrice: '', agreedUnitPrice: '' }
+  ]);
+
+  // Reset state whenever modal is opened or initialAnalysis changes
   useEffect(() => {
     if (isOpen) {
-      setAnalysis(null);
-      setUploadedFiles([]);
-      setIsProcessing(false);
-      setProcessingStage('');
-      setErrorMsg(null);
-      setIsSaving(false);
-      setSaveSuccess(false);
-      isSavingRef.current = false;
+      if (initialAnalysis) {
+        setAnalysis(initialAnalysis);
+        if (initialAnalysis.jobsiteId) setSelectedJobsiteId(initialAnalysis.jobsiteId);
+        if (initialAnalysis.supervisorId) setSelectedSupervisorId(initialAnalysis.supervisorId);
+        setSelectedPersonnelId(initialAnalysis.performedByPersonnelId || '');
+        setErrorMsg(null);
+        setIsSaving(false);
+        setSaveSuccess(false);
+        isSavingRef.current = false;
+      } else {
+        setAnalysis(null);
+        setUploadedFiles([]);
+        setIsProcessing(false);
+        setProcessingStage('');
+        setErrorMsg(null);
+        setIsSaving(false);
+        setSaveSuccess(false);
+        isSavingRef.current = false;
+        setEntryMode('AI');
+        setManualVendorName('');
+        setManualRefVendorName('');
+        setManualOfferAmount('');
+        setManualAgreedAmount('');
+        setManualInvoiceNo('');
+        setManualInvoiceDate(new Date().toISOString().slice(0, 10));
+        setManualRounds('2');
+        setManualMaterials([
+          { name: '', unit: 'adet', quantity: '1', offerUnitPrice: '', agreedUnitPrice: '' }
+        ]);
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, initialAnalysis]);
 
   // Set default jobsite and supervisor on mount
   useEffect(() => {
@@ -305,6 +351,158 @@ export const ComparativeOfferAnalysisModal: React.FC<Props> = ({
     }
   };
 
+  // Create manual analysis record
+  const handleCreateManualAnalysis = () => {
+    setErrorMsg(null);
+    const offerAmt = Number(manualOfferAmount) || 0;
+    const agreedAmt = Number(manualAgreedAmount) || 0;
+    
+    if (agreedAmt <= 0) {
+      setErrorMsg(isRu ? 'Укажите итоговую сумму счета больше нуля' : 'Lütfen sıfırdan büyük geçerli bir son anlaşılan fatura tutarı girin.');
+      return;
+    }
+    if (!manualVendorName.trim()) {
+      setErrorMsg(isRu ? 'Укажите наименование поставщика' : 'Lütfen anlaşılan / seçilen tedarikçi firma adını girin.');
+      return;
+    }
+
+    const realSav = Math.max(0, offerAmt - agreedAmt);
+    const realRate = offerAmt > 0 ? Number(((realSav / offerAmt) * 100).toFixed(2)) : 0;
+
+    const job = jobsites.find(j => j.id === selectedJobsiteId);
+    const sup = supervisors.find(s => s.id === selectedSupervisorId);
+    const pers = personnelList.find(p => p.id === selectedPersonnelId);
+
+    const validMaterials = manualMaterials.filter(m => m.name.trim().length > 0);
+
+    const created: ComparativeAnalysisRecord = {
+      id: `tdf_man_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+      analysisCode: `TDF-MAN-${Date.now().toString().slice(-5)}`,
+      date: manualInvoiceDate || new Date().toISOString().split('T')[0],
+      jobsiteId: selectedJobsiteId || (job ? job.id : 'job_1'),
+      jobsiteName: job ? job.name : 'Genel Şantiye',
+      supervisorId: selectedSupervisorId || (sup ? sup.id : 'sup_1'),
+      supervisorName: sup ? sup.name : 'Yetkili Şef',
+      performedByPersonnelId: selectedPersonnelId || null,
+      currency: 'RUB',
+      status: 'completed',
+      calculationMethod: 'MARKET_BASELINE_TO_FINAL',
+      thresholdApplied: {
+        thresholdRub: 1000000,
+        isOverThreshold: agreedAmt >= 1000000,
+        isMandatory: true
+      },
+      auditLog: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      winningSupplier: manualVendorName.trim(),
+      totalInitialLowestOffer: offerAmt > 0 ? offerAmt : agreedAmt,
+      totalFinalPurchase: agreedAmt,
+      totalWinningSupplierInitialOffer: offerAmt > 0 ? offerAmt : agreedAmt,
+      realMarketSavings: realSav,
+      internalVendorSavings: realSav,
+      realSavingsRate: realRate,
+      internalVendorRate: realRate,
+      uniqueSuppliersCount: 2,
+      isSingleVendor: offerAmt <= agreedAmt,
+      isAboveBestOffer: false,
+      negotiationRoundsCount: Number(manualRounds) || 1,
+      documents: [
+        {
+          id: `doc_init_${Date.now()}`,
+          documentRole: 'FIRST_OFFER',
+          supplier: manualRefVendorName.trim() || 'Piyasa İlk Teklif',
+          fileName: 'Piyasa_Ilk_Teklif.pdf',
+          fileUrl: '',
+          roleConfidence: 1.0,
+          totalAmount: offerAmt > 0 ? offerAmt : agreedAmt,
+          currency: 'RUB',
+          isVatIncluded: true,
+          isShippingIncluded: true,
+          isExcluded: false,
+          isInitialOffer: true,
+          items: []
+        },
+        {
+          id: `doc_final_${Date.now()}`,
+          documentRole: 'FINAL_INVOICE',
+          supplier: manualVendorName.trim(),
+          fileName: `Fatura_${manualInvoiceNo || 'TDF'}.pdf`,
+          fileUrl: '',
+          roleConfidence: 1.0,
+          totalAmount: agreedAmt,
+          currency: 'RUB',
+          isVatIncluded: true,
+          isShippingIncluded: true,
+          isExcluded: false,
+          documentNumber: manualInvoiceNo,
+          date: manualInvoiceDate,
+          items: []
+        }
+      ],
+      canonicalMaterials: validMaterials.length > 0
+        ? validMaterials.map((m, idx) => {
+            const qty = Number(m.quantity) || 1;
+            const offerPrice = Number(m.offerUnitPrice) || 0;
+            const agreedPrice = Number(m.agreedUnitPrice) || 0;
+            return {
+              id: `mat_man_${idx}_${Date.now()}`,
+              canonicalName: m.name,
+              commonName: m.name,
+              standardUnit: m.unit || 'adet',
+              purchasedQuantity: qty,
+              marketReferenceUnitPrice: offerPrice,
+              purchasedUnitPrice: agreedPrice,
+              marketReferenceSupplier: manualRefVendorName.trim() || 'Piyasa Referans',
+              purchasedSupplier: manualVendorName.trim(),
+              realTotalSavings: (offerPrice - agreedPrice) * qty,
+              matchConfidence: 1.0,
+              isExcluded: false,
+              lines: []
+            };
+          })
+        : [
+            {
+              id: `mat_man_def_${Date.now()}`,
+              canonicalName: 'Karşılaştırmalı Teklif Malzemesi',
+              commonName: 'Karşılaştırmalı Teklif Malzemesi',
+              standardUnit: 'kalem',
+              purchasedQuantity: 1,
+              marketReferenceUnitPrice: offerAmt > 0 ? offerAmt : agreedAmt,
+              purchasedUnitPrice: agreedAmt,
+              marketReferenceSupplier: manualRefVendorName.trim() || 'Piyasa Referans',
+              purchasedSupplier: manualVendorName.trim(),
+              realTotalSavings: realSav,
+              matchConfidence: 1.0,
+              isExcluded: false,
+              lines: []
+            }
+          ],
+      summary: {
+        totalVendors: 2,
+        totalInitialLowestOffer: offerAmt > 0 ? offerAmt : agreedAmt,
+        totalFinalPurchase: agreedAmt,
+        lowestInitialOfferSupplier: manualRefVendorName.trim() || 'Piyasa Referans',
+        lowestInitialOfferAmount: offerAmt > 0 ? offerAmt : agreedAmt,
+        finalPurchaseSupplier: manualVendorName.trim(),
+        finalPurchaseAmount: agreedAmt,
+        realMarketSavings: realSav,
+        realSavingsRate: realRate,
+        internalVendorSavings: realSav,
+        internalVendorRate: realRate,
+        isAboveBestOfferCount: 0,
+        isSingleVendor: offerAmt <= agreedAmt,
+        excludedOffersCount: 0,
+        pendingApprovalsCount: 0,
+        totalDocuments: 2,
+        totalMaterials: validMaterials.length || 1,
+        overallConfidence: 1.0
+      }
+    };
+
+    setAnalysis(created);
+  };
+
   // Toggle exclusion of a canonical material
   const handleToggleExclusion = (materialId: string) => {
     if (!analysis) return;
@@ -460,13 +658,18 @@ export const ComparativeOfferAnalysisModal: React.FC<Props> = ({
   };
 
   const formatCurrency = (val?: number) => {
-    if (val === undefined || val === null) return '0 ₽';
-    return Number(val).toLocaleString('tr-TR', { maximumFractionDigits: 0 }) + ' ₽';
+    if (val === undefined || val === null || isNaN(Number(val))) return '0 ₽';
+    const num = Number(val);
+    const hasDecimals = Math.abs(num - Math.round(num)) >= 0.005;
+    if (hasDecimals) {
+      return num.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₽';
+    }
+    return Math.round(num).toLocaleString('tr-TR') + ' ₽';
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/75 backdrop-blur-xs overflow-y-auto">
-      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-5xl my-8 overflow-hidden flex flex-col max-h-[92vh]">
+    <div className={inline ? "w-full" : "fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/75 backdrop-blur-xs overflow-y-auto"}>
+      <div className={inline ? "bg-white rounded-3xl shadow-md border border-indigo-200/80 w-full overflow-hidden flex flex-col" : "bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-5xl my-8 overflow-hidden flex flex-col max-h-[92vh]"}>
         
         {/* Header */}
         <div className="px-6 py-5 border-b border-slate-200 flex items-center justify-between bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white">
@@ -475,31 +678,49 @@ export const ComparativeOfferAnalysisModal: React.FC<Props> = ({
               <Layers className="w-6 h-6 text-indigo-300" />
             </div>
             <div>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center flex-wrap gap-2">
                 <h2 className="text-lg font-bold">
-                  {isRu ? 'Сравнительный анализ предложений и реальной экономии' : 'Karşılaştırmalı Teklif ve Gerçek İndirim Analizi'}
+                  {isRu ? 'Рабочая панель TDF: Сравнение КП и расчет экономии' : 'TDF Akıllı Teklif Değerlendirme & Karşılaştırma Paneli'}
                 </h2>
-                <span className="text-xs bg-indigo-500/30 text-indigo-200 px-2 py-0.5 rounded-full font-medium border border-indigo-400/30">
-                  {isRu ? 'Рыночный стандарт' : 'Yeni Standart: Piyasa Bazı'}
+                <span className="text-xs bg-emerald-500/20 text-emerald-300 px-2.5 py-0.5 rounded-full font-bold border border-emerald-400/30">
+                  {isRu ? 'Анализ от минимального первого КП (Dip Fiyat)' : 'İlk Teklifler En Düşük Dip Fiyat Bazlı'}
                 </span>
               </div>
               <p className="text-xs text-slate-300 mt-0.5">
                 {isRu 
-                  ? 'Сравнение первых предложений всех поставщиков для выявления истинной рыночной экономии.' 
-                  : 'Tüm tedarikçilerin ilk teklifleri kıyaslanarak en düşük piyasa referansına göre gerçek tasarruf hesaplanır.'}
+                  ? 'Загрузите первые КП поставщиков, промежуточные раунды торга и окончательный счет. Система автоматически найдет минимальную начальную цену и рассчитает реальную экономию.' 
+                  : 'Toplanan ilk teklifleri, ara pazarlık tekliflerini ve nihai anlaşılan faturayı yükleyin; sistem ilk tekliflerden en düşük dip fiyatı baz alarak gerçek indirimi otomatik hesaplar.'}
               </p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-white/10 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center space-x-2">
+            {analysis && (
+              <button
+                onClick={() => {
+                  setAnalysis(null);
+                  setUploadedFiles([]);
+                  setSaveSuccess(false);
+                  setErrorMsg(null);
+                  if (inline) onClose();
+                }}
+                className="px-3 py-1.5 text-xs font-bold bg-indigo-500/30 hover:bg-indigo-500/50 text-white rounded-xl border border-indigo-400/40 transition cursor-pointer"
+              >
+                {isRu ? '+ Новый расчет TDF' : '+ Yeni TDF Analizi Başlat / Temizle'}
+              </button>
+            )}
+            {!inline && (
+              <button
+                onClick={onClose}
+                className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-white/10 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Body Container */}
-        <div className="p-6 overflow-y-auto flex-1 space-y-6">
+        <div className={inline ? "p-6 space-y-6" : "p-6 overflow-y-auto flex-1 space-y-6"}>
 
           {/* Business Logic Explanation Banner */}
           <div className="p-3.5 bg-indigo-50/70 border border-indigo-200/80 rounded-xl text-xs text-indigo-950 flex items-start space-x-3">
@@ -573,8 +794,226 @@ export const ComparativeOfferAnalysisModal: React.FC<Props> = ({
             </div>
           </div>
 
-          {/* Section 1: Multi-Document Upload */}
+          {/* Entry Mode Switcher Tabs */}
           {!analysis && (
+            <div className="flex items-center space-x-2 bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
+              <button
+                type="button"
+                onClick={() => setEntryMode('AI')}
+                className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold flex items-center justify-center space-x-2 transition cursor-pointer ${
+                  entryMode === 'AI'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                }`}
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>{isRu ? '🤖 AI Загрузка документов' : '🤖 AI Belge / Dosya Yükleyerek Otomatik Analiz'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setEntryMode('MANUAL')}
+                className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold flex items-center justify-center space-x-2 transition cursor-pointer ${
+                  entryMode === 'MANUAL'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                }`}
+              >
+                <Edit3 className="w-4 h-4" />
+                <span>{isRu ? '✍️ Ручной ввод TDF' : '✍️ Manuel 1M+ ₽ TDF Analiz Kaydı Ekle'}</span>
+              </button>
+            </div>
+          )}
+
+          {/* Section 1-B: Manual TDF Entry Form */}
+          {!analysis && entryMode === 'MANUAL' && (
+            <div className="bg-slate-50 rounded-2xl p-5 border border-slate-200 space-y-5">
+              <div className="border-b border-slate-200 pb-3">
+                <h3 className="text-sm font-extrabold text-slate-800">
+                  {isRu ? 'Ручной ввод сравнительного анализа (TDF 1M+ ₽)' : 'Manuel 1.000.000 ₽ Karşılaştırmalı Teklif Kaydı'}
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {isRu
+                    ? 'Введите данные первоначального коммерческого предложения и окончательного согласованного счета'
+                    : 'Firma teklifleri ve son anlaşılan fatura tutarlarını manuel girerek hızlıca karşılaştırmalı analiz oluşturun.'}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    {isRu ? 'Выигравший / Согласованный поставщик' : 'Anlaşılan / Seçilen Tedarikçi Firma *'}
+                  </label>
+                  <input
+                    type="text"
+                    value={manualVendorName}
+                    onChange={e => setManualVendorName(e.target.value)}
+                    placeholder={isRu ? 'Например: ООО "ТСК ДИПЛОМАТ"' : 'Örn: Diler Demir Çelik A.Ş.'}
+                    className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    {isRu ? 'Первоначальный базовый поставщик' : 'Piyasa İlk Teklif Firma Adı'}
+                  </label>
+                  <input
+                    type="text"
+                    value={manualRefVendorName}
+                    onChange={e => setManualRefVendorName(e.target.value)}
+                    placeholder={isRu ? 'Например: ООО "СтройСнаб"' : 'Örn: Piyasa En Ucuz İlk Teklif Veren'}
+                    className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    {isRu ? 'Первоначальная сумма рынка (₽)' : 'Piyasa En Düşük İlk Teklif Tutarı (₽)'}
+                  </label>
+                  <input
+                    type="number"
+                    value={manualOfferAmount}
+                    onChange={e => setManualOfferAmount(e.target.value)}
+                    placeholder="Örn: 1540000"
+                    className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-mono font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    {isRu ? 'Итоговая сумма счета (₽) *' : 'Son Anlaşılan Fatura Tutarı (Net ₽) *'}
+                  </label>
+                  <input
+                    type="number"
+                    value={manualAgreedAmount}
+                    onChange={e => setManualAgreedAmount(e.target.value)}
+                    placeholder="Örn: 1380000"
+                    className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-mono font-bold text-indigo-900 focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    {isRu ? '№ счета' : 'Fatura / Belge Seri No'}
+                  </label>
+                  <input
+                    type="text"
+                    value={manualInvoiceNo}
+                    onChange={e => setManualInvoiceNo(e.target.value)}
+                    placeholder="Örn: INV-2026-991"
+                    className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    {isRu ? 'Дата счета / сделки' : 'Fatura / Anlaşma Tarihi'}
+                  </label>
+                  <input
+                    type="date"
+                    value={manualInvoiceDate}
+                    onChange={e => setManualInvoiceDate(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+
+              {/* Material Items List */}
+              <div className="space-y-3 pt-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-800">
+                    {isRu ? 'Позиции материалов' : 'Malzeme / Hizmet Kalemleri'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setManualMaterials(prev => [...prev, { name: '', unit: 'adet', quantity: '1', offerUnitPrice: '', agreedUnitPrice: '' }])}
+                    className="px-3 py-1 bg-indigo-50 text-indigo-700 rounded-lg text-xs font-bold border border-indigo-200 hover:bg-indigo-100 transition cursor-pointer"
+                  >
+                    + Kalem Ekle
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {manualMaterials.map((item, idx) => (
+                    <div key={idx} className="grid grid-cols-12 gap-2 bg-white p-2.5 rounded-xl border border-slate-200 items-center text-xs">
+                      <div className="col-span-4">
+                        <input
+                          type="text"
+                          value={item.name}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setManualMaterials(prev => prev.map((m, i) => i === idx ? { ...m, name: val } : m));
+                          }}
+                          placeholder="Malzeme Adı (örn: A500C Ø12 Rebar)"
+                          className="w-full border border-slate-300 rounded-lg px-2 py-1.5 font-semibold text-slate-800"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <input
+                          type="text"
+                          value={item.unit}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setManualMaterials(prev => prev.map((m, i) => i === idx ? { ...m, unit: val } : m));
+                          }}
+                          placeholder="Birim (ton, m3)"
+                          className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-center text-slate-700"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <input
+                          type="number"
+                          value={item.quantity}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setManualMaterials(prev => prev.map((m, i) => i === idx ? { ...m, quantity: val } : m));
+                          }}
+                          placeholder="Miktar"
+                          className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-right font-mono"
+                        />
+                      </div>
+                      <div className="col-span-3">
+                        <input
+                          type="number"
+                          value={item.agreedUnitPrice}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setManualMaterials(prev => prev.map((m, i) => i === idx ? { ...m, agreedUnitPrice: val } : m));
+                          }}
+                          placeholder="Birim Fiyat ₽"
+                          className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-right font-mono font-bold"
+                        />
+                      </div>
+                      <div className="col-span-1 text-center">
+                        {manualMaterials.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => setManualMaterials(prev => prev.filter((_, i) => i !== idx))}
+                            className="text-slate-400 hover:text-rose-600 p-1 cursor-pointer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-3">
+                <button
+                  type="button"
+                  onClick={handleCreateManualAnalysis}
+                  className="px-6 py-2.5 bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800 text-white rounded-xl text-xs font-black shadow-md transition cursor-pointer flex items-center space-x-2"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>{isRu ? 'Создать расчет и просмотреть' : 'Analizi Oluştur ve Önizle'}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Section 1-A: Multi-Document Upload */}
+          {!analysis && entryMode === 'AI' && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>

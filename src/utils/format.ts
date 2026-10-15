@@ -1,7 +1,11 @@
 export function formatRuble(e: any, t?: any): string {
   if (e == null || isNaN(Number(e))) return "0 ₽";
-  const num = Math.round(Number(e));
-  return `${num.toLocaleString('tr-TR')} ₽`;
+  const val = Number(e);
+  const hasDecimals = Math.abs(val - Math.round(val)) >= 0.005;
+  if (hasDecimals) {
+    return `${val.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
+  }
+  return `${Math.round(val).toLocaleString('tr-TR')} ₽`;
 }
 
 export function formatRubleWithDecimals(e: any): string {
