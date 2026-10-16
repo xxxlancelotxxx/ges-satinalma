@@ -3,7 +3,7 @@ import './server/envLoader';
 import { processItem } from './src/utils/aiDecisionEngine';
 import { normalizeStandardUnit, getMaterialBenchmarkUnit, convertMaterialUnit, areUnitsConvertible, extractRebarDiameter } from './src/utils/constructionUnitConverter';
 import { normalizeVendorName, getVendorKey, areVendorsEqual } from './src/utils/vendorNormalizer';
-import { normalizeCategoryName, CANONICAL_28_CATEGORIES, translateRussianMaterialToTurkish, ensureRussianOriginalName } from './src/utils/categoryClassifier';
+import { normalizeCategoryName, CANONICAL_28_CATEGORIES, translateRussianMaterialToTurkish, ensureRussianOriginalName, resolveItemCategory } from './src/utils/categoryClassifier';
 import { analyzeMaterialSegment } from './src/utils/materialSegmentIntelligence';
 import { splitGroupBySpec, getProductTypeLabel } from './src/utils/materialGroupIntegrity';
 import { comparativeAnalysesStore, materialSynonymsStore, comparativeConfig, updateComparativeConfig, processComparativeAnalysisBatch, learnApprovedSynonyms, recalculateComparativeAnalysis } from './server/comparativeEngine';
@@ -3424,9 +3424,9 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 3.2 KUTU PROFİL / PROFİL BORU (Труба профильная / KUTU PROFIL / PROFIL KUTU)
+  // 3.2 KUTU PROFİL / PROFİL BORU (Труба профильная / Профиль четырехгранный / KUTU PROFIL / PROFIL KUTU)
   if (
-    (/труба.*профильн|профильн.*труб|kutu\s*profil|profil\s*kutu|profil\s*boru/i.test(primaryText)) &&
+    (/труба.*профильн|профильн.*труб|профиль\s*четырехгранн|kutu\s*profil|profil\s*kutu|profil\s*boru/i.test(primaryText)) &&
     !/каркас.*ворот|калитка|çit|çevre.*paneli|kapı.*karkası|yaya.*kapısı|alçıpan|alcipan|гипсокартон|knauf/i.test(primaryText)
   ) {
     const pipeMatch =
@@ -3447,9 +3447,9 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 3.3 DİKİŞLİ ÇELİK BORU & SU/GAZ BORUSU (Труба электросварная / ВГП / BORU DEMIR DIKISLI / ТРУБА 48Х3)
+  // 3.3 DİKİŞLİ ÇELİK BORU & SU/GAZ BORUSU (Труба электросварная / эл/св прямошов / ВГП / BORU DEMIR DIKISLI / ТРУБА 48Х3)
   if (
-    (/труба\s*(?:стальная\s*)?(?:э\/с|электросварн|вгп|водогазопровод)|электросварные\s*стальные\s*трубы|boru\s*demir\s*dikişli|boru\s*demir\s*dikisli|dikişli\s*çelik\s*boru|çelik\s*su\/gaz\s*borusu|(?:^|\s)(?:труба|boru)\s+\d{2,3}\s*[*xх×]\s*\d{1,2}(?:[.,]\d+)?\s*(?:мм|mm|гост|l=)/i.test(primaryText)) &&
+    (/труба\s*(?:стальная\s*|ст\.?\s*)?(?:э\/с|эл\/св|электросварн|прямошов|вгп|водогазопровод)|электросварные\s*стальные\s*трубы|boru\s*demir\s*dikişli|boru\s*demir\s*dikisli|dikişli\s*çelik\s*boru|çelik\s*su\/gaz\s*borusu|(?:^|\s)(?:труба|boru)\s+\d{2,3}\s*[*xх×]\s*\d{1,2}(?:[.,]\d+)?\s*(?:мм|mm|гост|l=)/i.test(primaryText)) &&
     !/профильн|ппр|ppr|пнд|pnd|пвх|pvc|гофрирован|koruge/i.test(primaryText)
   ) {
     const roundMatch = primaryText.match(/(?:[dдqфøØ]\s*)?\b(\d{2,3})\s*[*xх×]\s*(\d{1,2}(?:[.,]\d+)?)\b/);
@@ -3944,8 +3944,8 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 3.11 ANKRAJLAR (Анкер клиновой, Анкер-клин) & ÇİVİLİ PLASTİK DÜBEL (Дюбель-гвоздь)
-  if (/анкер[\s-]*клин(?:\s+потолочн)?|tavan\s*kama\s*ankraj|çakma\s*dübel\s*anker|cakma\s*dubel\s*anker/i.test(combined) && !/клиновой/i.test(combined)) {
+  // 3.11 ANKRAJLAR (Анкер клиновой, Анкер-клин) & ÇİVİLİ PLASTİK DÜBEL (Дюбель-гвоздь) & ISI YALITIM DÜBELİ & MONTAJ ŞERİDİ
+  if ((/анкер[\s-]*клин(?:\s+потолочн)?|kama\s*ankraj|tavan\s*(?:tipi\s*)?kama\s*ankraj|çakma\s*dübel\s*anker|cakma\s*dubel\s*anker|(?:^|\s)клин\s+6\s*[*xх×]\s*(?:35|40|60|65)\b/i.test(combined)) && !/клиновой/i.test(combined)) {
     const akDim = combined.match(/\b[mм]?(6)\s*[*xх×]\s*(35|40|60|65)\b/i);
     if (akDim) {
       return {
@@ -3963,7 +3963,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       };
     }
   }
-  if (/дюбель[\s-]*гвоздь|дюбель\s+с\s+гвоздем|dubel\s*plastik\s*vidali|gaz\s*blok\s*dubeli|çivili\s*plastik\s*dübel/i.test(combined) && !/пистолет|montaj\s*tabanca/i.test(combined)) {
+  if (/дюбель[\s-]*гвоздь|дюбель\s+с\s+гвоздем|dubel\s*plastik\s*vidali|gaz\s*blok\s*dubeli|çivili\s*plastik\s*dübel|dübel[\s-]*çivi|dubel[\s-]*civi/i.test(combined) && !/пистолет|montaj\s*tabanca|термоголовк|к\s+дюбел|теплоизоляц|yalıtım\s*dübel/i.test(combined)) {
     const dgDim = combined.match(/\b(5|6|8|10)\s*[*xх×]\s*(30|40|50|60|80|100|120|140|160)\b/);
     if (dgDim) {
       if (/гвоздь\s+потайной\s+борт/i.test(cleanOrig) && !/дюбель/i.test(cleanOrig)) {
@@ -3974,6 +3974,26 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       }
       return {
         materialName: `Çivili Plastik Dübel (Дюбель-гвоздь) ${dgDim[1]}x${dgDim[2]} mm`,
+        category: 'Sarf Malzeme & Hırdavat'
+      };
+    }
+  }
+  if ((/дюбель\s+для\s+теплоизоляц|тарельчат.*дюбел|ısı\s*yalıtım\s*dübel|isi\s*yalitim\s*dubel/i.test(combined)) && !/гвозд.*термоголовк|dübel\s*çivisi|dubel\s*civisi/i.test(combined)) {
+    const tdDim = combined.match(/\b(10)\s*[*xх×\s]\s*(90|100|110|120|140|160|180|200|220|250|260|300)\b/);
+    if (tdDim) {
+      return {
+        materialName: `Isı Yalıtım Dübeli (Тарельчатый) ${tdDim[1]}x${tdDim[2]} mm`,
+        category: 'Sarf Malzeme & Hırdavat'
+      };
+    }
+  }
+  if (/лента.*монтажн.*перфорирован|перфорирован.*монтажн.*лента|montaj\s*bağlantı\s*şeridi|delikli.*montaj\s*şeridi/i.test(combined)) {
+    const lmDim = combined.match(/\b(12|17|20|25|40)\s*[*xх×]\s*(0[.,]\d+|1(?:[.,]\d+)?|2(?:[.,]0)?)\b/i);
+    if (lmDim) {
+      const w = lmDim[1];
+      const th = lmDim[2].replace(',', '.').replace(/\.0$/, '');
+      return {
+        materialName: `Delikli Çelik Montaj Şeridi (Лента перфорированная LM) ${w}x${th} mm (10 m)`,
         category: 'Sarf Malzeme & Hırdavat'
       };
     }
@@ -4421,7 +4441,17 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       category: 'Temizlik & Hijyen Malzemeleri'
     };
   }
-  if (/мешк.*мусор|пакет.*мусор|çöp\s*poşet|cop\s*poset|çöp\s*torba/i.test(primaryText)) {
+  if (/мешк.*мусор|пакет.*мусор|çöp\s*poşet|cop\s*poset|çöp\s*torba|moloz\s*çuval/i.test(primaryText)) {
+    if (/строительн.*мусор|moloz\s*çuval|\bпп\b.*(?:50\s*[*xх×]\s*90|55\s*[*xх×]\s*95)/i.test(combined)) {
+      const sackDim = combined.match(/\b(50\s*[*xх×]\s*90|55\s*[*xх×]\s*95)\b/);
+      if (sackDim) {
+        const dStr = sackDim[1].replace(/\s+/g, '').replace(/[х*×]/gi, 'x');
+        return {
+          materialName: `PP İnşaat Moloz Çuvalı (Мешок ПП) ${dStr} cm (Yeşil)`,
+          category: 'Temizlik & Hijyen Malzemeleri'
+        };
+      }
+    }
     const volM = primaryText.match(/(?:^|[^0-9])(30|35|60|120|140|160|180|200|240|300|360)\s*(?:л|lt|l)(?![a-zа-яё])/i);
     if (volM) {
       const vol = volM[1];
@@ -4728,6 +4758,68 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       materialName: 'Çipli Etiket Yazıcı Kartuşu Vell VL-231CH (12 mm)',
       category: 'Ofis & Kırtasiye'
     };
+  }
+
+  // 3.18 YANGIN BATTANİYESİ ПП-300, OFİS KESONU EASY LT 16/16, KAŞE 55x15, SDS MATKAP & KIRICI KESKİ/MURÇ UÇLARI
+  if (/противопожарн.*полотн|полотно\s*противопожарн|пп[\s-]*300.*полотн|yangın\s*battaniye/i.test(combined)) {
+    return {
+      materialName: 'Yanmaz Yangın Battaniyesi ПП-300 (1.5x2.0 m)',
+      category: 'İş Güvenliği & KKD'
+    };
+  }
+  if (/тумба\s+выкатная.*easy|easy\s+st(?:andard)?\s+lt\s*16\/16/i.test(combined)) {
+    return {
+      materialName: 'Easy Standard LT 16/16 Çekmeceli Keson (400x420x563 mm)',
+      category: 'Şantiye Mobilya & Yaşam Donanımı'
+    };
+  }
+  if (/(?:штамп|штапм).*55\s*[*xх×]\s*15/i.test(combined)) {
+    return {
+      materialName: 'Kaşe / Damga (Штамп) 55x15 mm',
+      category: 'Ofis & Kırtasiye'
+    };
+  }
+  if (
+    (/(?:бур\b|beton\s*matkap\s*ucu|beton\s*delme\s*ucu)/i.test(combined)) &&
+    (/sds/i.test(combined) || /\b(?:6|8|10|12|14|16|18|20|22|24|25|28|30|32)\s*[*xх×]\s*(?:110|160|210|260|300|310|350|400|450|460|500|540|600|800|1000)\b/.test(combined)) &&
+    !/зубило|пика|keski|murç|murc|коронка|адаптер|патрон/i.test(combined)
+  ) {
+    const isMax = /sds[\s-]*max/i.test(combined);
+    const sdsType = isMax ? 'SDS-max' : 'SDS-plus';
+    const dim3 = combined.match(/\b0?(\d{1,2})\s*[*xх×]\s*(\d{2,4})\s*[*xх×]\s*(\d{2,4})\b/);
+    const dim2 = combined.match(/\b0?(\d{1,2})\s*[*xх×]\s*(110|160|200|210|250|260|300|310|340|350|400|450|460|500|520|540|600|800|1000)\b/);
+    const d = dim3 ? String(parseInt(dim3[1], 10)) : (dim2 ? String(parseInt(dim2[1], 10)) : '');
+    const l = dim3 ? dim3[3] : (dim2 ? dim2[2] : '');
+    if (d && l) {
+      return {
+        materialName: `SDS Beton Matkap Ucu ${sdsType} (${d}x${l} mm)`,
+        category: 'El Aletleri & Hırdavat'
+      };
+    }
+  }
+  if (
+    (/зубило|пика\b|kırıcı.*(?:keski|delici|murç|uc)|kirici.*(?:keski|uc)|(?:plus|max)\s*(?:düz\s*)?keski/i.test(combined)) &&
+    (/sds|отбойн|перфоратор|\b(?:14|18|25)\s*[*xх×]\s*(?:250|400|450|600)\b|\b(?:14|18)\s*[*xх×]\s*(?:20|25|40)\s*[*xх×]\s*(?:250|400)\b/i.test(combined))
+  ) {
+    const isMax = /sds[\s-]*max|\b18\s*[*xх×]|\b25\s*[*xх×]\s*400/i.test(combined);
+    const sdsType = isMax ? 'SDS-max' : 'SDS-plus';
+    const isPoint = /пика|sivri|murç|murc|delici\s*kırıcı\s*uç/i.test(combined) && !/зубило|yassı|düz\s*keski/i.test(combined);
+    const d3 = combined.match(/\b(14|18)\s*[*xх×]\s*(20|25|40|50)\s*[*xх×]\s*(250|400|450|600)\b/);
+    const d2 = combined.match(/\b(14|18|20|25|40)\s*[*xх×]\s*(250|400|450|600)\b/);
+    if (isPoint) {
+      const dimStr = d2 ? `${d2[1]}x${d2[2]} mm` : (isMax ? '18x400 mm' : '14x250 mm');
+      return {
+        materialName: `Sivri Kırıcı Murç Ucu (Пика) ${sdsType} (${dimStr})`,
+        category: 'El Aletleri & Hırdavat'
+      };
+    }
+    const dimStr = d3 ? `${d3[1]}x${d3[2]}x${d3[3]} mm` : (d2 ? `${d2[1]}x${d2[2]} mm` : '');
+    if (dimStr) {
+      return {
+        materialName: `Yassı Kırıcı Keski Ucu (Зубило) ${sdsType} (${dimStr})`,
+        category: 'El Aletleri & Hırdavat'
+      };
+    }
   }
 
   // 4. Eğer ürün adında Rusça (Kiril) karakter varsa, teknik ölçülerini koruyarak Türkçe'ye çevir
@@ -6134,9 +6226,16 @@ app.get('/api/materials/compare', async (req, res) => {
           return;
         }
 
+        // 0.1 Malzeme OLMAYAN satırlar: proje çizimleri ("Схема горизонтальных конструкций"), ödeme/hakediş satırları,
+        // depo imza/vekalet satırları, firma adı, sadece ürün kodu veya URL içeren satırlar kıyaslamaya girmez.
+        const lineText = `${item.originalName || ''} ${item.materialName || ''}`.trim();
+        if (/схем[аы]\s+(?:горизонтальн|вертикальн)|^\s*(?:строительно-монтажный\s+материал\s*\/\s*тмц\s*\()?\s*код\s+товара|^\s*оплата\s|начальник\s+склада|по\s+доверенности|^\s*["«]?гэс\s+констракшн["»]?\s*(?:["«]?гэс\s+констракшн["»]?)?$|сч\.\s*№\s*ао|^\s*https?:\/\//i.test(lineText)) {
+          return;
+        }
+
         const norm = smartNormalizeItem({ ...item, supplier: item.supplier || inv.supplier });
         let canonName = norm.materialName || item.materialName;
-        const canonCat = normalizeCategoryName(norm.category || item.category, `${canonName} ${item.originalName || ''} ${item.materialName || ''}`);
+        const canonCat = resolveItemCategory({ originalName: item.originalName, materialName: item.materialName, canonName, rawCategory: norm.category || item.category, manualCategory: item.categoryManual ? item.category : undefined });
         let canonKey = canonName.toLowerCase().trim();
         const combinedText = `${canonName} ${item.originalName || ''} ${item.materialName || ''}`;
 
@@ -6166,14 +6265,18 @@ app.get('/api/materials/compare', async (req, res) => {
           const existingCanonKey = origBridgeMap.get(bridgeKey);
           if (existingCanonKey && preMaterialMap.has(existingCanonKey)) {
             const existingGroup = preMaterialMap.get(existingCanonKey)!;
-            const refEntry = existingGroup.entries[0];
+            // Fiyat oranı kontrolü yalnızca AYNI birimdeki satırlar arasında anlamlıdır. Aynı Rusça satır bir faturada
+            // metre, diğerinde ton ile fiyatlanmışsa (örn. "Труба 50х50х3 ст 3") oran 100x+ çıkar ve ürün yanlışlıkla
+            // ikinci bir gruba bölünürdü. Farklı birimler Pass 2'de çevrilir/ayrıştırılır.
+            const itemUnitNormForBridge = normalizeStandardUnit(item.unit || 'Adet');
+            const refEntry = existingGroup.entries.find(e => normalizeStandardUnit(e.unit) === itemUnitNormForBridge);
             const ratio = refEntry && refEntry.priceNum > 0 && priceNum > 0
               ? Math.max(refEntry.priceNum, priceNum) / Math.min(refEntry.priceNum, priceNum)
               : 1;
             if (existingCanonKey === canonKey || ratio <= 2.5) {
               if (scoreTurkishMaterialName(canonName) > scoreTurkishMaterialName(existingGroup.canonName)) {
                 existingGroup.canonName = canonName;
-                existingGroup.canonCat = normalizeCategoryName(canonCat, `${canonName} ${item.originalName || ''}`);
+                existingGroup.canonCat = canonCat;
               }
               canonKey = existingCanonKey;
             }
@@ -6269,6 +6372,22 @@ app.get('/api/materials/compare', async (req, res) => {
         });
       });
     }
+
+    // Pass 1.8: GRUP KATEGORİSİ = satırların çoğunluk oyu (ilk gelen satırın kategorisi değil).
+    consolidatedPreMap.forEach((grp) => {
+      const votes = new Map<string, number>();
+      grp.entries.forEach((e: any) => {
+        const c = resolveItemCategory({ originalName: e.item?.originalName, materialName: e.item?.materialName, canonName: grp.canonName, rawCategory: e.item?.category, manualCategory: e.item?.categoryManual ? e.item?.category : undefined });
+        votes.set(c, (votes.get(c) || 0) + 1);
+      });
+      const nameCat = resolveItemCategory({ canonName: grp.canonName, rawCategory: grp.canonCat });
+      let best = grp.canonCat; let bestN = -1;
+      votes.forEach((n, c) => {
+        const score = n + (c === nameCat ? 0.5 : 0);
+        if (score > bestN) { best = c; bestN = score; }
+      });
+      grp.canonCat = best;
+    });
 
     // Pass 2: Resolve benchmark unit using ALL units seen for that material and split only truly incompatible physical dimensions
     const materialMap = new Map<string, {
@@ -6479,7 +6598,7 @@ app.put('/api/materials/update-category', async (req, res) => {
           if (itName === targetLower || itOrig === targetLower) {
             updated = true;
             totalUpdatedItems++;
-            return { ...it, category };
+            return { ...it, category, categoryManual: true };
           }
           return it;
         });
