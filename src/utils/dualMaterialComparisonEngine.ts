@@ -983,21 +983,28 @@ export function buildMode1AppleToAppleComparisons(
 
   const FREIGHT_REGEX = /\b(доставка|транспортн|автоуслуг|перевозк|манипулятор|логистик|погруз|разгруз|резка|рубка|услуг[аи]?|аренда|nakliye|teslimat|kargo|sevkiyat|lojistik|vinç|kesim|indirme|yükleme)\b/i;
 
+  // Sunucu fiyatları %22 KDV dahil tabanda gönderir (normalizedUnitPrice = brüt); net yalnızca bilgi amaçlıdır.
   const computeGrossStats = (histRows: MaterialComparison['history']) => {
-    const grossPrices = histRows
-      .map(h => {
-        const net = Number(h.normalizedUnitPrice ?? h.unitPrice) || 0;
-        const vat = Number(h.vatPercentage) || 22;
-        const gross = Number(h.grossUnitPrice) || (net > 0 ? net * (1 + vat / 100) : 0);
-        return gross;
-      })
-      .filter(p => p > 0);
-    const minGross = grossPrices.length > 0 ? Number(Math.min(...grossPrices).toFixed(2)) : 0;
-    const maxGross = grossPrices.length > 0 ? Number(Math.max(...grossPrices).toFixed(2)) : 0;
-    const avgGross = grossPrices.length > 0
-      ? Number((grossPrices.reduce((a, b) => a + b, 0) / grossPrices.length).toFixed(2))
-      : 0;
-    return { minGrossUnitPrice: minGross, maxGrossUnitPrice: maxGross, avgGrossUnitPrice: avgGross };
+    const stats = (prices: number[]) => {
+      const list = prices.filter(p => p > 0);
+      return list.length > 0
+        ? {
+            min: Number(Math.min(...list).toFixed(2)),
+            max: Number(Math.max(...list).toFixed(2)),
+            avg: Number((list.reduce((a, b) => a + b, 0) / list.length).toFixed(2))
+          }
+        : { min: 0, max: 0, avg: 0 };
+    };
+    const gross = stats(histRows.map(h => Number(h.normalizedUnitPrice ?? h.unitPrice) || Number(h.grossUnitPrice) || 0));
+    const net = stats(histRows.map(h => Number((h as any).normalizedNetUnitPrice ?? h.unitPriceNet) || 0));
+    return {
+      minGrossUnitPrice: gross.min,
+      maxGrossUnitPrice: gross.max,
+      avgGrossUnitPrice: gross.avg,
+      minNetUnitPrice: net.min,
+      maxNetUnitPrice: net.max,
+      avgNetUnitPrice: net.avg
+    };
   };
 
   comparisons.forEach(comp => {
@@ -1067,12 +1074,15 @@ export function buildMode1AppleToAppleComparisons(
         const firstSig = items[0].sig;
         const brandLabel = firstSig.canonicalBrandDisplay;
         let totalSpend = 0;
+        let totalNetSpend = 0;
         let totalQty = 0;
         subHistory.forEach(h => {
           const qty = Number(h.normalizedQuantity ?? h.quantity) || 0;
           const price = Number(h.normalizedUnitPrice ?? h.unitPrice) || 0;
           const spend = (Number(h.originalUnitPrice ?? price) || 0) * (Number(h.originalQuantity ?? qty) || 1);
+          const netPrice = Number((h as any).originalNetUnitPrice ?? h.unitPriceNet) || 0;
           totalSpend += spend;
+          totalNetSpend += netPrice * (Number(h.originalQuantity ?? qty) || 1);
           totalQty += qty;
         });
 
@@ -1110,6 +1120,9 @@ export function buildMode1AppleToAppleComparisons(
           minGrossUnitPrice: grossStats.minGrossUnitPrice,
           maxGrossUnitPrice: grossStats.maxGrossUnitPrice,
           avgGrossUnitPrice: grossStats.avgGrossUnitPrice,
+          minNetUnitPrice: grossStats.minNetUnitPrice,
+          maxNetUnitPrice: grossStats.maxNetUnitPrice,
+          avgNetUnitPrice: totalQty > 0 && totalNetSpend > 0 ? Number((totalNetSpend / totalQty).toFixed(2)) : grossStats.avgNetUnitPrice,
           priceDifferencePercentage: priceDiffPct,
           cheapestJobsite: cheapestEntry?.jobsiteName || comp.cheapestJobsite,
           cheapestJobsiteName: cheapestEntry?.jobsiteName || comp.cheapestJobsiteName,

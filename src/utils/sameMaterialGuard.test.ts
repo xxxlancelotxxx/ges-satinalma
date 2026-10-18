@@ -79,4 +79,24 @@ assert.equal(isMinorPriceAlert({ type: 'SAME_VENDOR_INFLATION', financialImpact:
 assert.equal(isMinorPriceAlert({ type: 'BASKET_SHRINKAGE', financialImpact: 100 }), false);
 console.log('✓ Küçük fiyat farkı eşiği doğru');
 
+// KDV tabanı: fatura toplamıyla doğrulanmış iki satır arasındaki 1,22x fark gerçek zamdır (УВМ-СТАЛЬ 65.500 → 80.000 ₽/t),
+// doğrulanmamış satırlarda aynı oran KDV karışıklığı sayılıp alarm üretilmez
+const rebarComp = (verified: boolean): any => ({
+  id: 'a500c_12',
+  materialName: 'A500C İnşaat Demiri Ø12 (11.7m GOST 34028)',
+  category: 'Demir & Çelik',
+  unit: 'Ton',
+  history: [
+    { date: '2026-08-05', supplier: 'УВМ-СТАЛЬ', unitPrice: 80000, unitPriceNet: 65573.77, quantity: 52, invoiceNumber: 'КА-65342', originalName: 'Арматура А500С Ø12 (11,7м ГОСТ 34028)', jobsiteName: 'Şantiye 1', vatBasisVerified: verified },
+    { date: '2026-09-28', supplier: 'УВМ-СТАЛЬ', unitPrice: 65500, unitPriceNet: 53688.52, quantity: 81, invoiceNumber: '77855', originalName: 'Арматура А500С Ø12 (11,7м ГОСТ 34028)', jobsiteName: 'Şantiye 2', vatBasisVerified: verified }
+  ]
+});
+const verifiedGap = buildSameMaterialPriceAlerts([rebarComp(true)], { language: 'TR', getMarketCluster: () => 'STEEL_REBAR' });
+assert.ok(verifiedGap.some(a => a.type === 'JOBSITE_PRICE_GAP' && a.minUnitPrice === 65500 && a.maxUnitPrice === 80000), 'doğrulanmış 1,22x fark alarm olmalı');
+const gapRow = verifiedGap.find(a => a.type === 'JOBSITE_PRICE_GAP')!;
+assert.equal(gapRow.historyRows?.find(r => r.unitPrice === 80000)?.netUnitPrice, 65573.77, 'alarm satırı neti de taşımalı');
+const unverifiedGap = buildSameMaterialPriceAlerts([rebarComp(false)], { language: 'TR', getMarketCluster: () => 'STEEL_REBAR' });
+assert.equal(unverifiedGap.filter(a => a.type === 'JOBSITE_PRICE_GAP').length, 0, 'doğrulanmamış 1,22x fark KDV karışıklığı sayılmalı');
+console.log('✓ KDV tabanı doğrulaması: gerçek %22 fark alarm, doğrulanmamış oran bastırıldı');
+
 console.log('=== ALL SAME-MATERIAL GUARD TESTS PASSED ===');

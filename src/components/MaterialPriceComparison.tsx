@@ -1114,7 +1114,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
               </span>
             </div>
             <div className="text-[10px] font-semibold text-slate-500 mt-0.5">
-              KDV Dahil: {formatRuble(mat.avgGrossUnitPrice || Number((mat.avgUnitPrice * 1.22).toFixed(2)))}
+              KDV Hariç: {formatRuble(mat.avgNetUnitPrice || Number((mat.avgUnitPrice / 1.22).toFixed(2)))}
             </div>
           </td>
 
@@ -1127,11 +1127,11 @@ export const MaterialPriceComparison: React.FC<Props> = ({
               <div className="font-black text-emerald-700 font-mono tabular-nums text-xs">
                 {formatRuble(mat.minUnitPrice)}{' '}
                 <span className="text-[10px] font-normal text-slate-500">
-                  /{mat.unit} (Net)
+                  /{mat.unit} (KDV Dahil)
                 </span>
               </div>
               <div className="text-[10px] font-mono tabular-nums text-emerald-800/80">
-                Brüt: {formatRuble(mat.minGrossUnitPrice || Number((mat.minUnitPrice * 1.22).toFixed(2)))}
+                Net: {formatRuble(mat.minNetUnitPrice || Number((mat.minUnitPrice / 1.22).toFixed(2)))}
               </div>
             </div>
           </td>
@@ -1140,7 +1140,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
           <td className="py-3.5 px-4">
             {mat.minUnitPrice === mat.maxUnitPrice ? (
               <span className="inline-flex items-center space-x-1 px-2 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold font-mono tabular-nums">
-                <span>✓ Sabit Net Fiyat</span>
+                <span>✓ Sabit Fiyat</span>
               </span>
             ) : (
               <div className="bg-rose-50 border border-rose-200 px-2.5 py-1.5 rounded-lg inline-block">
@@ -1150,11 +1150,11 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                 <div className="font-black text-rose-700 font-mono tabular-nums text-xs">
                   {formatRuble(mat.maxUnitPrice)}{' '}
                   <span className="text-[10px] font-normal text-slate-500">
-                    /{mat.unit} (Net)
+                    /{mat.unit} (KDV Dahil)
                   </span>
                 </div>
                 <div className="text-[10px] font-mono tabular-nums text-rose-800/80">
-                  Brüt: {formatRuble(mat.maxGrossUnitPrice || Number((mat.maxUnitPrice * 1.22).toFixed(2)))}
+                  Net: {formatRuble(mat.maxNetUnitPrice || Number((mat.maxUnitPrice / 1.22).toFixed(2)))}
                 </div>
               </div>
             )}
@@ -1727,22 +1727,22 @@ export const MaterialPriceComparison: React.FC<Props> = ({
             {/* 4 KPI Summary Cards */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
               <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Ort. Birim Fiyat (KDV Hariç Net)</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Ort. Birim Fiyat (%22 KDV Dahil)</div>
                 <div className="text-xl font-black text-indigo-950 font-mono tabular-nums mt-1">
                   {formatRuble(mat.avgUnitPrice)} <span className="text-xs font-normal text-slate-400">/{mat.unit}</span>
                 </div>
                 <div className="text-[11px] font-mono tabular-nums font-semibold text-slate-500 mt-1">
-                  KDV Dahil (Brüt): {formatRuble(mat.avgGrossUnitPrice || Number((mat.avgUnitPrice * 1.22).toFixed(2)))}
+                  KDV Hariç (Net): {formatRuble(mat.avgNetUnitPrice || Number((mat.avgUnitPrice / 1.22).toFixed(2)))}
                 </div>
               </div>
 
               <div className="bg-emerald-50/70 rounded-2xl p-4 border border-emerald-200 shadow-xs">
-                <div className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider">En Uygun Net Birim Fiyat</div>
+                <div className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider">En Uygun Birim Fiyat (KDV Dahil)</div>
                 <div className="text-xl font-black text-emerald-700 font-mono tabular-nums mt-1">
                   {formatRuble(mat.minUnitPrice)} <span className="text-xs font-normal text-emerald-600">/{mat.unit}</span>
                 </div>
                 <div className="text-[11px] font-mono tabular-nums font-semibold text-emerald-800 mt-0.5">
-                  KDV Dahil: {formatRuble(mat.minGrossUnitPrice || Number((mat.minUnitPrice * 1.22).toFixed(2)))}
+                  KDV Hariç: {formatRuble(mat.minNetUnitPrice || Number((mat.minUnitPrice / 1.22).toFixed(2)))}
                 </div>
                 <div className="text-[11px] font-bold text-emerald-900 mt-0.5 truncate" title={mat.cheapestJobsiteName}>
                   Şantiye: {mat.cheapestJobsiteName}
@@ -1750,12 +1750,12 @@ export const MaterialPriceComparison: React.FC<Props> = ({
               </div>
 
               <div className="bg-rose-50/70 rounded-2xl p-4 border border-rose-200 shadow-xs">
-                <div className="text-[10px] font-bold text-rose-800 uppercase tracking-wider">En Yüksek Net Birim Fiyat</div>
+                <div className="text-[10px] font-bold text-rose-800 uppercase tracking-wider">En Yüksek Birim Fiyat (KDV Dahil)</div>
                 <div className="text-xl font-black text-rose-700 font-mono tabular-nums mt-1">
                   {formatRuble(mat.maxUnitPrice)} <span className="text-xs font-normal text-rose-600">/{mat.unit}</span>
                 </div>
                 <div className="text-[11px] font-mono tabular-nums font-semibold text-rose-800 mt-0.5">
-                  KDV Dahil: {formatRuble(mat.maxGrossUnitPrice || Number((mat.maxUnitPrice * 1.22).toFixed(2)))}
+                  KDV Hariç: {formatRuble(mat.maxNetUnitPrice || Number((mat.maxUnitPrice / 1.22).toFixed(2)))}
                 </div>
                 <div className="text-[11px] font-bold text-rose-900 mt-0.5 truncate" title={mat.priciestJobsiteName}>
                   Şantiye: {mat.priciestJobsiteName}
@@ -1763,7 +1763,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
               </div>
 
               <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Net Fiyat Makası & Toplam Hacim</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fiyat Makası & Toplam Hacim</div>
                 <div className="flex items-baseline justify-between mt-1">
                   <span className={`text-xl font-black font-mono tabular-nums ${mat.priceDifferencePercentage > 15 ? 'text-rose-600' : mat.priceDifferencePercentage > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
                     %{mat.priceDifferencePercentage} Fark
@@ -1773,7 +1773,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                   </span>
                 </div>
                 <div className="text-[11px] font-mono tabular-nums font-bold text-slate-600 mt-1">
-                  Toplam Net: {formatRuble(mat.totalSpend)}
+                  Toplam (KDV Dahil): {formatRuble(mat.totalSpend)}
                 </div>
               </div>
             </div>
@@ -1795,10 +1795,10 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                     <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                     <div>
                       <div className="font-extrabold text-emerald-900">
-                        Standart Elma-Elma Kıyaslama: KDV Hariç (Net) & Nakliye Hariç Birim Fiyat
+                        Standart Elma-Elma Kıyaslama: %22 KDV Dahil & Nakliye Hariç Birim Fiyat
                       </div>
                       <p className="text-[11px] text-emerald-800 mt-0.5">
-                        Prizma ERP ve Satınalma Şefi faturaları arasındaki KDV (%20 / %22 НДС) ve nakliye farklarından kaynaklanan sahte sapmaları önlemek için tüm kıyaslamalar <strong>KDV Hariç Net Birim Fiyat</strong> üzerinden yapılmaktadır.
+                        Prizma ERP ve Satınalma Şefi faturaları arasındaki KDV (НДС) ve nakliye farklarından kaynaklanan sahte sapmaları önlemek için tüm kıyaslamalar <strong>%22 KDV Dahil Birim Fiyat</strong> üzerinden yapılmaktadır (KDV'siz / muaf satırlar ödenen fiyatıyla alınır).
                         {totalExcludedFreight > 0 && (
                           <span className="ml-1 font-bold underline">
                             Nakliye / Hizmet Bedeli ({formatRuble(totalExcludedFreight)}) malzeme birim fiyat kıyaslamasından hariç tutulmuştur.
@@ -2018,15 +2018,12 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                                 <div className="text-emerald-700 font-black">
                                   {formatRuble(hist.unitPrice)}{' '}
                                   <span className="text-[10px] font-normal text-slate-400">
-                                    /{hist.normalizedUnit || mat.unit} (Net)
+                                    /{hist.normalizedUnit || mat.unit} (KDV Dahil)
                                   </span>
                                 </div>
                                 <div className="text-[10px] font-semibold text-slate-500 mt-0.5">
-                                  KDV Dahil (%{hist.vatPercentage || 22} НДС):{' '}
-                                  {formatRuble(
-                                    hist.grossUnitPrice ||
-                                      Number((hist.unitPrice * (1 + (hist.vatPercentage || 22) / 100)).toFixed(2))
-                                  )}
+                                  KDV Hariç{hist.vatPercentage === 0 ? ' (KDV yok)' : hist.vatPercentage && hist.vatPercentage !== 22 ? ` (faturada %${hist.vatPercentage} НДС)` : ''}:{' '}
+                                  {formatRuble(Number(hist.unitPriceNet) || Number((hist.unitPrice / 1.22).toFixed(2)))}
                                 </div>
                                 {((Number((hist as any).excludedFreightAmount) || Number(targetInvoice?.excludedFreightAmount) || 0) > 0) && (
                                   <div className="text-[9px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded inline-block mt-0.5">
@@ -2052,15 +2049,12 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                                 <div className="font-black">
                                   {formatRuble(hist.originalUnitPrice || hist.unitPrice)}{' '}
                                   <span className="text-[10px] font-normal text-slate-400">
-                                    /{hist.originalUnit || mat.unit} (Net)
+                                    /{hist.originalUnit || mat.unit} (KDV Dahil)
                                   </span>
                                 </div>
                                 <div className="text-[10px] font-semibold text-slate-500 mt-0.5">
-                                  KDV Dahil (%{hist.vatPercentage || 22} НДС):{' '}
-                                  {formatRuble(
-                                    hist.grossUnitPrice ||
-                                      Number(((hist.originalUnitPrice || hist.unitPrice) * (1 + (hist.vatPercentage || 22) / 100)).toFixed(2))
-                                  )}
+                                  KDV Hariç:{' '}
+                                  {formatRuble(Number(hist.originalNetUnitPrice) || Number(((hist.originalUnitPrice || hist.unitPrice) / 1.22).toFixed(2)))}
                                 </div>
                               </div>
                             )}

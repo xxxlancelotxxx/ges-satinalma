@@ -1,5 +1,10 @@
 # Prizma Fatura Senkronizasyonu & Malzeme Birim Fiyat Kıyaslama Standartlaştırma Planı
 
+> [!WARNING]
+> **Karar değişti (2026-10-18, Berkant):** Malzeme fiyat kıyaslamasının tabanı artık **Net değil, %22 KDV DAHİL birim fiyattır** (`src/utils/vatBasis.ts`, `/api/materials/compare` → `priceBasis: 'VAT_INCLUSIVE_22'`). %20/%22 KDV'li satırlar net × 1,22; KDV'siz/muaf satırlar ödenen fiyatla. Net fiyat ekranlarda yalnızca ikinci satırda bilgi olarak gösterilir. Aşağıdaki "Net bazlı kıyaslama" kararları bu notla geçersizdir.
+> Ayrıca kalemin net/brüt ayrımı fatura toplamıyla doğrulanır (`vatBasisVerified`); doğrulanmış satırlar faturalar arası "1,20x / 1,22x oran" tahminiyle değiştirilmez.
+
+
 Bu plan, Prizma ERP'den senkronize edilen faturalar ile satınalma şeflerinin portala girdiği faturalar arasındaki **KDV (НДС %20/%22) ve Nakliye/Hizmet (Доставка / Услуги) kaynaklı birim fiyat uyuşmazlıklarını** kalıcı olarak ortadan kaldırmak, **Malzeme Fiyat Karşılaştırma** ve **Tedarikçi Fiyat Artış & Sapma Paneli** ekranlarında yanıltıcı fiyat artış uyarılarını engellemek ve geçmiş tüm kayıtları geriye dönük otomatik temizlemek için hazırlanmıştır.
 
 ---
