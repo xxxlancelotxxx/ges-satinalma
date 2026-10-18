@@ -1,6 +1,6 @@
 {
-  "summary": "Prizma senkronize faturaları ve portal malzeme kıyaslama motorunda KDV/Nakliye ayrıştırması, çift katmanlı (Net ve KDV Dahil) birim fiyat standartlaştırması ve geriye dönük tüm veritabanı faturalarının otomatik temizlenmesi için mimari uygulama planı.",
-  "updatedAt": "2026-10-17T11:41:13.377503538Z",
+  "summary": "Genel Bakış ve Dashboard ekranının 28 standart kategoriyle tam senkronize çalışması, Yapay Zeka Karar & Canlı Senkronizasyon Masasının akıllı aksiyon ve sekmeler arası canlı köprü merkezine dönüştürülmesi, Kategori Bazlı Harcama Dağılımına tıklanabilir alt kırılım (malzeme/tedarikçi/şantiye) eklenmesi ve mükerrer Veri Güvenliği & Yedek kartının kaldırılarak alt düzenin optimize edilmesi için uygulama planı.",
+  "updatedAt": "2026-10-18T16:26:11.493385683Z",
   "requestFeedback": true,
   "userFacing": true
 }

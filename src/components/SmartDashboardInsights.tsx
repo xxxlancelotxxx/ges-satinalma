@@ -32,14 +32,16 @@ import {
 } from 'recharts';
 import { InvoiceRecord, Jobsite } from '../types';
 import { formatRuble } from '../utils/format';
-import { classifyItemCategory } from '../utils/dashboardStats';
+import { classifyItemCategory, isPrizmaAutoSyncedInvoice } from '../utils/dashboardStats';
 
 interface JobsiteBreakdownProps {
   invoices: InvoiceRecord[];
   jobsites: Jobsite[];
   selectedJobsiteId?: string;
   onNavigateToTab: (tabId: string) => void;
+  onNavigateToMaterial?: (materialName: string, category?: string) => void;
   onApplyJobsiteFilter?: (jobsiteId: string) => void;
+  onApplyCategoryFilter?: (category: string) => void;
 }
 
 export interface MaterialStatItem {
@@ -84,7 +86,9 @@ export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
   jobsites = [],
   selectedJobsiteId: propJobsiteId,
   onNavigateToTab,
-  onApplyJobsiteFilter
+  onNavigateToMaterial,
+  onApplyJobsiteFilter,
+  onApplyCategoryFilter
 }) => {
   const [selectedJobsiteId, setSelectedJobsiteId] = useState<string>(propJobsiteId || 'ALL');
   const [materialSearchQuery, setMaterialSearchQuery] = useState<string>('');
@@ -116,7 +120,7 @@ export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
 
     // Faturaları tara
     invoices.forEach(inv => {
-      if (inv.isDeleted || inv.test || (!inv.jobsiteId && !inv.jobsiteName)) return;
+      if (inv.isDeleted || inv.isPermanentlyDeleted || inv.test || isPrizmaAutoSyncedInvoice(inv) || (!inv.jobsiteId && !inv.jobsiteName)) return;
       const matchedJobsite = jobsites.find(j => j.id === inv.jobsiteId || (inv.jobsiteName && j.name.toLowerCase() === inv.jobsiteName.toLowerCase()));
       const siteId = matchedJobsite ? matchedJobsite.id : (inv.jobsiteId || 'site_' + inv.jobsiteName);
       const siteName = matchedJobsite ? matchedJobsite.name : (inv.jobsiteName || 'Şantiye');
@@ -141,42 +145,52 @@ export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
       const items = Array.isArray(inv.items) ? inv.items : [];
       let invoiceTotal = 0;
 
-      items.forEach(it => {
-        const matName = (it.materialName || it.originalName || 'Diğer Malzeme').trim();
-        const qty = Number(it.quantity) || 1;
-        const price = Number(it.unitPrice) || 0;
-        const total = Number(it.totalPrice) || qty * price;
-        const category = classifyItemCategory(it.materialName, it.originalName, inv.supplier, it.category);
+      if (items.length > 0) {
+        items.forEach(it => {
+          const matName = (it.materialName || it.originalName || 'Diğer Malzeme').trim();
+          const qty = Number(it.quantity) || 1;
+          const price = Number(it.unitPrice) || 0;
+          const total = Number(it.totalPrice) || qty * price;
+          const category = classifyItemCategory(it.materialName, it.originalName, inv.supplier, it.category || inv.category);
 
-        invoiceTotal += total;
-        site.itemCount += 1;
+          invoiceTotal += total;
+          site.itemCount += 1;
 
-        // Kategori toplamı
-        site.categories[category] = (site.categories[category] || 0) + total;
+          // Kategori toplamı
+          site.categories[category] = (site.categories[category] || 0) + total;
 
-        // Malzeme toplamı
-        if (!site.materials[matName]) {
-          site.materials[matName] = {
-            name: matName,
-            category,
-            totalSpend: 0,
-            totalQty: 0,
-            unit: it.unit || 'adet',
-            count: 0,
-            avgUnitPrice: 0,
-            lastDate: inv.date || inv.created_at || '',
-            supplier: inv.supplier || ''
-          };
+          // Malzeme toplamı
+          if (!site.materials[matName]) {
+            site.materials[matName] = {
+              name: matName,
+              category,
+              totalSpend: 0,
+              totalQty: 0,
+              unit: it.unit || 'adet',
+              count: 0,
+              avgUnitPrice: 0,
+              lastDate: inv.date || inv.created_at || '',
+              supplier: inv.supplier || ''
+            };
+          }
+
+          const m = site.materials[matName];
+          m.totalSpend += total;
+          m.totalQty += qty;
+          m.count += 1;
+          if (inv.date && (!m.lastDate || inv.date > m.lastDate)) {
+            m.lastDate = inv.date;
+          }
+        });
+      } else {
+        const fallbackTotal = Number(inv.totalAmount) || 0;
+        if (fallbackTotal > 0) {
+          const category = classifyItemCategory(inv.supplier, '', inv.supplier, inv.category);
+          site.categories[category] = (site.categories[category] || 0) + fallbackTotal;
+          site.itemCount += 1;
+          invoiceTotal = fallbackTotal;
         }
-
-        const m = site.materials[matName];
-        m.totalSpend += total;
-        m.totalQty += qty;
-        m.count += 1;
-        if (inv.date && (!m.lastDate || inv.date > m.lastDate)) {
-          m.lastDate = inv.date;
-        }
-      });
+      }
 
       site.totalSpend += invoiceTotal > 0 ? invoiceTotal : (Number(inv.totalAmount) || 0);
     });
@@ -559,7 +573,12 @@ export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
           {/* Kategori Etiketleri Listesi */}
           <div className="mt-2 space-y-1 max-h-28 overflow-y-auto pr-1">
             {categoryChartData.map((cat, idx) => (
-              <div key={`${cat.name}-${idx}`} className="flex items-center justify-between text-xs py-1 border-b border-slate-200/40 last:border-0">
+              <div
+                key={`${cat.name}-${idx}`}
+                onClick={() => onApplyCategoryFilter && onApplyCategoryFilter(cat.name)}
+                className="flex items-center justify-between text-xs py-1 px-1.5 rounded-lg hover:bg-slate-200/60 border-b border-slate-200/40 last:border-0 cursor-pointer transition-colors"
+                title="Bu kategoriye göre filtrele"
+              >
                 <div className="flex items-center space-x-2 truncate">
                   <span
                     className="w-2.5 h-2.5 rounded-full shrink-0"
@@ -610,18 +629,23 @@ export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
                 <th className="py-2.5 px-3 text-right">Ortalama Birim Fiyat</th>
                 <th className="py-2.5 px-3 text-right">Toplam Harcama (₽)</th>
                 <th className="py-2.5 px-3 text-right">Şantiye İçi Payı</th>
-                <th className="py-2.5 px-3 text-center">Alım Sayısı</th>
+                <th className="py-2.5 px-3 text-center">Alım / Kıyas</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {materialList.length > 0 ? (
                 materialList.map((m, idx) => (
-                  <tr key={`${m.name}-${m.category}-${idx}`} className="hover:bg-indigo-50/40 transition-colors">
+                  <tr
+                    key={`${m.name}-${m.category}-${idx}`}
+                    onClick={() => onNavigateToMaterial ? onNavigateToMaterial(m.name, m.category) : onNavigateToTab('material-compare')}
+                    className="hover:bg-indigo-50/50 transition-colors cursor-pointer group"
+                    title="Malzeme Fiyat Karşılaştırma ekranında incelemek için tıklayın"
+                  >
                     <td className="py-2.5 px-3 text-center font-mono text-slate-400 font-bold">
                       {idx + 1}
                     </td>
                     <td className="py-2.5 px-3">
-                      <div className="font-bold text-slate-900 line-clamp-1" title={m.name}>
+                      <div className="font-bold text-slate-900 group-hover:text-indigo-700 transition-colors line-clamp-1" title={m.name}>
                         {m.name}
                       </div>
                       {m.supplier && (
@@ -629,9 +653,17 @@ export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
                       )}
                     </td>
                     <td className="py-2.5 px-3">
-                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200/60">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (onApplyCategoryFilter) onApplyCategoryFilter(m.category);
+                        }}
+                        className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 hover:bg-indigo-100 text-slate-600 hover:text-indigo-700 border border-slate-200/60 transition-colors cursor-pointer"
+                        title="Bu kategoriye göre filtrele"
+                      >
                         {m.category}
-                      </span>
+                      </button>
                     </td>
                     <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-700">
                       {m.totalQty.toLocaleString('tr-TR')} {m.unit}
@@ -645,8 +677,11 @@ export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
                     <td className="py-2.5 px-3 text-right font-mono font-bold text-indigo-700">
                       %{m.shareInSite}
                     </td>
-                    <td className="py-2.5 px-3 text-center font-mono text-slate-500 font-bold">
-                      {m.count} fatura
+                    <td className="py-2.5 px-3 text-center">
+                      <span className="inline-flex items-center space-x-1 font-mono text-[11px] text-slate-600 group-hover:text-indigo-700 font-bold">
+                        <span>{m.count} fatura</span>
+                        <ArrowUpRight className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity text-indigo-600" />
+                      </span>
                     </td>
                   </tr>
                 ))

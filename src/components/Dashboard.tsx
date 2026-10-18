@@ -40,7 +40,7 @@ import {
   exportDashboardToExcel,
   exportDashboardToHtml
 } from '../utils/dashboardStats';
-import { verifyProcurementDataIntegrity } from '../utils/procurementAnalyticsCore';
+import { verifyProcurementDataIntegrity, getNormalizedProcurementItems } from '../utils/procurementAnalyticsCore';
 import {
   ResponsiveContainer,
   AreaChart,
@@ -111,6 +111,7 @@ interface DashboardProps {
   onOpenNewDiscountModal: () => void;
   onOpenBackupModal?: () => void;
   onNavigateToTab: (tabId: string) => void;
+  onNavigateToMaterial?: (materialName: string, category?: string) => void;
   onRefreshData?: () => Promise<void>;
   onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => void | Promise<void>;
   onDeleteInvoice?: (id: string) => void | Promise<void>;
@@ -211,8 +212,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   supervisors,
   personnel = [],
   onOpenNewDiscountModal,
-  onOpenBackupModal,
   onNavigateToTab,
+  onNavigateToMaterial,
   onRefreshData,
   onUpdateInvoice,
   onDeleteInvoice
@@ -237,6 +238,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [jobsiteViewMode, setJobsiteViewMode] = useState<'pie' | 'bar'>('pie');
   const [categoryViewMode, setCategoryViewMode] = useState<'hybrid' | 'bars' | 'donut' | 'table'>('hybrid');
   const [showAllCategoryPills, setShowAllCategoryPills] = useState<boolean>(false);
+  const [inspectedCategory, setInspectedCategory] = useState<string | null>(null);
   const [txSearch, setTxSearch] = useState<string>('');
   const [txPage, setTxPage] = useState<number>(1);
   const [txPageSize, setTxPageSize] = useState<number>(10);
@@ -245,18 +247,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
   useModalBackHandler(!!selectedTx, () => setSelectedTx(null));
 
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-  const [backupInfo, setBackupInfo] = useState<{
-    lastBackupTime: string | null;
-    snapshotCount: number;
-    totalSizeBytes: number;
-  }>({
-    lastBackupTime: null,
-    snapshotCount: 0,
-    totalSizeBytes: 0
-  });
-
-  const [isCreatingBackup, setIsCreatingBackup] = useState<boolean>(false);
-  const [backupSuccessMessage, setBackupSuccessMessage] = useState<string | null>(null);
 
   // Full transparent visibility across all roles (Admin, Supervisor, Personnel) to foster healthy team competition
   // Only include GES platform invoices (Yeni Satınalma İndirim Girişi, 1M+ ₽ TDF, AI Fatura / Çek Okuma); exclude Prizma reference invoices
@@ -278,73 +268,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
     );
   }, [discounts]);
 
-  // Fetch Backup Manifest Information (Admin Only)
-  const fetchBackupMetadata = async () => {
-    if (user?.role !== 'admin') return;
-    try {
-      const res = await fetch('/api/backup/list', {
-        headers: {
-          'x-session-token': user.token || '',
-          'x-user-name': user.username
-        }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.manifest) {
-          const snapshots = data.manifest.snapshots || [];
-          const totalBytes = snapshots.reduce((sum: number, s: any) => sum + (s.sizeBytes || 0), 0);
-          const latestFormatted = snapshots.length > 0
-            ? (snapshots[0].dateFormatted || (snapshots[0].timestamp ? formatUploadDate(snapshots[0].timestamp) : null))
-            : (data.lastBackupTime ? formatUploadDate(data.lastBackupTime) : null);
-
-          setBackupInfo({
-            lastBackupTime: latestFormatted,
-            snapshotCount: snapshots.length,
-            totalSizeBytes: totalBytes
-          });
-        }
-      }
-    } catch (e) {
-      console.warn('Dashboard backup metadata fetch error:', e);
-    }
-  };
-
-  useEffect(() => {
-    if (user?.role === 'admin') {
-      fetchBackupMetadata();
-    }
-  }, [user?.role]);
-
-  const handleManualBackup = async () => {
-    if (user?.role !== 'admin') return;
-    try {
-      setIsCreatingBackup(true);
-      const res = await fetch('/api/backup/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-session-token': user.token || '',
-          'x-user-name': user.username
-        }
-      });
-      if (res.ok) {
-        setBackupSuccessMessage('Yedek başarıyla oluşturuldu');
-        await fetchBackupMetadata();
-        setTimeout(() => setBackupSuccessMessage(null), 3000);
-      }
-    } catch (e) {
-      console.error('Manual backup error:', e);
-    } finally {
-      setIsCreatingBackup(false);
-    }
-  };
-
   const handleRefresh = async () => {
     if (!onRefreshData) return;
     try {
       setIsRefreshing(true);
       await onRefreshData();
-      await fetchBackupMetadata();
     } finally {
       setIsRefreshing(false);
     }
@@ -598,6 +526,161 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const topDiscountRecords = useMemo(() => {
     return getTopDiscountRecords(currentFilteredDiscounts, 5);
   }, [currentFilteredDiscounts]);
+
+  // Normalized items for active period (ignoring category filter so category drilldown works seamlessly)
+  const normalizedPeriodItems = useMemo(() => {
+    const baseFiltered = filterInvoices(effectiveInvoices, { ...filter, selectedCategory: 'ALL' }, currentBounds);
+    return getNormalizedProcurementItems(baseFiltered);
+  }, [effectiveInvoices, filter, currentBounds]);
+
+  const activeDrillCategory = useMemo(() => {
+    if (filter.selectedCategory && filter.selectedCategory !== 'ALL') {
+      return filter.selectedCategory;
+    }
+    if (inspectedCategory && categorySpendingData.some(c => c.category === inspectedCategory)) {
+      return inspectedCategory;
+    }
+    return categorySpendingData[0]?.category || null;
+  }, [filter.selectedCategory, inspectedCategory, categorySpendingData]);
+
+  const activeCategoryDrilldownData = useMemo(() => {
+    if (!activeDrillCategory) return null;
+    const catItems = normalizedPeriodItems.filter(it => it.canonicalCategory === activeDrillCategory);
+    const totalSpend = catItems.reduce((sum, it) => sum + it.totalPrice, 0);
+    const invoiceIds = new Set(catItems.map(it => it.invoiceId));
+
+    const matMap = new Map<string, { name: string; unit: string; totalQty: number; totalSpend: number; count: number; supplier: string }>();
+    const vendorMap = new Map<string, { name: string; rawName: string; totalSpend: number; count: number }>();
+    const siteMap = new Map<string, { jobsiteId: string; jobsiteName: string; totalSpend: number; count: number }>();
+
+    catItems.forEach(it => {
+      const mKey = `${it.materialName.trim()}___${it.unit}`;
+      const existingMat = matMap.get(mKey);
+      if (existingMat) {
+        existingMat.totalQty += it.quantity;
+        existingMat.totalSpend += it.totalPrice;
+        existingMat.count += 1;
+      } else {
+        matMap.set(mKey, {
+          name: it.materialName.trim(),
+          unit: it.unit,
+          totalQty: it.quantity,
+          totalSpend: it.totalPrice,
+          count: 1,
+          supplier: normalizeVendorName(it.supplier)
+        });
+      }
+
+      const rawVen = (it.supplier || 'Bilinmeyen Tedarikçi').trim();
+      const vName = normalizeVendorName(rawVen) || rawVen;
+      const existingVen = vendorMap.get(vName);
+      if (existingVen) {
+        existingVen.totalSpend += it.totalPrice;
+        existingVen.count += 1;
+      } else {
+        vendorMap.set(vName, { name: vName, rawName: rawVen, totalSpend: it.totalPrice, count: 1 });
+      }
+
+      const matchedJobsite = jobsites.find(j => j.id === it.jobsiteId || (it.jobsiteName && j.name.toLowerCase() === it.jobsiteName.toLowerCase()));
+      const sId = matchedJobsite ? matchedJobsite.id : (it.jobsiteId || it.jobsiteName || 'Genel');
+      const sName = matchedJobsite ? matchedJobsite.name : (it.jobsiteName || 'Genel Şantiye');
+      const existingSite = siteMap.get(sId);
+      if (existingSite) {
+        existingSite.totalSpend += it.totalPrice;
+        existingSite.count += 1;
+      } else {
+        siteMap.set(sId, { jobsiteId: sId, jobsiteName: sName, totalSpend: it.totalPrice, count: 1 });
+      }
+    });
+
+    const topMaterials = Array.from(matMap.values())
+      .sort((a, b) => b.totalSpend - a.totalSpend)
+      .slice(0, 6)
+      .map(m => ({
+        ...m,
+        avgUnitPrice: m.totalQty > 0 ? m.totalSpend / m.totalQty : 0,
+        share: totalSpend > 0 ? Number(((m.totalSpend / totalSpend) * 100).toFixed(1)) : 0
+      }));
+
+    const topVendors = Array.from(vendorMap.values())
+      .sort((a, b) => b.totalSpend - a.totalSpend)
+      .slice(0, 4)
+      .map(v => ({
+        ...v,
+        share: totalSpend > 0 ? Number(((v.totalSpend / totalSpend) * 100).toFixed(1)) : 0
+      }));
+
+    const topJobsites = Array.from(siteMap.values())
+      .sort((a, b) => b.totalSpend - a.totalSpend)
+      .slice(0, 4)
+      .map(s => ({
+        ...s,
+        share: totalSpend > 0 ? Number(((s.totalSpend / totalSpend) * 100).toFixed(1)) : 0
+      }));
+
+    return {
+      category: activeDrillCategory,
+      totalSpend,
+      itemCount: catItems.length,
+      invoiceCount: invoiceIds.size,
+      topMaterials,
+      topVendors,
+      topJobsites
+    };
+  }, [activeDrillCategory, normalizedPeriodItems, jobsites]);
+
+  // Top Vendors by Volume & Discounts Won (Replaces Redundant Backup Card)
+  const topVendorsSummary = useMemo(() => {
+    const map = new Map<string, { name: string; rawName: string; totalSpend: number; invoiceCount: number; totalDiscount: number; discountCount: number }>();
+
+    currentFilteredInvoices.forEach(inv => {
+      const raw = (inv.supplier || (inv as any).vendorName || 'Bilinmeyen Tedarikçi').trim();
+      const norm = normalizeVendorName(raw) || raw;
+      const items = Array.isArray(inv.items) ? inv.items : [];
+      const invSpend = items.length > 0
+        ? items.reduce((s, it) => s + (Number(it.totalPrice) || (Number(it.quantity) || 1) * (Number(it.unitPrice) || 0)), 0)
+        : (Number(inv.totalAmount) || 0);
+      const cur = map.get(norm);
+      if (cur) {
+        cur.totalSpend += invSpend;
+        cur.invoiceCount += 1;
+      } else {
+        map.set(norm, {
+          name: norm,
+          rawName: raw,
+          totalSpend: invSpend,
+          invoiceCount: 1,
+          totalDiscount: 0,
+          discountCount: 0
+        });
+      }
+    });
+
+    currentFilteredDiscounts.forEach(d => {
+      const raw = (d.vendorName || '').trim();
+      if (!raw) return;
+      const norm = normalizeVendorName(raw) || raw;
+      const discAmt = Number(d.discountAmount) || 0;
+      const cur = map.get(norm);
+      if (cur) {
+        cur.totalDiscount += discAmt;
+        cur.discountCount += 1;
+      } else {
+        map.set(norm, {
+          name: norm,
+          rawName: raw,
+          totalSpend: Number(d.agreedPrice) || 0,
+          invoiceCount: 0,
+          totalDiscount: discAmt,
+          discountCount: 1
+        });
+      }
+    });
+
+    return Array.from(map.values())
+      .sort((a, b) => b.totalSpend - a.totalSpend)
+      .slice(0, 5);
+  }, [currentFilteredInvoices, currentFilteredDiscounts]);
 
   // Export to Excel Handler
   const handleExportExcel = () => {
@@ -1101,50 +1184,52 @@ export const Dashboard: React.FC<DashboardProps> = ({
         />
       ) : (
         <>
-      {/* 🚀 AI Decision Engine & Real-Time Intelligence Control Strip */}
-      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-4 sm:p-5 border border-indigo-500/20 shadow-md relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-80 h-full bg-gradient-to-l from-indigo-500/10 to-transparent pointer-events-none" />
-        
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 relative z-10">
-          {/* Left: AI Status & Live Pulse */}
+      {/* 🚀 AI Decision Engine & Real-Time Cross-Tab Synchronization Command Center */}
+      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-4 sm:p-5 border border-indigo-500/25 shadow-md relative overflow-hidden">
+        <div className="absolute top-0 right-0 w-96 h-full bg-gradient-to-l from-indigo-500/10 to-transparent pointer-events-none" />
+
+        {/* Top Bar: Title, Live Sync Telemetry & 6-Tab Quick Bridge */}
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 relative z-10">
           <div className="flex items-start sm:items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-md shadow-indigo-500/20 shrink-0">
-              <Sparkles className="w-5 h-5 text-white animate-pulse" />
+              <Sparkles className="w-5 h-5 text-white" />
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="font-bold text-sm sm:text-base text-white flex items-center gap-1.5">
-                  <span>Yapay Zeka Karar & Canlı Senkronizasyon Masası</span>
+                <h3 className="font-bold text-sm sm:text-base text-white">
+                  Yapay Zeka Karar & Canlı Sekme Senkronizasyon Masası
                 </h3>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  Canlı Entegre
+                  Canlı Senkronize
                 </span>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                  23 Kategori %100 Çözümlendi
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-500/20 text-indigo-200 border border-indigo-400/30 font-mono">
+                  28 Standart Kategori • {categorySpendingData.length} Aktif (%100 Eşit)
                 </span>
               </div>
               <p className="text-xs text-slate-300 mt-0.5">
-                Tüm faturalar, şef pazarlıkları, şantiye harcamaları ve malzeme fiyatları anlık olarak analiz edilip sekmeler arası senkronize edilmektedir.
+                Tüm sekmeler tek doğruluk kaynağından beslenir; aşağıdaki karar kartlarından veya sekme köprülerinden doğrudan ilgili analize geçebilirsiniz.
               </p>
             </div>
           </div>
 
-          {/* Right: Quick Action Hub */}
-          <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+          {/* 6-Tab Live Bridge Buttons */}
+          <div className="flex items-center gap-1.5 flex-wrap">
             <button
               type="button"
               onClick={() => onNavigateToTab('material-compare')}
-              className="px-3 py-2 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-1.5 border border-white/10 cursor-pointer"
+              className="px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-1.5 border border-white/10 cursor-pointer"
+              title="Malzeme Birim Fiyat Karşılaştırma Sekmesine Git"
             >
               <TrendingUp className="w-3.5 h-3.5 text-amber-400" />
-              <span>Fiyat Farkları ({materialComparisons.length})</span>
+              <span>Fiyat Kıyas ({materialComparisons.length})</span>
             </button>
 
             <button
               type="button"
               onClick={() => onNavigateToTab('anomalies')}
-              className="px-3 py-2 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-1.5 border border-white/10 cursor-pointer"
+              className="px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-1.5 border border-white/10 cursor-pointer"
+              title="Anomali ve Fiyat Risk Radarı Sekmesine Git"
             >
               <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
               <span>Anomali Radarı ({kpiStats.anomaliesCount})</span>
@@ -1153,10 +1238,41 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <button
               type="button"
               onClick={() => onNavigateToTab('performance')}
-              className="px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              className="px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-1.5 border border-white/10 cursor-pointer"
+              title="Şef Performans ve Rekabet Raporu Sekmesine Git"
             >
-              <Users className="w-3.5 h-3.5 text-white" />
-              <span>Şef Masası</span>
+              <Users className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Şef Masası ({supervisors.length})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onNavigateToTab('discount-entry')}
+              className="px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-1.5 border border-white/10 cursor-pointer"
+              title="İndirim ve Pazarlık Kayıtları Sekmesine Git"
+            >
+              <Percent className="w-3.5 h-3.5 text-sky-400" />
+              <span>İndirimler ({effectiveDiscounts.length})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onNavigateToTab('invoice-drive')}
+              className="px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-1.5 border border-white/10 cursor-pointer"
+              title="Fatura Drive Bulut Arşivi Sekmesine Git"
+            >
+              <FileText className="w-3.5 h-3.5 text-indigo-300" />
+              <span>Fatura Drive ({effectiveInvoices.length})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onNavigateToTab('pre-approval-audit')}
+              className="px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              title="1M+ ₽ Karşılaştırmalı Teklif ve Ön Onay Denetimi"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5 text-white" />
+              <span>1M+ ₽ TDF Onay</span>
             </button>
 
             {onRefreshData && (
@@ -1165,7 +1281,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 onClick={handleRefresh}
                 disabled={isRefreshing}
                 title="Tüm Sekmeleri ve Verileri Yeniden Eşitle"
-                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-all border border-white/10 cursor-pointer disabled:opacity-50"
+                className="p-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-all border border-white/10 cursor-pointer disabled:opacity-50"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-indigo-400' : ''}`} />
               </button>
@@ -1173,144 +1289,172 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         </div>
 
-        {/* 🧠 İnsandan Üstün Yapay Zeka Satınalma Beyni (Canlı Anomali Radarı & Tasarruf Masası) */}
-        {superIntelligentInsights.totalCount > 0 && (
-          <div className="mt-4 pt-4 border-t border-indigo-500/20 space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="flex h-2 w-2 rounded-full bg-rose-400 animate-ping" />
-                <span className="text-xs font-bold uppercase tracking-wider text-indigo-200">
-                  {language === 'RU' ? 'Супер-Интеллект: Радар Скрытых Аномалий и Экономии' : 'Süper Zeka: Gizli Anomali Radarı & Tasarruf Fırsatları'}
+        {/* Middle Row: 4 Actionable Executive Decision Cards (Always Active & Data-Driven) */}
+        <div className="mt-4 pt-4 border-t border-indigo-500/20 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 relative z-10 text-xs">
+          {/* Card 1: Highest Unit Price Gap Opportunity */}
+          <div
+            onClick={() => {
+              const topGap = topPriceGapMaterials[0];
+              if (topGap && onNavigateToMaterial) {
+                onNavigateToMaterial(topGap.materialName, topGap.category);
+              } else {
+                onNavigateToTab('material-compare');
+              }
+            }}
+            className="bg-white/5 hover:bg-white/10 p-3.5 rounded-xl border border-amber-400/25 cursor-pointer transition-all group flex flex-col justify-between"
+          >
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                  <TrendingUp className="w-3.5 h-3.5 text-amber-400" />
+                  <span>En Yüksek Fiyat Makası</span>
                 </span>
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-rose-500/30 text-rose-300 border border-rose-500/40">
-                  {superIntelligentInsights.totalCount} {language === 'RU' ? 'Аномалий' : 'Aktif Tespit'}
-                </span>
+                {topPriceGapMaterials[0] && (
+                  <span className="font-mono font-black text-[11px] bg-amber-500/25 text-amber-200 px-1.5 py-0.5 rounded border border-amber-400/30">
+                    %{topPriceGapMaterials[0].priceDiffPercentage.toFixed(0)} Fark
+                  </span>
+                )}
               </div>
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-slate-300">
-                  {language === 'RU' ? 'Потенциал экономии / возврата:' : 'Toplam Tasarruf / İade Fırsatı:'}
-                </span>
-                <span className="font-mono font-black text-emerald-400 bg-emerald-500/20 px-2.5 py-0.5 rounded-lg border border-emerald-500/30 text-sm">
-                  {formatRuble(superIntelligentInsights.totalPotentialSavings)}
-                </span>
-              </div>
+              {topPriceGapMaterials[0] ? (
+                <>
+                  <p className="font-bold text-white truncate text-xs" title={topPriceGapMaterials[0].materialName}>
+                    {topPriceGapMaterials[0].materialName}
+                  </p>
+                  <p className="text-[11px] text-slate-300 mt-1 font-mono">
+                    Min: <span className="text-emerald-300 font-bold">{formatRubleWithDecimals(topPriceGapMaterials[0].minPrice)}</span> • Max: <span className="text-rose-300 font-bold">{formatRubleWithDecimals(topPriceGapMaterials[0].maxPrice)}</span>
+                  </p>
+                </>
+              ) : (
+                <p className="text-slate-300 text-[11px] mt-1">Seçili filtrede belirgin birim fiyat farkı yok.</p>
+              )}
             </div>
-
-            {/* 4 Engine Live Summary Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
-              {/* Engine 1: Çapraz Şantiye Fiyat Arbitrajı */}
-              <div
-                onClick={() => onNavigateToTab('anomalies')}
-                className="bg-white/5 hover:bg-white/10 p-3 rounded-xl border border-indigo-400/20 cursor-pointer transition-all group"
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-bold text-indigo-300 flex items-center gap-1.5">
-                    <span>🔄</span>
-                    <span>{language === 'RU' ? 'Кросс-Объектный Арбитраж' : 'Çapraz Şantiye Arbitrajı'}</span>
-                  </span>
-                  <span className="font-mono font-bold text-xs bg-indigo-500/30 text-indigo-200 px-1.5 py-0.5 rounded">
-                    {superIntelligentInsights.arbitrageCount}
-                  </span>
-                </div>
-                <div className="text-[11px] text-slate-300 flex justify-between items-center mt-1.5">
-                  <span className="text-slate-400">{language === 'RU' ? 'Разница:' : 'Tasarruf:'}</span>
-                  <span className="font-mono font-bold text-emerald-400">{formatRuble(superIntelligentInsights.arbitrageSavings)}</span>
-                </div>
-              </div>
-
-              {/* Engine 2: Eşik Atlatma & Parçalı Alım */}
-              <div
-                onClick={() => onNavigateToTab('anomalies')}
-                className="bg-white/5 hover:bg-white/10 p-3 rounded-xl border border-purple-400/20 cursor-pointer transition-all group"
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-bold text-purple-300 flex items-center gap-1.5">
-                    <span>✂️</span>
-                    <span>{language === 'RU' ? 'Дробление (Smurfing)' : 'Eşik Atlatma (Smurfing)'}</span>
-                  </span>
-                  <span className="font-mono font-bold text-xs bg-purple-500/30 text-purple-200 px-1.5 py-0.5 rounded">
-                    {superIntelligentInsights.smurfingCount}
-                  </span>
-                </div>
-                <div className="text-[11px] text-slate-300 flex justify-between items-center mt-1.5">
-                  <span className="text-slate-400">{language === 'RU' ? 'Объем 72ч:' : '72s Hacim:'}</span>
-                  <span className="font-mono font-bold text-amber-300">{formatRuble(superIntelligentInsights.smurfingImpact)}</span>
-                </div>
-              </div>
-
-              {/* Engine 3: Sinsi Fiyat Artışı */}
-              <div
-                onClick={() => onNavigateToTab('anomalies')}
-                className="bg-white/5 hover:bg-white/10 p-3 rounded-xl border border-amber-400/20 cursor-pointer transition-all group"
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-bold text-amber-300 flex items-center gap-1.5">
-                    <span>📈</span>
-                    <span>{language === 'RU' ? 'Скрытый Рост Цен' : 'Sinsi Fiyat Artışı (Creep)'}</span>
-                  </span>
-                  <span className="font-mono font-bold text-xs bg-amber-500/30 text-amber-200 px-1.5 py-0.5 rounded">
-                    {superIntelligentInsights.creepCount}
-                  </span>
-                </div>
-                <div className="text-[11px] text-slate-300 flex justify-between items-center mt-1.5">
-                  <span className="text-slate-400">{language === 'RU' ? 'Риск переплаты:' : 'Fiyat Farkı:'}</span>
-                  <span className="font-mono font-bold text-rose-300">{formatRuble(superIntelligentInsights.creepImpact)}</span>
-                </div>
-              </div>
-
-              {/* Engine 4: Sepet Küçültme & Fiktif İndirim */}
-              <div
-                onClick={() => onNavigateToTab('anomalies')}
-                className="bg-white/5 hover:bg-white/10 p-3 rounded-xl border border-rose-400/20 cursor-pointer transition-all group"
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-bold text-rose-300 flex items-center gap-1.5">
-                    <span>🧺</span>
-                    <span>{language === 'RU' ? 'Мнимые Скидки' : 'Sepet Küçültme (Fiktif)'}</span>
-                  </span>
-                  <span className="font-mono font-bold text-xs bg-rose-500/30 text-rose-200 px-1.5 py-0.5 rounded">
-                    {superIntelligentInsights.shrinkageCount}
-                  </span>
-                </div>
-                <div className="text-[11px] text-slate-300 flex justify-between items-center mt-1.5">
-                  <span className="text-slate-400">{language === 'RU' ? 'Иллюзия:' : 'Fiktif İndirim:'}</span>
-                  <span className="font-mono font-bold text-rose-400">{formatRuble(superIntelligentInsights.shrinkageImpact)}</span>
-                </div>
-              </div>
+            <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-amber-300 font-semibold">
+              <span className="truncate">{topPriceGapMaterials[0]?.category || 'Birim Fiyat Analizi'}</span>
+              <span className="group-hover:translate-x-0.5 transition-transform shrink-0">Kıyasla →</span>
             </div>
-
-            {/* Top recommendation preview banner */}
-            {superIntelligentInsights.topRecommendations.length > 0 && (
-              <div className="bg-indigo-950/70 border border-indigo-400/30 rounded-xl p-3 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
-                <div className="flex items-start gap-2.5">
-                  <div className="p-1.5 bg-rose-500/20 text-rose-300 rounded-lg shrink-0 mt-0.5">
-                    <ShieldAlert className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <div className="font-bold text-white flex items-center gap-2">
-                      <span>{superIntelligentInsights.topRecommendations[0].title}</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 font-semibold">
-                        {superIntelligentInsights.topRecommendations[0].severity}
-                      </span>
-                    </div>
-                    <p className="text-slate-300 text-[11px] mt-0.5 line-clamp-1">
-                      {superIntelligentInsights.topRecommendations[0].recommendation}
-                    </p>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => onNavigateToTab('anomalies')}
-                  className="px-3 py-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xs flex items-center gap-1.5 shrink-0 self-start md:self-auto cursor-pointer transition-colors shadow-xs"
-                >
-                  <span>{language === 'RU' ? 'Все Рекомендации' : 'Tüm Tavsiyeleri İncele'}</span>
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
           </div>
-        )}
+
+          {/* Card 2: Super-Intelligence Anomaly & Arbitrage Radar */}
+          <div
+            onClick={() => onNavigateToTab('anomalies')}
+            className="bg-white/5 hover:bg-white/10 p-3.5 rounded-xl border border-rose-400/25 cursor-pointer transition-all group flex flex-col justify-between"
+          >
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-rose-300 flex items-center gap-1.5">
+                  <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Anomali & Tasarruf Radarı</span>
+                </span>
+                <span className="font-mono font-black text-[11px] bg-rose-500/25 text-rose-200 px-1.5 py-0.5 rounded border border-rose-400/30">
+                  {superIntelligentInsights.totalCount} Tespit
+                </span>
+              </div>
+              <p className="font-mono font-black text-emerald-400 text-sm">
+                {formatRuble(superIntelligentInsights.totalPotentialSavings)} <span className="text-[11px] font-sans font-normal text-slate-300">potansiyel iade/tasarruf</span>
+              </p>
+              <p className="text-[11px] text-slate-300 mt-1 truncate">
+                Arbitraj: {superIntelligentInsights.arbitrageCount} • Parçalı: {superIntelligentInsights.smurfingCount} • Zam: {superIntelligentInsights.creepCount}
+              </p>
+            </div>
+            <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-rose-300 font-semibold">
+              <span>4 Denetim Motoru Aktif</span>
+              <span className="group-hover:translate-x-0.5 transition-transform shrink-0">Radarı Aç →</span>
+            </div>
+          </div>
+
+          {/* Card 3: Top Negotiation / Discount Win */}
+          <div
+            onClick={() => {
+              const topDisc = topDiscountRecords[0];
+              if (topDisc) {
+                const matched = allCombinedTransactions.find(t => t.id === topDisc.id);
+                if (matched) {
+                  setSelectedTx(matched);
+                  return;
+                }
+              }
+              onNavigateToTab('performance');
+            }}
+            className="bg-white/5 hover:bg-white/10 p-3.5 rounded-xl border border-emerald-400/25 cursor-pointer transition-all group flex flex-col justify-between"
+          >
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-300 flex items-center gap-1.5">
+                  <Percent className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Lider Pazarlık Başarısı</span>
+                </span>
+                {topDiscountRecords[0] && (
+                  <span className="font-mono font-black text-[11px] bg-emerald-500/25 text-emerald-200 px-1.5 py-0.5 rounded border border-emerald-400/30">
+                    %{Number(topDiscountRecords[0].discountPercentage).toFixed(1)} İskonto
+                  </span>
+                )}
+              </div>
+              {topDiscountRecords[0] ? (
+                <>
+                  <p className="font-bold text-white truncate text-xs" title={topDiscountRecords[0].vendorName}>
+                    {normalizeVendorName(topDiscountRecords[0].vendorName)}
+                  </p>
+                  <p className="text-[11px] text-slate-300 mt-1 font-mono">
+                    Kazanç: <span className="text-emerald-300 font-bold">+{formatRuble(Number(topDiscountRecords[0].discountAmount))}</span> ({topDiscountRecords[0].supervisorName})
+                  </p>
+                </>
+              ) : (
+                <p className="text-slate-300 text-[11px] mt-1">Seçili dönemde kayıtlı pazarlık bulunamadı.</p>
+              )}
+            </div>
+            <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-emerald-300 font-semibold">
+              <span className="truncate">{topDiscountRecords[0]?.jobsiteName || 'Şef Rekabeti'}</span>
+              <span className="group-hover:translate-x-0.5 transition-transform shrink-0">Detayı Gör →</span>
+            </div>
+          </div>
+
+          {/* Card 4: Category & Budget Concentration Focus */}
+          <div
+            onClick={() => {
+              const topCat = categorySpendingData[0]?.category;
+              if (topCat) {
+                setInspectedCategory(topCat);
+                setFilter(prev => ({
+                  ...prev,
+                  selectedCategory: prev.selectedCategory === topCat ? 'ALL' : topCat
+                }));
+              }
+            }}
+            className="bg-white/5 hover:bg-white/10 p-3.5 rounded-xl border border-indigo-400/25 cursor-pointer transition-all group flex flex-col justify-between"
+          >
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>En Yoğun Bütçe Kalemi</span>
+                </span>
+                {categorySpendingData[0] && (
+                  <span className="font-mono font-black text-[11px] bg-indigo-500/25 text-indigo-200 px-1.5 py-0.5 rounded border border-indigo-400/30">
+                    %{categorySpendingData[0].percentage} Pay
+                  </span>
+                )}
+              </div>
+              {categorySpendingData[0] ? (
+                <>
+                  <p className="font-bold text-white truncate text-xs" title={categorySpendingData[0].category}>
+                    {categorySpendingData[0].category}
+                  </p>
+                  <p className="text-[11px] text-slate-300 mt-1 font-mono">
+                    Harcama: <span className="text-indigo-200 font-bold">{formatRuble(categorySpendingData[0].spend)}</span> ({categorySpendingData[0].itemCount} kalem)
+                  </p>
+                </>
+              ) : (
+                <p className="text-slate-300 text-[11px] mt-1">Kategori harcama verisi bulunamadı.</p>
+              )}
+            </div>
+            <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-indigo-300 font-semibold">
+              <span className="truncate">Lider Şantiye: {jobsiteSpendingData[0]?.jobsiteName || '-'}</span>
+              <span className="group-hover:translate-x-0.5 transition-transform shrink-0">
+                {filter.selectedCategory === categorySpendingData[0]?.category ? 'Filtreyi Kaldır' : 'Odaklan →'}
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* 2. Top KPI Cards Grid (7 Cards) - Modern Balanced Layout */}
@@ -1502,14 +1646,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       {/* Şantiye Genel Harcamaları & Hangi Malzemeye Ne Kadar Harcandı Detay İstihbarat Masası */}
       <SmartDashboardInsights
-        invoices={effectiveInvoices}
+        invoices={currentFilteredInvoices}
         jobsites={jobsites}
         selectedJobsiteId={filter.selectedJobsiteId}
         onNavigateToTab={onNavigateToTab}
+        onNavigateToMaterial={onNavigateToMaterial}
         onApplyJobsiteFilter={(jobsiteId) => {
           setFilter(prev => ({
             ...prev,
             selectedJobsiteId: prev.selectedJobsiteId === jobsiteId ? 'ALL' : jobsiteId
+          }));
+        }}
+        onApplyCategoryFilter={(category) => {
+          setInspectedCategory(category);
+          setFilter(prev => ({
+            ...prev,
+            selectedCategory: prev.selectedCategory === category ? 'ALL' : category
           }));
         }}
       />
@@ -1758,19 +1910,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
           {/* Header with Title and Mode Switcher */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
             <div>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center flex-wrap gap-2">
                 <h2 className="text-base font-bold text-slate-900">Kategori Bazlı Harcama Dağılımı</h2>
-                <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
-                  {categorySpendingData.length} Kategori
+                <span className="px-2 py-0.5 text-[10px] font-bold rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200 font-mono">
+                  {categorySpendingData.length} / 28 Standart Kategori Aktif
+                </span>
+                <span className="px-2 py-0.5 text-[10px] font-bold rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  ✓ Fiyat Kıyaslama & Prizma ile %100 Senkronize
                 </span>
                 {filter.selectedCategory !== 'ALL' && (
-                  <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-100 text-amber-900 border border-amber-200">
+                  <span className="px-2 py-0.5 text-[10px] font-bold rounded-md bg-amber-100 text-amber-900 border border-amber-200">
                     Filtre: {filter.selectedCategory}
                   </span>
                 )}
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                Ayrıştırılmış inşaat demiri (A500C), donatı aksesuarları, çelik mamulleri ve şantiye sarfiyat analizi
+                28 kanonik kategori standardıyla kuruşu kuruşuna eşitlenmiş harcama analizi — bir kategoriye tıklayarak alt malzeme ve tedarikçi kırılımını inceleyin
               </p>
             </div>
 
@@ -1828,15 +1983,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
             {topCategoriesStats.map((cat, idx) => {
               const theme = getCategoryColorTheme(idx);
-              const isSelected = filter.selectedCategory === cat.category;
+              const isSelected = filter.selectedCategory === cat.category || activeDrillCategory === cat.category;
               const icon = getCategoryIcon(cat.category);
               return (
                 <div
                   key={cat.category}
-                  onClick={() => setFilter(prev => ({
-                    ...prev,
-                    selectedCategory: isSelected ? 'ALL' : cat.category
-                  }))}
+                  onClick={() => {
+                    setInspectedCategory(cat.category);
+                  }}
                   className={`p-3.5 rounded-xl border transition-all cursor-pointer relative overflow-hidden group ${
                     isSelected
                       ? theme.bgActive
@@ -1848,7 +2002,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       <span>{icon}</span>
                       <span className="truncate">{cat.category}</span>
                     </span>
-                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${theme.badge} shrink-0`}>
+                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded font-mono ${theme.badge} shrink-0`}>
                       %{cat.percentage}
                     </span>
                   </div>
@@ -1859,7 +2013,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     <div className={`flex items-center justify-between text-[11px] ${theme.textSub} mt-1`}>
                       <span>{cat.itemCount} Kalem Alım</span>
                       <span className={`font-semibold ${theme.textAction} group-hover:underline`}>
-                        {isSelected ? '✓ Filtre Aktif' : 'Filtrele →'}
+                        {activeDrillCategory === cat.category ? '✓ Alt Kırılım Açık' : 'Alt Kırılım →'}
                       </span>
                     </div>
                   </div>
@@ -1872,7 +2026,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div className="flex flex-wrap items-center gap-1.5 pb-2 mb-4 text-xs">
             <button
               type="button"
-              onClick={() => setFilter(prev => ({ ...prev, selectedCategory: 'ALL' }))}
+              onClick={() => {
+                setFilter(prev => ({ ...prev, selectedCategory: 'ALL' }));
+                setInspectedCategory(null);
+              }}
               className={`px-3 py-1.5 rounded-lg font-semibold whitespace-nowrap transition-all cursor-pointer ${
                 filter.selectedCategory === 'ALL'
                   ? 'bg-slate-900 text-white shadow-xs'
@@ -1882,16 +2039,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
               Tüm Kategoriler ({categorySpendingData.length})
             </button>
             {(showAllCategoryPills ? categorySpendingData : categorySpendingData.slice(0, 10)).map((catItem) => {
-              const isSelected = filter.selectedCategory === catItem.category;
+              const isSelected = filter.selectedCategory === catItem.category || activeDrillCategory === catItem.category;
               const icon = getCategoryIcon(catItem.category);
               return (
                 <button
                   key={catItem.category}
                   type="button"
-                  onClick={() => setFilter(prev => ({
-                    ...prev,
-                    selectedCategory: isSelected ? 'ALL' : catItem.category
-                  }))}
+                  onClick={() => {
+                    setInspectedCategory(catItem.category);
+                  }}
                   className={`px-2.5 py-1.5 rounded-lg font-medium whitespace-nowrap transition-all flex items-center space-x-1.5 cursor-pointer ${
                     isSelected
                       ? 'bg-indigo-600 text-white shadow-xs ring-2 ring-indigo-300'
@@ -1956,7 +2112,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           color: '#fff'
                         }}
                       />
-                      <Bar dataKey="spend" name="Harcama" radius={[6, 6, 0, 0]}>
+                      <Bar
+                        dataKey="spend"
+                        name="Harcama"
+                        radius={[6, 6, 0, 0]}
+                        onClick={(data: any) => {
+                          if (data && data.category) setInspectedCategory(data.category);
+                        }}
+                        className="cursor-pointer"
+                      >
                         {categorySpendingData.slice(0, 10).map((_, index) => (
                           <Cell key={`cat-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
                         ))}
@@ -1973,14 +2137,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
               {/* Right: Ranked List with Progress Bars & Quick Filters (5 cols) */}
               <div className="lg:col-span-5 flex flex-col space-y-2.5 max-h-72 overflow-y-auto pr-1">
                 {categorySpendingData.slice(0, 8).map((item, idx) => {
-                  const isSelected = filter.selectedCategory === item.category;
+                  const isSelected = activeDrillCategory === item.category;
                   return (
                     <div
                       key={item.category}
-                      onClick={() => setFilter(prev => ({
-                        ...prev,
-                        selectedCategory: isSelected ? 'ALL' : item.category
-                      }))}
+                      onClick={() => setInspectedCategory(item.category)}
                       className={`p-2.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
                         isSelected
                           ? 'bg-indigo-50/80 border-indigo-300 ring-1 ring-indigo-300'
@@ -2001,7 +2162,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           <span className="text-xs font-mono font-bold text-slate-900">
                             {formatRuble(item.spend)}
                           </span>
-                          <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-slate-200/80 text-slate-700">
+                          <span className="text-[10px] font-bold font-mono px-1.5 py-0.2 rounded bg-slate-200/80 text-slate-700">
                             %{item.percentage}
                           </span>
                         </div>
@@ -2059,7 +2220,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         color: '#fff'
                       }}
                     />
-                    <Bar dataKey="spend" name="Harcama" radius={[6, 6, 0, 0]}>
+                    <Bar
+                      dataKey="spend"
+                      name="Harcama"
+                      radius={[6, 6, 0, 0]}
+                      onClick={(data: any) => {
+                        if (data && data.category) setInspectedCategory(data.category);
+                      }}
+                      className="cursor-pointer"
+                    >
                       {categorySpendingData.slice(0, 12).map((_, index) => (
                         <Cell key={`cat-bar-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
                       ))}
@@ -2090,6 +2259,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         paddingAngle={3}
                         dataKey="spend"
                         nameKey="category"
+                        onClick={(data: any) => {
+                          if (data && data.category) setInspectedCategory(data.category);
+                        }}
                       >
                         {categorySpendingData.slice(0, 8).map((_, index) => (
                           <Cell key={`donut-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
@@ -2118,11 +2290,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 {categorySpendingData.slice(0, 10).map((item, idx) => (
                   <div
                     key={item.category}
-                    onClick={() => setFilter(prev => ({
-                      ...prev,
-                      selectedCategory: prev.selectedCategory === item.category ? 'ALL' : item.category
-                    }))}
-                    className="p-2 rounded-lg bg-slate-50 border border-slate-200/80 hover:bg-slate-100 transition-all cursor-pointer flex items-center justify-between text-xs"
+                    onClick={() => setInspectedCategory(item.category)}
+                    className={`p-2 rounded-lg border transition-all cursor-pointer flex items-center justify-between text-xs ${
+                      activeDrillCategory === item.category
+                        ? 'bg-indigo-50 border-indigo-300'
+                        : 'bg-slate-50 border-slate-200/80 hover:bg-slate-100'
+                    }`}
                   >
                     <div className="flex items-center space-x-2 truncate">
                       <span
@@ -2159,12 +2332,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {categorySpendingData.map((cat, idx) => {
-                    const isSelected = filter.selectedCategory === cat.category;
+                    const isSelected = activeDrillCategory === cat.category;
                     const avgPerItem = cat.itemCount > 0 ? cat.spend / cat.itemCount : 0;
                     return (
                       <tr
                         key={cat.category}
-                        className={`hover:bg-slate-50 transition-colors ${
+                        onClick={() => setInspectedCategory(cat.category)}
+                        className={`hover:bg-slate-50 transition-colors cursor-pointer ${
                           isSelected ? 'bg-indigo-50/70 font-semibold' : ''
                         }`}
                       >
@@ -2180,7 +2354,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           {formatRuble(cat.spend)}
                         </td>
                         <td className="py-2 px-3 text-center">
-                          <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-bold text-[11px]">
+                          <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-mono font-bold text-[11px]">
                             %{cat.percentage}
                           </span>
                         </td>
@@ -2193,17 +2367,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         <td className="py-2 px-3 text-center">
                           <button
                             type="button"
-                            onClick={() => setFilter(prev => ({
-                              ...prev,
-                              selectedCategory: isSelected ? 'ALL' : cat.category
-                            }))}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setFilter(prev => ({
+                                ...prev,
+                                selectedCategory: prev.selectedCategory === cat.category ? 'ALL' : cat.category
+                              }));
+                            }}
                             className={`px-2.5 py-1 rounded text-[11px] font-semibold transition-all cursor-pointer ${
-                              isSelected
+                              filter.selectedCategory === cat.category
                                 ? 'bg-indigo-600 text-white'
                                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                             }`}
                           >
-                            {isSelected ? 'Seçili ✓' : 'Filtrele'}
+                            {filter.selectedCategory === cat.category ? 'Filtreli ✓' : 'Tümünü Filtrele'}
                           </button>
                         </td>
                       </tr>
@@ -2211,6 +2388,194 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* 🔍 Interactive Category Drill-Down Drawer (Alt Malzeme, Tedarikçi & Şantiye Kırılımı) */}
+          {activeCategoryDrilldownData && activeCategoryDrilldownData.itemCount > 0 && (
+            <div className="mt-6 pt-5 border-t border-slate-200/90 bg-slate-50/70 rounded-2xl p-4 sm:p-5 border border-slate-200/80">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 border-b border-slate-200/80">
+                <div className="flex items-start sm:items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center text-lg shadow-xs shrink-0">
+                    {getCategoryIcon(activeCategoryDrilldownData.category)}
+                  </div>
+                  <div>
+                    <div className="flex items-center flex-wrap gap-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-100 text-indigo-800">
+                        Seçili Kategori Alt Kırılımı
+                      </span>
+                      <h3 className="text-sm sm:text-base font-black text-slate-900">
+                        {activeCategoryDrilldownData.category}
+                      </h3>
+                      <span className="text-xs font-mono font-bold text-indigo-700 bg-white px-2 py-0.5 rounded-md border border-slate-200">
+                        {formatRuble(activeCategoryDrilldownData.totalSpend)}
+                      </span>
+                      <span className="text-[11px] font-mono text-slate-500">
+                        ({activeCategoryDrilldownData.invoiceCount} fatura • {activeCategoryDrilldownData.itemCount} kalem)
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Bu kategoride en çok harcama yapılan malzemeler, tedarikçiler ve şantiyeler — bir malzemeye tıklayarak birim fiyat geçmişini açın
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center flex-wrap gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const cat = activeCategoryDrilldownData.category;
+                      setFilter(prev => ({
+                        ...prev,
+                        selectedCategory: prev.selectedCategory === cat ? 'ALL' : cat
+                      }));
+                    }}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                      filter.selectedCategory === activeCategoryDrilldownData.category
+                        ? 'bg-amber-500 text-slate-950 border-amber-500'
+                        : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+                    }`}
+                  >
+                    {filter.selectedCategory === activeCategoryDrilldownData.category
+                      ? '✓ Tüm Dashboard Bu Kategoriye Filtreli (Kaldır)'
+                      : 'Tüm Dashboard’u Bu Kategoriye Filtrele'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (onNavigateToMaterial) {
+                        onNavigateToMaterial('', activeCategoryDrilldownData.category);
+                      } else {
+                        onNavigateToTab('material-compare');
+                      }
+                    }}
+                    className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  >
+                    <span>Malzeme Fiyat Karşılaştırmada Aç</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 mt-4">
+                {/* Col 1: Top 6 Materials in this Category (6 cols) */}
+                <div className="lg:col-span-6 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-700 mb-2">
+                    <span>En Çok Harcanan İlk 6 Malzeme Kalemi</span>
+                    <span className="text-[11px] font-normal text-slate-400">Fiyat kıyas için tıklayın</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {activeCategoryDrilldownData.topMaterials.map((m, idx) => (
+                      <div
+                        key={`${m.name}-${idx}`}
+                        onClick={() => {
+                          if (onNavigateToMaterial) {
+                            onNavigateToMaterial(m.name, activeCategoryDrilldownData.category);
+                          } else {
+                            onNavigateToTab('material-compare');
+                          }
+                        }}
+                        className="p-2.5 rounded-xl bg-white hover:bg-indigo-50/60 border border-slate-200/80 hover:border-indigo-300 transition-all cursor-pointer flex items-center justify-between gap-2 text-xs group"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] font-mono font-bold text-slate-400">#{idx + 1}</span>
+                            <span className="font-bold text-slate-900 group-hover:text-indigo-700 truncate" title={m.name}>
+                              {m.name}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-500 font-mono">
+                            <span>{m.totalQty.toLocaleString('tr-TR')} {m.unit}</span>
+                            <span>•</span>
+                            <span className="text-amber-700 font-semibold">Ort: {formatRuble(m.avgUnitPrice)}/{m.unit}</span>
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <div className="font-mono font-black text-slate-900">{formatRuble(m.totalSpend)}</div>
+                          <div className="text-[10px] font-mono text-indigo-600 font-bold">%{m.share} pay →</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Col 2: Top 4 Vendors in this Category (3 cols) */}
+                <div className="lg:col-span-3 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-700 mb-2">
+                    <span>Lider Tedarikçiler</span>
+                    <span className="text-[11px] font-normal text-slate-400">Filtrele</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {activeCategoryDrilldownData.topVendors.map((v, idx) => {
+                      const isVenSelected = filter.selectedVendor === v.rawName || filter.selectedVendor === v.name;
+                      return (
+                        <div
+                          key={`${v.name}-${idx}`}
+                          onClick={() => setFilter(prev => ({
+                            ...prev,
+                            selectedVendor: isVenSelected ? 'ALL' : v.rawName
+                          }))}
+                          className={`p-2.5 rounded-xl border transition-all cursor-pointer text-xs ${
+                            isVenSelected
+                              ? 'bg-emerald-50 border-emerald-300 ring-1 ring-emerald-300'
+                              : 'bg-white hover:bg-slate-100 border-slate-200/80'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-slate-800 truncate" title={v.name}>{v.name}</span>
+                            <span className="text-[10px] font-mono font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded shrink-0">
+                              %{v.share}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between mt-1 text-[11px] font-mono text-slate-500">
+                            <span>{v.count} kalem</span>
+                            <span className="font-bold text-slate-900">{formatRuble(v.totalSpend)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Col 3: Top 4 Jobsites in this Category (3 cols) */}
+                <div className="lg:col-span-3 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-700 mb-2">
+                    <span>Şantiye Dağılımı</span>
+                    <span className="text-[11px] font-normal text-slate-400">Filtrele</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {activeCategoryDrilldownData.topJobsites.map((s, idx) => {
+                      const isSiteSelected = filter.selectedJobsiteId === s.jobsiteId;
+                      return (
+                        <div
+                          key={`${s.jobsiteId}-${idx}`}
+                          onClick={() => setFilter(prev => ({
+                            ...prev,
+                            selectedJobsiteId: isSiteSelected ? 'ALL' : s.jobsiteId
+                          }))}
+                          className={`p-2.5 rounded-xl border transition-all cursor-pointer text-xs ${
+                            isSiteSelected
+                              ? 'bg-sky-50 border-sky-300 ring-1 ring-sky-300'
+                              : 'bg-white hover:bg-slate-100 border-slate-200/80'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-slate-800 truncate" title={s.jobsiteName}>{s.jobsiteName}</span>
+                            <span className="text-[10px] font-mono font-bold text-sky-700 bg-sky-50 px-1.5 py-0.5 rounded shrink-0">
+                              %{s.share}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between mt-1 text-[11px] font-mono text-slate-500">
+                            <span>{s.count} kalem</span>
+                            <span className="font-bold text-slate-900">{formatRuble(s.totalSpend)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -2255,12 +2620,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
               topPriceGapMaterials.map((mat, idx) => (
                 <div
                   key={idx}
-                  onClick={() => onNavigateToTab('material-compare')}
-                  className="p-3 bg-slate-50 hover:bg-indigo-50/40 rounded-xl border border-slate-200/70 transition-colors cursor-pointer flex items-center justify-between gap-3"
+                  onClick={() => onNavigateToMaterial ? onNavigateToMaterial(mat.materialName, mat.category) : onNavigateToTab('material-compare')}
+                  className="p-3 bg-slate-50 hover:bg-indigo-50/40 rounded-xl border border-slate-200/70 transition-colors cursor-pointer flex items-center justify-between gap-3 group"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center space-x-2">
-                      <span className="text-xs font-bold text-slate-900 truncate" title={mat.materialName}>
+                      <span className="text-xs font-bold text-slate-900 group-hover:text-indigo-700 truncate" title={mat.materialName}>
                         {mat.materialName}
                       </span>
                       <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-200 text-slate-700 font-medium shrink-0">
@@ -2652,83 +3017,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
           )}
         </div>
 
-        {/* Data Backup & System Health Widget (4 cols) - Only visible to System Administrator (Admin) */}
+        {/* Right Column (4 cols): Top Discount Wins & Top Vendors Intelligence (Redundant Backup Card Removed) */}
         <div className="lg:col-span-4 space-y-6">
-          {/* Snapshot Backup Widget (Admin Only) */}
-          {user?.role === 'admin' && (
-            <div className="bg-gradient-to-br from-slate-900 to-indigo-950 text-white rounded-2xl p-5 sm:p-6 shadow-md border border-slate-800">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2.5">
-                  <div className="p-2 bg-emerald-500/20 text-emerald-400 rounded-xl border border-emerald-500/30">
-                    <ShieldCheck className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-sm text-slate-100">Veri Güvenliği & Yedek</h3>
-                    <p className="text-[11px] text-slate-400">Otomatik Anlık Snapshot Motoru</p>
-                  </div>
-                </div>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold border border-emerald-500/30">
-                  Yönetici Özel
-                </span>
-              </div>
-
-              <div className="mt-4 pt-3 border-t border-slate-800/80 space-y-2.5 text-xs">
-                <div className="flex items-center justify-between text-slate-300">
-                  <span className="text-slate-400">Son Yedek Zamanı:</span>
-                  <span className="font-mono font-medium text-slate-200">
-                    {backupInfo.lastBackupTime || 'Sistem Hazır'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-slate-300">
-                  <span className="text-slate-400">Kayıtlı Snapshot Sayısı:</span>
-                  <span className="font-mono font-bold text-indigo-300">
-                    {backupInfo.snapshotCount} Adet
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-slate-300">
-                  <span className="text-slate-400">Toplam Yedek Boyutu:</span>
-                  <span className="font-mono text-slate-200">
-                    {(backupInfo.totalSizeBytes / 1024).toFixed(1)} KB
-                  </span>
-                </div>
-              </div>
-
-              {backupSuccessMessage && (
-                <div className="mt-3 p-2 bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 rounded-lg text-xs font-semibold flex items-center space-x-2 animate-in fade-in">
-                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                  <span>{backupSuccessMessage}</span>
-                </div>
-              )}
-
-              <div className="mt-4 pt-3 border-t border-slate-800 flex items-center gap-2">
-                <button
-                  onClick={handleManualBackup}
-                  disabled={isCreatingBackup}
-                  className="flex-1 py-2 px-3 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center justify-center space-x-1.5 shadow-sm"
-                >
-                  <HardDrive className="w-3.5 h-3.5" />
-                  <span>{isCreatingBackup ? 'Yedekleniyor...' : 'Şimdi Yedek Al'}</span>
-                </button>
-
-                {onOpenBackupModal && (
-                  <button
-                    onClick={onOpenBackupModal}
-                    className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold transition-all cursor-pointer"
-                    title="Yedekleme ve Geri Yükleme Merkezini Aç"
-                  >
-                    Yedekleri Yönet
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Top Discount Percentage Records Card */}
+          {/* Card A: Top Discount Percentage Records Card */}
           <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-xs">
-            <h3 className="font-bold text-sm text-slate-900 mb-3 flex items-center space-x-2">
-              <Sparkles className="w-4 h-4 text-amber-500" />
-              <span>En Yüksek İskonto Oranlı Alımlar</span>
-            </h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-sm text-slate-900 flex items-center space-x-2">
+                <Sparkles className="w-4 h-4 text-amber-500" />
+                <span>En Yüksek İskonto Oranlı Alımlar</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => onNavigateToTab('discount-entry')}
+                className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 cursor-pointer"
+              >
+                Tümü →
+              </button>
+            </div>
 
             <div className="space-y-2.5">
               {topDiscountRecords.length > 0 ? (
@@ -2742,7 +3047,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     className="p-2.5 bg-slate-50 hover:bg-emerald-50/50 rounded-xl border border-slate-100 flex items-center justify-between text-xs transition-colors cursor-pointer"
                   >
                     <div className="min-w-0 pr-2">
-                      <p className="font-bold text-slate-900 truncate">{d.vendorName}</p>
+                      <p className="font-bold text-slate-900 truncate">{normalizeVendorName(d.vendorName)}</p>
                       <p className="text-[11px] text-slate-500 truncate">{d.supervisorName} • {d.jobsiteName}</p>
                     </div>
                     <div className="text-right shrink-0">
@@ -2755,6 +3060,74 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 ))
               ) : (
                 <p className="text-center text-slate-400 text-xs py-3">Kayıtlı indirim bulunamadı.</p>
+              )}
+            </div>
+          </div>
+
+          {/* Card B: Top Volume Vendors & Negotiation Summary */}
+          <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-xs">
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-bold text-sm text-slate-900 flex items-center space-x-2">
+                <Building2 className="w-4 h-4 text-indigo-600" />
+                <span>En Yüksek Hacimli Tedarikçiler</span>
+              </h3>
+              {filter.selectedVendor && filter.selectedVendor !== 'ALL' && (
+                <button
+                  type="button"
+                  onClick={() => setFilter(prev => ({ ...prev, selectedVendor: 'ALL' }))}
+                  className="text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 cursor-pointer"
+                >
+                  Filtreyi Kaldır ✕
+                </button>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-500 mb-3">
+              Seçili dönemde en yüksek alım yapılan ilk 5 tedarikçi ve kazanılan indirimler (filtrelemek için tıklayın)
+            </p>
+
+            <div className="space-y-2.5">
+              {topVendorsSummary.length > 0 ? (
+                topVendorsSummary.map((v, idx) => {
+                  const isSelected = filter.selectedVendor === v.rawName || filter.selectedVendor === v.name;
+                  return (
+                    <div
+                      key={`${v.name}-${idx}`}
+                      onClick={() => setFilter(prev => ({
+                        ...prev,
+                        selectedVendor: isSelected ? 'ALL' : v.rawName
+                      }))}
+                      className={`p-2.5 rounded-xl border flex items-center justify-between text-xs transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-indigo-50 border-indigo-300 ring-1 ring-indigo-300'
+                          : 'bg-slate-50 hover:bg-indigo-50/40 border-slate-100'
+                      }`}
+                    >
+                      <div className="min-w-0 pr-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-mono font-bold text-slate-400">#{idx + 1}</span>
+                          <p className="font-bold text-slate-900 truncate" title={v.name}>{v.name}</p>
+                        </div>
+                        <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                          {v.invoiceCount} fatura {v.discountCount > 0 ? `• ${v.discountCount} pazarlık` : ''}
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <span className="font-mono font-black text-slate-900 text-xs block">
+                          {formatRuble(v.totalSpend)}
+                        </span>
+                        {v.totalDiscount > 0 ? (
+                          <p className="text-[10px] text-emerald-600 font-mono font-bold">
+                            -{formatRuble(v.totalDiscount)} indirim
+                          </p>
+                        ) : (
+                          <p className="text-[10px] text-slate-400">Net fatura</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <p className="text-center text-slate-400 text-xs py-3">Tedarikçi verisi bulunamadı.</p>
               )}
             </div>
           </div>
@@ -2791,7 +3164,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               onClose={() => setSelectedTx(null)}
               onNavigateToCompare={() => {
                 setSelectedTx(null);
-                onNavigateToTab('compare');
+                onNavigateToTab('material-compare');
               }}
               onUpdateInvoice={onUpdateInvoice}
               onDeleteInvoice={onDeleteInvoice}

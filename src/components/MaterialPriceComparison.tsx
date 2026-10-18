@@ -87,6 +87,7 @@ interface Props {
   jobsites: Jobsite[];
   supervisors?: PurchasingSupervisor[];
   initialMaterialName?: string;
+  initialCategory?: string;
   onRefreshData?: () => Promise<void>;
   onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => void | Promise<void>;
   onDeleteInvoice?: (id: string) => void | Promise<void>;
@@ -167,6 +168,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   jobsites,
   supervisors = [],
   initialMaterialName,
+  initialCategory,
   onRefreshData,
   onUpdateInvoice,
   onDeleteInvoice
@@ -205,8 +207,14 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const [simCustomQty, setSimCustomQty] = useState<string>('');
   const [mode2SearchTerm, setMode2SearchTerm] = useState<string>('');
 
-  // Handle external navigation (from Prizma Invoices, Drive, Pre-Approval, etc.)
+  // Handle external navigation (from Dashboard, Prizma Invoices, Drive, Pre-Approval, etc.)
   useEffect(() => {
+    if (initialCategory && initialCategory.trim() && initialCategory !== 'ALL') {
+      setSelectedCategory(initialCategory.trim());
+      if (!initialMaterialName || !initialMaterialName.trim()) {
+        setSearchTerm('');
+      }
+    }
     if (initialMaterialName && initialMaterialName.trim()) {
       const q = initialMaterialName.trim();
       setSearchTerm(q);
@@ -223,7 +231,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
         setExpandedMaterialName(key);
       }
     }
-  }, [initialMaterialName, comparisons]);
+  }, [initialMaterialName, initialCategory, comparisons]);
 
   // AI & Manual Merge States
   const [isAnalyzingAI, setIsAnalyzingAI] = useState<boolean>(false);

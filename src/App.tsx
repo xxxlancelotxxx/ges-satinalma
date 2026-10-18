@@ -73,6 +73,7 @@ function AppContent() {
   const [materialComparisons, setMaterialComparisons] = useState<MaterialComparison[]>([]);
   const [performances, setPerformances] = useState<SupervisorPerformance[]>([]);
   const [targetCompareMaterial, setTargetCompareMaterial] = useState<string>('');
+  const [targetCompareCategory, setTargetCompareCategory] = useState<string>('');
 
   const totalTrashCount = trashInvoices.length + trashDiscounts.length;
 
@@ -709,6 +710,11 @@ function AppContent() {
                 onOpenNewDiscountModal={() => setShowQuickDiscountModal(true)}
                 onOpenBackupModal={user?.role === 'admin' ? () => setShowBackupModal(true) : undefined}
                 onNavigateToTab={(tabId) => setActiveTab(tabId)}
+                onNavigateToMaterial={(matName, category) => {
+                  setTargetCompareMaterial(matName || '');
+                  setTargetCompareCategory(category || '');
+                  setActiveTab('material-compare');
+                }}
                 onRefreshData={() => loadData(false)}
                 onUpdateInvoice={handleUpdateInvoice}
                 onDeleteInvoice={handleDeleteInvoice}
@@ -830,6 +836,7 @@ function AppContent() {
                 jobsites={jobsites}
                 supervisors={supervisors}
                 initialMaterialName={targetCompareMaterial}
+                initialCategory={targetCompareCategory}
                 onRefreshData={loadData}
                 onUpdateInvoice={handleUpdateInvoice}
                 onDeleteInvoice={handleDeleteInvoice}

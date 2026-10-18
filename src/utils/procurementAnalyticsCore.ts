@@ -19,7 +19,7 @@
  */
 
 import { InvoiceRecord, InvoiceItem } from '../types';
-import { normalizeCategoryName, CANONICAL_28_CATEGORIES } from './categoryClassifier';
+import { normalizeCategoryName, resolveItemCategory, CANONICAL_28_CATEGORIES } from './categoryClassifier';
 import { normalizeUnit } from './comparativeCalculation';
 import { areVendorsEqual } from './vendorNormalizer';
 
@@ -274,7 +274,11 @@ export function getNormalizedProcurementItems(invoices: InvoiceRecord[] = []): N
         const rawName = it.materialName || it.originalName || 'Malzeme Kalemi';
         const rawOrig = it.originalName || it.materialName || '';
         const rawCat = it.category || inv.category;
-        const canonCat = normalizeCategoryName(rawCat, `${rawName} ${rawOrig} ${supplier}`);
+        const canonCat = resolveItemCategory({
+          originalName: rawOrig,
+          materialName: `${rawName} ${supplier}`.trim(),
+          rawCategory: rawCat
+        });
         const qty = Number(it.quantity) > 0 ? Number(it.quantity) : 1;
         const uPrice = Number(it.unitPrice) || 0;
         const totPrice = Number(it.totalPrice) > 0 ? Number(it.totalPrice) : uPrice * qty;
@@ -317,7 +321,11 @@ export function getNormalizedProcurementItems(invoices: InvoiceRecord[] = []): N
     } else {
       // Legacy invoice without item breakdown
       const rawCat = inv.category;
-      const canonCat = normalizeCategoryName(rawCat, supplier);
+      const canonCat = resolveItemCategory({
+        originalName: '',
+        materialName: supplier,
+        rawCategory: rawCat
+      });
       const totPrice = Number(inv.totalAmount) || 0;
 
       let specKey: SpecialCategoryKey | undefined = undefined;
