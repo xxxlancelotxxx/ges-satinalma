@@ -13,7 +13,9 @@ import {
   buildLineCheck,
   extractPdfText,
   readInvoiceDocumentText,
-  readInvoiceDocumentWithGemini
+  readInvoiceDocumentWithGemini,
+  splitFreightFromDocumentItems,
+  repairDocumentItems
 } from './invoiceDocumentLines';
 
 let defaultDb: any = null;
@@ -147,12 +149,30 @@ const extractShortSpecNote = (s?: string): string => {
   return '';
 };
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 /** Kayıttaki kalemlerin tamamı fatura belgesinden mi okunmuş? */
 export function hasDocumentLines(rec: any): boolean {
   return Boolean(
     rec && rec.linesSource === 'invoice_pdf' && Array.isArray(rec.items) && rec.items.length > 0 &&
     rec.items.every((it: any) => it?.lineSource === 'invoice_pdf')
   );
+}
+
+/**
+ * Kalemleri yeniden doğrulanması gereken kayıt:
+ *  - hiç doğrulanmamış,
+ *  - "belgeden doğrulandı" deyip kalemleri başka bir yazımla ezilmiş,
+ *  - belgeden okunmuş ama nakliye/hizmet satırı malzeme kalemi olarak kalmış ya da ton satırı adet sayılmış,
+ *  - eski belge okuyucu sürümüyle doğrulanamamış (yeni sürüm + AI okuması bir kez daha denenir).
+ */
+export function needsInvoiceLineReconcile(r: any): boolean {
+  if (!r?.lineCheck) return true;
+  if (r.linesSource === 'invoice_pdf') {
+    if (!hasDocumentLines(r)) return true;
+    return splitFreightFromDocumentItems(r.items).moved > 0 || repairDocumentItems(r.items).fixed > 0;
+  }
+  return Number(r.lineCheck.parserVersion || 0) < CURRENT_DOC_LINES_PARSER_VERSION;
 }
 
 export function isCleanMaterialRecord(inv: any): boolean {
@@ -312,13 +332,18 @@ class PrizmaSyncService {
       Math.abs((prevCheck.invoiceTotal || 0) - invoiceTotal) < 0.01 &&
       (!params.fileId || !prevCheck.fileId || prevCheck.fileId === params.fileId)
     ) {
-      const healedPrevItems = (previous.items || []).map((it: any) => this.healInvoicePdfItemVat(it, defaultVat));
+      const healedPrevItems = repairDocumentItems((previous.items || []).map((it: any) => this.healInvoicePdfItemVat(it, defaultVat))).items;
+      const split = splitFreightFromDocumentItems(healedPrevItems);
+      const freightNet = round2(Number(previous.excludedFreightAmount) || 0) + split.freightNet;
+      const freightGross = round2(Number(previous.excludedFreightGrossAmount) || 0) + split.freightGross;
       return {
-        items: healedPrevItems,
-        freightNet: Number(previous.excludedFreightAmount) || 0,
-        freightGross: Number(previous.excludedFreightGrossAmount) || 0,
+        items: split.items,
+        freightNet: round2(freightNet),
+        freightGross: round2(freightGross),
         linesSource: 'invoice_pdf',
-        lineCheck: prevCheck
+        lineCheck: split.moved > 0
+          ? buildLineCheck({ items: split.items, freightGross, invoiceTotal, source: 'invoice_pdf', fileId: prevCheck.fileId, documentNote: prevCheck.documentNote })
+          : prevCheck
       };
     }
 
@@ -348,6 +373,9 @@ class PrizmaSyncService {
           });
           if (aiResult.verified) {
             docResult = aiResult;
+          } else if (/^AI OCR hatası/.test(aiResult.note || '')) {
+            // AI servisine ulaşılamadı / kota: kalıcı sonuç sayılmaz, bir sonraki çalıştırmada yeniden denenir
+            throw new Error(aiResult.note);
           } else if (!docResult) {
             docResult = aiResult;
           }
@@ -363,15 +391,19 @@ class PrizmaSyncService {
     }
 
     if (docResult?.verified && docResult.items?.length) {
-      const healedDocItems = docResult.items.map((it: any) => this.healInvoicePdfItemVat(it, defaultVat));
+      const healedDocItems = repairDocumentItems(docResult.items.map((it: any) => this.healInvoicePdfItemVat(it, defaultVat))).items;
+      // Önbellekteki eski sürüm sonuçlarında malzeme sayılmış nakliye satırları ayrılır
+      const split = splitFreightFromDocumentItems(healedDocItems);
+      const freightNet = round2((docResult.freightNet || 0) + split.freightNet);
+      const freightGross = round2((docResult.freightGross || 0) + split.freightGross);
       return {
-        items: healedDocItems,
-        freightNet: docResult.freightNet || 0,
-        freightGross: docResult.freightGross || 0,
+        items: split.items,
+        freightNet,
+        freightGross,
         linesSource: 'invoice_pdf',
         lineCheck: buildLineCheck({
-          items: docResult.items,
-          freightGross: docResult.freightGross || 0,
+          items: split.items,
+          freightGross,
           invoiceTotal,
           source: 'invoice_pdf',
           fileId: docResult.fileId,
@@ -1239,10 +1271,14 @@ class PrizmaSyncService {
     samples: Array<{ id: string; invoiceNumber: string; supplier: string; status: string; diff: number; note?: string }>;
   }> {
     // Yalnızca uygulamada kullanılan (onaylı, STF'li malzeme) faturalar; beton/hizmet vb. elenenler indirilmez
-    const all = (await this.loadPreviousRecords()).filter(r => r && !r.isDeleted && r.prizmaDemandId && isCleanMaterialRecord(r));
+    // Belgeden okunup içinde nakliye satırı kalmış kayıtlar o satır yüzünden "hizmet faturası" sanılmasın diye
+    // temizlik kontrolü nakliye satırları ayrılmış haliyle yapılır.
+    const all = (await this.loadPreviousRecords()).filter(r => r && !r.isDeleted && r.prizmaDemandId && isCleanMaterialRecord(
+      r.linesSource === 'invoice_pdf' ? { ...r, items: splitFreightFromDocumentItems(r.items || []).items } : r
+    ));
     const todo = all
       // lineCheck'i olmayan veya "belgeden doğrulandı" deyip kalemleri başka bir yazımla (eski sürüm senkronu) ezilmiş kayıtlar
-      .filter(r => options.recheck || !r.lineCheck || (r.linesSource === 'invoice_pdf' && !hasDocumentLines(r)))
+      .filter(r => options.recheck || needsInvoiceLineReconcile(r))
       .slice(0, options.limit && options.limit > 0 ? options.limit : undefined);
 
     const report = { scanned: todo.length, verifiedFromDocument: 0, stfMatchesTotal: 0, mismatch: 0, errors: 0, changedIds: [] as string[], backups: 0, samples: [] as any[] };

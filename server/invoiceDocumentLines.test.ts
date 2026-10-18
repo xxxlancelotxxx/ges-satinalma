@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { parseInvoiceText, verifyParsedInvoice, mapDocumentUnit } from '../src/utils/invoiceLineParser';
-import { readInvoiceDocumentText, buildLineCheck } from './invoiceDocumentLines';
+import { readInvoiceDocumentText, buildLineCheck, isFreightOrServiceText, repairDocumentItems, cleanDocumentLineName, splitFreightFromDocumentItems } from './invoiceDocumentLines';
 import { getMaterialBenchmarkUnit, convertMaterialUnit } from '../src/utils/constructionUnitConverter';
 
 // 1C "Счет на оплату" düzeni (Fatura 20560, STF.013158'in pdf-parse metin çıktısıyla aynı biçim):
@@ -131,5 +131,37 @@ assert.equal(getMaterialBenchmarkUnit(hoseName, 'Mekanik & Tesisat', ['MT']), 'a
 // Prizma'da "10 MT" girilmiş ama fiyat 1 set fiyatı (1320 ₽): metreyle çarpılmaz, 10 adet set sayılır
 const conv = convertMaterialUnit({ materialName: hoseName, rawItemName: 'Рукав пожарный для ПК Ду50мм в сборе с ГР-50 (1,0 МПа)', fromUnit: 'MT', toUnit: 'adet', unitPrice: 1320, quantity: 10 });
 assert.deepEqual([conv.convertedUnitPrice, conv.convertedQuantity], [1320, 10]);
+
+// Kiril kelimelerde \b çalışmaz: nakliye/hizmet satırları Rusça yazımla da yakalanmalı
+assert.equal(isFreightOrServiceText('Доставка автотранспортом'), true);
+assert.equal(isFreightOrServiceText('Транспортные услуги'), true);
+assert.equal(isFreightOrServiceText('Аренда автокрана'), true);
+assert.equal(isFreightOrServiceText('Пена монтажная'), false);
+
+// Birim sütunu isimden sonra gelen düzen: "... ГОСТ 3282-74 т" ton satırıdır, ambalaj ölçüsü (25 кг) birim sayılmaz
+assert.deepEqual(repairDocumentItems([
+  { lineSource: 'invoice_pdf', originalName: 'Проволока ТО Ч 1,2 ГОСТ 3282-74 т', unit: 'ADET', quantity: 0.975 },
+  { lineSource: 'invoice_pdf', originalName: 'Шпаклевка гипсовая Knauf Ротбанд Финиш 25 кг', unit: 'ADET', quantity: 384 },
+  { lineSource: 'invoice_pdf', originalName: '2 3 4 5 6 7 1 Вентилятор BL 8800', materialName: '2 3 4 5 6 7 1 Вентилятор BL 8800', unit: 'ADET', quantity: 2 }
+]).items.map(it => [it.unit, it.originalName]), [
+  ['TON', 'Проволока ТО Ч 1,2 ГОСТ 3282-74 т'],
+  ['ADET', 'Шпаклевка гипсовая Knauf Ротбанд Финиш 25 кг'],
+  ['ADET', 'Вентилятор BL 8800']
+]);
+assert.equal(cleanDocumentLineName('12 Саморез 4,2х19'), '12 Саморез 4,2х19');
+// Aynı STF stok kodu iki farklı satıra dağıtılmışsa kod kaldırılır (yoksa vantilatör ile hortum aynı malzeme sayılır)
+const sharedCode = repairDocumentItems([
+  { lineSource: 'invoice_pdf', originalName: 'Вентилятор BL 8800', materialCode: '255.03.003.04.0114', unit: 'ADET' },
+  { lineSource: 'invoice_pdf', originalName: 'Рукав гофра Ф407 мм', materialCode: '255.03.003.04.0114', unit: 'ADET' },
+  { lineSource: 'invoice_pdf', originalName: 'Клапан КОК-Р', materialCode: '150.01.013.02.0001', unit: 'ADET' }
+]);
+assert.deepEqual(sharedCode.items.map(it => it.materialCode), [undefined, undefined, '150.01.013.02.0001']);
+assert.equal(sharedCode.fixed, 2);
+// Eski sürümde malzeme sayılmış nakliye satırı nakliyeye taşınır, tutar korunur
+const split = splitFreightFromDocumentItems([
+  { lineSource: 'invoice_pdf', originalName: 'Литокол CR 55FT ремонтный состав 25кг', totalPrice: 81836.07, grossTotalPrice: 99840 },
+  { lineSource: 'invoice_pdf', originalName: 'Транспортные услуги', totalPrice: 6393.44, grossTotalPrice: 7800 }
+]);
+assert.deepEqual([split.items.length, split.moved, split.freightGross], [1, 1, 7800]);
 
 console.log('invoiceDocumentLines.test.ts: tüm testler geçti');
