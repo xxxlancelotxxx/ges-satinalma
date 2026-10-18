@@ -267,6 +267,10 @@ export interface MaterialComparisonHistoryItem {
 
 export interface MaterialComparison {
   materialName: string;
+  /** Kalıcı katalog anahtarı (ad parmak izi) */
+  catalogKey?: string;
+  /** Kullanıcının elle birleştirdiği katalog kaydı (otomatik bölünmez) */
+  catalogLocked?: boolean;
   category: string;
   unit: string;
   comparisonMode?: 'COMMODITY_STANDARD' | 'BRAND_SEGMENTED';
