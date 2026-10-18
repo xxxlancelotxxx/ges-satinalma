@@ -1,6 +1,7 @@
 // Ortam değişkenleri (.env.local / .env) diğer modüllerden önce yüklenmeli.
 import './server/envLoader';
 import { processItem } from './src/utils/aiDecisionEngine';
+import { comparisonMultiplierForVat } from './src/utils/vatBasis';
 import { normalizeStandardUnit, getMaterialBenchmarkUnit, convertMaterialUnit, areUnitsConvertible, extractRebarDiameter } from './src/utils/constructionUnitConverter';
 import { normalizeVendorName, getVendorKey, areVendorsEqual } from './src/utils/vendorNormalizer';
 import { normalizeCategoryName, CANONICAL_28_CATEGORIES, translateRussianMaterialToTurkish, ensureRussianOriginalName, resolveItemCategory } from './src/utils/categoryClassifier';
@@ -1290,6 +1291,26 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
     else if (impliedTaxPct > 20.8 && impliedTaxPct <= 23.5) invoiceLevelVat = 22;
   }
 
+  // Daha önce "net" diye kaydedilmiş fiyatların aslında KDV DAHİL olup olmadığını fatura toplamıyla doğrula.
+  // Örn. BMZ NU-3315: toplam 77.705.300 ₽ = Σ(kayıtlı net × miktar) → kayıtlı "net" fiyat aslında KDV dahil fiyattır,
+  // üstüne bir kez daha %22 eklenince aynı malzeme diğer faturalara göre %22 pahalı görünüyordu.
+  const storedNormItems = effectiveRawItems.filter((x: any) => x?.isNetNormalized && Number(x?.unitPriceNet) > 0 && Number(x?.grossUnitPrice) > 0);
+  const storedNetSum = storedNormItems.reduce((s: number, x: any) => s + Number(x.unitPriceNet) * (Number(x?.quantity) || 1), 0);
+  const storedGrossSum = storedNormItems.reduce((s: number, x: any) => s + Number(x.grossUnitPrice) * (Number(x?.quantity) || 1), 0);
+  const storedFreightGross = Number(inv.excludedFreightGrossAmount || pMatch?.excludedFreightGrossAmount) || 0;
+  const matchesInvoiceTotal = (sum: number) =>
+    invTotal > 0 && sum > 0 && (
+      Math.abs(sum - invTotal) / invTotal <= 0.015 ||
+      (storedFreightGross > 0 && invTotal > storedFreightGross && Math.abs(sum - (invTotal - storedFreightGross)) / (invTotal - storedFreightGross) <= 0.015)
+    );
+  const isStoredNetActuallyGross =
+    !isIpMalyavin &&
+    storedNormItems.length > 0 &&
+    storedNormItems.length === effectiveRawItems.length &&
+    storedGrossSum > storedNetSum * 1.15 &&
+    matchesInvoiceTotal(storedNetSum) &&
+    !matchesInvoiceTotal(storedGrossSum);
+
   const normItems = effectiveRawItems.map((it: any) => {
     if (!it || typeof it !== 'object') return it;
     const norm = smartNormalizeItem(it);
@@ -1332,6 +1353,12 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
     if (isSummaryPackageRow) {
       unitPriceNet = rawUnitPrice;
       grossUnitPrice = rawUnitPrice;
+    } else if (isStoredNetActuallyGross) {
+      const storedVatPct = Number(it.vatPercentage) > 0 ? Number(it.vatPercentage) : (effectiveVatPct > 0 ? effectiveVatPct : invoiceLevelVat);
+      grossUnitPrice = Number(Number(it.unitPriceNet).toFixed(2));
+      unitPriceNet = storedVatPct > 0
+        ? Number((grossUnitPrice / (1 + storedVatPct / 100)).toFixed(2))
+        : grossUnitPrice;
     } else if (it.isNetNormalized && it.unitPriceNet > 0 && it.grossUnitPrice > 0 && !isIpMalyavin) {
       unitPriceNet = Number(Number(it.unitPriceNet).toFixed(2));
       grossUnitPrice = Number(Number(it.grossUnitPrice).toFixed(2));
@@ -1383,6 +1410,15 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
   // Detect implicit freight/delivery difference when invoice total exceeds Gross material subtotal (e.g. Invoice 671 & 669: 396,000.36 - 389,981.36 = 6,019.00 RUB freight)
   const matNetSubtotal = normItems.reduce((s: number, x: any) => s + (Number(x?.totalPrice) || 0), 0);
   const matGrossSubtotal = normItems.reduce((s: number, x: any) => s + (Number(x?.grossTotalPrice) || 0), 0);
+  // KDV dahil kalem toplamı (+ açık nakliye satırı) fatura toplamını tutuyorsa net/brüt ayrımı kesindir;
+  // böyle kalemler faturalar arası "1,20x / 1,22x oran" tahminleriyle bir daha değiştirilmez.
+  const vatBasisVerified = invTotal > 0 && matGrossSubtotal > 0 && (
+    Math.abs(matGrossSubtotal - invTotal) / invTotal <= 0.015 ||
+    (excludedFreightGrossSum > 0 && Math.abs(matGrossSubtotal + excludedFreightGrossSum - invTotal) / invTotal <= 0.015)
+  );
+  if (vatBasisVerified) {
+    normItems.forEach((x: any) => { if (x && typeof x === 'object') x.vatBasisVerified = true; });
+  }
   if (excludedFreightGrossSum === 0 && normItems.length > 0 && invTotal > matGrossSubtotal + 500) {
     const diffGross = invTotal - matGrossSubtotal;
     if (diffGross >= 500 && diffGross <= invTotal * 0.35) {
@@ -1484,6 +1520,11 @@ function enrichAndNormalizeInvoiceRecords(records: any[], prizmaInvs: any[]): an
     let matGrossSub = 0;
 
     inv.items = inv.items.map((it: any) => {
+      if (it?.vatBasisVerified) {
+        matNetSub += Number(it.totalPrice) || 0;
+        matGrossSub += Number(it.grossTotalPrice) || 0;
+        return it;
+      }
       const key = String(it.materialName || '').toLowerCase().trim();
       const confirmedList = confirmedNetPricesByMat.get(key) || [];
       const qty = Number(it.quantity) || 1;
@@ -6859,6 +6900,23 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
     const origBridgeMap = new Map<string, string>();
     const prizmaCodeKeyMap = new Map<string, string>();
 
+    // Prizma eşleşmesiyle kalemleri sonradan değişen faturalar dahil: KDV dahil kalem toplamı fatura toplamını tutuyorsa
+    // fiyat tabanı kesindir (bkz. normalizeSingleInvoicePricingAndFreight → vatBasisVerified).
+    allInvoices.forEach(inv => {
+      if (!Array.isArray(inv?.items) || inv.items.length === 0) return;
+      if (inv.items.every((it: any) => it?.vatBasisVerified)) return;
+      const invTotal = Number(inv.totalAmount) || 0;
+      if (!(invTotal > 0) || !inv.items.every((it: any) => Number(it?.grossUnitPrice) > 0)) return;
+      const grossSum = inv.items.reduce((s: number, it: any) => s + Number(it.grossUnitPrice) * (Number(it.quantity) || 1), 0);
+      const freightGross = Number(inv.excludedFreightGrossAmount) || 0;
+      if (
+        Math.abs(grossSum - invTotal) / invTotal <= 0.015 ||
+        (freightGross > 0 && Math.abs(grossSum + freightGross - invTotal) / invTotal <= 0.015)
+      ) {
+        inv.items = inv.items.map((it: any) => ({ ...it, vatBasisVerified: true }));
+      }
+    });
+
     allInvoices.forEach(inv => {
       if (!inv.items || !Array.isArray(inv.items)) return;
       inv.items.forEach(item => {
@@ -7195,7 +7253,8 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
           conv,
           resolvedOrigName,
           isPrizmaSource: Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_') || inv.prizmaLinked)),
-          isPortalAmbiguous: Boolean(item.isPortalAmbiguous)
+          isPortalAmbiguous: Boolean(item.isPortalAmbiguous),
+          vatBasisVerified: Boolean(item.vatBasisVerified)
         });
       });
 
@@ -7204,7 +7263,7 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
       if (rawHistory.length > 1) {
         // Step A: If an ambiguous Portal entry was divided by VAT, check if its effectiveGrossUnitPrice equals a non-ambiguous entry's effectiveNetUnitPrice
         for (const entry of rawHistory) {
-          if (!entry.isPortalAmbiguous) continue;
+          if (!entry.isPortalAmbiguous || entry.vatBasisVerified) continue;
           const matchedPeer = rawHistory.find(other =>
             other !== entry &&
             !other.isPortalAmbiguous &&
@@ -7230,6 +7289,8 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
         // Step B: For any entry (Portal or Prizma) whose effectiveNetUnitPrice is 1.20x or 1.22x (±0.6%) of another entry's effectiveNetUnitPrice,
         // normalize the VAT-inflated entry down to the Net baseline price
         for (const entry of rawHistory) {
+          // Fatura toplamıyla doğrulanmış kalemin fiyatı gerçektir; başka faturayla 1,22x oranı tesadüf olabilir.
+          if (entry.vatBasisVerified) continue;
           for (const testVat of [entry.vatPct || 22, 22, 20]) {
             if (!(testVat > 0)) continue;
             const vFactor = 1 + testVat / 100;
@@ -7254,7 +7315,7 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
 
       const history: any[] = [];
       let totalNormalizedSpend = 0;
-      let totalNormalizedGrossSpend = 0;
+      let totalNormalizedNetSpend = 0;
       let totalNormalizedQuantity = 0;
 
       for (const hEntry of rawHistory) {
@@ -7281,11 +7342,17 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
         if (coreInvNo && seenInvoiceItemKeys.has(dedupKey)) continue;
         if (coreInvNo) seenInvoiceItemKeys.add(dedupKey);
 
-        const lineTotalNetSpend = originalNetUnitPrice * originalQuantity;
-        const lineTotalGrossSpend = originalGrossUnitPrice * originalQuantity;
+        // Kıyaslama tabanı: KDV DAHİL fiyat, tek oran %22 (Berkant kararı, 2026-10-18).
+        // %20/%22 KDV'li satırlar net × 1,22; KDV'siz (%0, muaf) satırlar ödenen fiyatla; %10 indirimli oran kendi brütüyle.
+        const basisMultiplier = comparisonMultiplierForVat(vatPct);
+        const comparisonUnitPrice = Number((effectiveNetUnitPrice * basisMultiplier).toFixed(2));
+        const comparisonOriginalUnitPrice = Number((originalNetUnitPrice * basisMultiplier).toFixed(2));
 
-        totalNormalizedSpend += lineTotalNetSpend;
-        totalNormalizedGrossSpend += lineTotalGrossSpend;
+        const lineTotalNetSpend = originalNetUnitPrice * originalQuantity;
+        const lineTotalComparisonSpend = comparisonOriginalUnitPrice * originalQuantity;
+
+        totalNormalizedNetSpend += lineTotalNetSpend;
+        totalNormalizedSpend += lineTotalComparisonSpend;
         totalNormalizedQuantity += effectiveQuantity;
 
         const entrySeg = analyzeMaterialSegment(matGroup.materialName, resolvedOrigName, matGroup.category, effectiveNetUnitPrice);
@@ -7295,18 +7362,24 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
           jobsiteId: inv.jobsiteId,
           jobsiteName: inv.jobsiteName,
           supplier: inv.supplier,
-          unitPrice: effectiveNetUnitPrice,
+          unitPrice: comparisonUnitPrice,
           unitPriceNet: effectiveNetUnitPrice,
-          grossUnitPrice: effectiveGrossUnitPrice,
+          grossUnitPrice: comparisonUnitPrice,
+          paidGrossUnitPrice: effectiveGrossUnitPrice,
           vatPercentage: vatPct,
+          comparisonVatBasis: basisMultiplier > 1 ? Math.round((basisMultiplier - 1) * 100) : 0,
           quantity: effectiveQuantity,
           unit: conv.conversionApplied ? benchmarkUnit : originalUnit,
-          originalUnitPrice: originalNetUnitPrice,
-          originalGrossUnitPrice,
+          originalUnitPrice: comparisonOriginalUnitPrice,
+          originalNetUnitPrice,
+          originalGrossUnitPrice: comparisonOriginalUnitPrice,
+          originalPaidGrossUnitPrice: originalGrossUnitPrice,
           originalQuantity,
           originalUnit,
-          normalizedUnitPrice: effectiveNetUnitPrice,
-          normalizedGrossUnitPrice: effectiveGrossUnitPrice,
+          normalizedUnitPrice: comparisonUnitPrice,
+          normalizedNetUnitPrice: effectiveNetUnitPrice,
+          normalizedGrossUnitPrice: comparisonUnitPrice,
+          vatBasisVerified: Boolean(hEntry.vatBasisVerified),
           normalizedQuantity: effectiveQuantity,
           normalizedUnit: benchmarkUnit,
           conversionApplied: conv.conversionApplied,
@@ -7344,12 +7417,12 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
       const minUnitPrice = Math.min(...normalizedPrices);
       const maxUnitPrice = Math.max(...normalizedPrices);
 
-      const normalizedGrossPrices = history.map(h => h.grossUnitPrice || h.unitPrice);
-      const minGrossUnitPrice = Math.min(...normalizedGrossPrices);
-      const maxGrossUnitPrice = Math.max(...normalizedGrossPrices);
+      const netPrices = history.map(h => h.unitPriceNet);
+      const minNetUnitPrice = Math.min(...netPrices);
+      const maxNetUnitPrice = Math.max(...netPrices);
 
       const avgUnitPrice = totalNormalizedQuantity > 0 ? (totalNormalizedSpend / totalNormalizedQuantity) : 0;
-      const avgGrossUnitPrice = totalNormalizedQuantity > 0 ? (totalNormalizedGrossSpend / totalNormalizedQuantity) : 0;
+      const avgNetUnitPrice = totalNormalizedQuantity > 0 ? (totalNormalizedNetSpend / totalNormalizedQuantity) : 0;
       const cheapestPoint = history.find(h => h.unitPrice === minUnitPrice);
       const priciestPoint = history.find(h => h.unitPrice === maxUnitPrice);
 
@@ -7383,14 +7456,19 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
         minUnitPrice: Number(minUnitPrice.toFixed(2)),
         maxUnitPrice: Number(maxUnitPrice.toFixed(2)),
         avgUnitPrice: Number(avgUnitPrice.toFixed(2)),
-        minGrossUnitPrice: Number(minGrossUnitPrice.toFixed(2)),
-        maxGrossUnitPrice: Number(maxGrossUnitPrice.toFixed(2)),
-        avgGrossUnitPrice: Number(avgGrossUnitPrice.toFixed(2)),
+        minGrossUnitPrice: Number(minUnitPrice.toFixed(2)),
+        maxGrossUnitPrice: Number(maxUnitPrice.toFixed(2)),
+        avgGrossUnitPrice: Number(avgUnitPrice.toFixed(2)),
+        minNetUnitPrice: Number(minNetUnitPrice.toFixed(2)),
+        maxNetUnitPrice: Number(maxNetUnitPrice.toFixed(2)),
+        avgNetUnitPrice: Number(avgNetUnitPrice.toFixed(2)),
+        priceBasis: 'VAT_INCLUSIVE_22',
         cheapestJobsiteName: cheapestPoint ? cheapestPoint.jobsiteName : '-',
         priciestJobsiteName: priciestPoint ? priciestPoint.jobsiteName : '-',
         totalQuantityPurchased: Number(totalNormalizedQuantity.toFixed(2)),
         totalSpend: Number(totalNormalizedSpend.toFixed(2)),
-        totalGrossSpend: Number(totalNormalizedGrossSpend.toFixed(2)),
+        totalGrossSpend: Number(totalNormalizedSpend.toFixed(2)),
+        totalNetSpend: Number(totalNormalizedNetSpend.toFixed(2)),
         priceDifferencePercentage: Number(priceDiffPct.toFixed(2)),
         history: history.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
       });

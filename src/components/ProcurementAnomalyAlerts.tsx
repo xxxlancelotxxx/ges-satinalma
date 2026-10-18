@@ -1269,9 +1269,9 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
                                       {hRow.quantity.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} {hRow.unit}
                                     </td>
                                     <td className="py-1.5 px-3 font-mono tabular-nums font-bold text-right text-slate-900">
-                                      <div>{formatRuble(hRow.unitPrice)} / {hRow.unit} (Net)</div>
+                                      <div>{formatRuble(hRow.unitPrice)} / {hRow.unit} (KDV Dahil)</div>
                                       <div className="text-[10px] font-normal text-slate-500">
-                                        KDV Dahil: {formatRuble((hRow as any).grossUnitPrice || Number((hRow.unitPrice * 1.22).toFixed(2)))}
+                                        KDV Hariç: {formatRuble(hRow.netUnitPrice || Number((hRow.unitPrice / 1.22).toFixed(2)))}
                                       </div>
                                     </td>
                                     <td className="py-1.5 px-3 font-mono font-bold text-right">

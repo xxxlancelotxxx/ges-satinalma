@@ -35,6 +35,7 @@ import {
   buildMode2CrossBrandFamilies,
   findCheaperEquivalentBrandSuggestion
 } from '../utils/dualMaterialComparisonEngine';
+import { comparisonUnitPriceOfItem } from '../utils/vatBasis';
 
 interface Props {
   invoice: PrizmaInvoice;
@@ -136,7 +137,8 @@ function findMatchingBenchmark(item: any, invoice: PrizmaInvoice, benchmarks: Be
   
   const rawItemName = (item.materialName || '').trim();
   const rawOrigName = (item.originalName || '').trim();
-  const itemUnitPrice = Number(item.unitPrice) || 0;
+  // Kıyaslama geçmişi %22 KDV dahil tabanda; faturadaki net kalem fiyatı da aynı tabana çevrilir
+  const itemUnitPrice = comparisonUnitPriceOfItem(item);
   const itemQuantity = Number(item.quantity) || 0;
 
   const itemSig = buildSmartOriginalSignature({
@@ -359,7 +361,7 @@ export const PrizmaQuickCompareModal: React.FC<Props> = ({ invoice, onClose, onN
   // Compute comparison stats for each item in the invoice
   const comparedItems = useMemo(() => {
     return (invoice.items || []).map((item, index) => {
-      const currentPrice = Number(item.unitPrice) || 0;
+      const currentPrice = comparisonUnitPriceOfItem(item);
       const smartSignature = buildSmartOriginalSignature({
         originalName: item.originalName,
         materialName: item.materialName,

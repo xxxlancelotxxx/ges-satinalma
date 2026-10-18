@@ -285,6 +285,10 @@ export interface MaterialComparison {
   minGrossUnitPrice?: number;
   maxGrossUnitPrice?: number;
   avgGrossUnitPrice?: number;
+  minNetUnitPrice?: number;
+  maxNetUnitPrice?: number;
+  avgNetUnitPrice?: number;
+  priceBasis?: 'VAT_INCLUSIVE_22';
   priceDifferencePercentage: number;
   cheapestJobsiteName?: string;
   priciestJobsiteName?: string;

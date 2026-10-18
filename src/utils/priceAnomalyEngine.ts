@@ -43,6 +43,7 @@ export interface AnomalyAlert {
     quantity: number;
     unit: string;
     unitPrice: number;
+    netUnitPrice?: number;
     grossUnitPrice?: number;
     vatPercentage?: number;
     originalName?: string;
@@ -133,12 +134,15 @@ export interface PriceAnomalyOptions {
 const unitPriceOf = (h: any) => Number(h.normalizedUnitPrice || h.unitPrice || 0);
 const quantityOf = (h: any) => Number(h.normalizedQuantity || h.quantity || 1);
 const isVatRatio = (ratio: number) => Math.abs(ratio - 1.22) <= 0.006 || Math.abs(ratio - 1.20) <= 0.006;
+// Sunucu her satırın KDV tabanını fatura toplamıyla doğruladıysa (vatBasisVerified) 1,20x / 1,22x fark gerçektir, KDV karışıklığı değildir.
+const isUnverifiedVatGap = (ratio: number, a: any, b: any) => isVatRatio(ratio) && !(a?.vatBasisVerified && b?.vatBasisVerified);
 
 function mapHistoryRows(comp: MaterialComparison, rows: any[], stdUnit: string): NonNullable<AnomalyAlert['historyRows']> {
   return rows.map((h: any) => {
-    const netUp = unitPriceOf(h);
+    // unitPriceOf = kıyaslama fiyatı (sunucuda %22 KDV dahil); net yalnızca bilgi amaçlı gösterilir
+    const grossUp = unitPriceOf(h);
     const vatPct = Number(h.vatPercentage) || 22;
-    const grossUp = Number(h.grossUnitPrice) || Number((netUp * (1 + vatPct / 100)).toFixed(2));
+    const netUp = Number(h.normalizedNetUnitPrice || h.unitPriceNet) || Number((grossUp / 1.22).toFixed(2));
     return {
       date: (h.date || '').split('T')[0],
       invoiceNo: h.invoiceNumber || 'Fatura',
@@ -146,7 +150,8 @@ function mapHistoryRows(comp: MaterialComparison, rows: any[], stdUnit: string):
       jobsiteName: h.jobsiteName || 'Genel Şantiye',
       quantity: quantityOf(h),
       unit: stdUnit,
-      unitPrice: netUp,
+      unitPrice: grossUp,
+      netUnitPrice: netUp,
       grossUnitPrice: grossUp,
       vatPercentage: vatPct,
       originalName: ensureRussianOriginalName(comp.materialName, h.originalName),
@@ -203,12 +208,12 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
         let currPrice = unitPriceOf(latest);
         const currQty = quantityOf(latest);
 
-        // Smart VAT Ratio Detector: if ratio is 1.20x or 1.22x (±0.6%), normalize to Net
+        // Smart VAT Ratio Detector: doğrulanmamış satırlarda 1,20x / 1,22x oran KDV karışıklığı sayılır
         if (prevPrice > 0 && currPrice > 0) {
           const ratio = currPrice / prevPrice;
-          if (isVatRatio(ratio)) {
+          if (isUnverifiedVatGap(ratio, first, latest)) {
             currPrice = prevPrice;
-          } else if (isVatRatio(1 / ratio)) {
+          } else if (isUnverifiedVatGap(1 / ratio, first, latest)) {
             prevPrice = currPrice;
           }
         }
@@ -255,7 +260,7 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
 
       // 2. Elma-Elma Malzeme Fiyat Farkı & Şantiyeler / Tedarikçiler Arası Sapma Tespiti
       if (!(minUnitPrice > 0) || maxUnitPrice <= minUnitPrice) return;
-      if (isVatRatio(maxUnitPrice / minUnitPrice)) return;
+      if (isUnverifiedVatGap(maxUnitPrice / minUnitPrice, cheapestRec, priciestRec)) return;
       const priceDiffPct = Number((((maxUnitPrice - minUnitPrice) / minUnitPrice) * 100).toFixed(1));
       if (priceDiffPct < 5) return;
       if (!areHistoryEntriesStrictlyEquivalent(cheapestRec, priciestRec, comp.materialName, comp.category)) return;
