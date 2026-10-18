@@ -540,6 +540,12 @@ export function getMaterialBenchmarkUnit(materialName: string, _category?: strin
   const text = String(materialName || '').toLowerCase();
   const normalizedUnits = currentUnits.map(normalizeStandardUnit);
 
+  // Yangın hortumu bağlantılı/boyu sabit set olarak (20 m, rakorlu) satılır: kıyas her zaman ADET başına yapılır.
+  // Metre başına bölmek (1425 ₽ / 20 m = 71,25 ₽) ile metre sanılan adet fiyatı (1320 ₽) kıyaslanıp sahte %1750 fark çıkıyordu.
+  if (/yangın\s*hortumu|yangin\s*hortumu|рукав\s*пожарн/i.test(text)) {
+    return 'adet';
+  }
+
   // 0. KESİN ADET KALEMLERİ (Vitrifiye, Fırça, El Aleti, Aydınlatma, Kapak, Manşon, Dübel, Cıvata, Somun, Pul, Saplama, Paspayı, Tüp vb.)
   if (
     /fırça|firca|ершик|кисть|щетк|унитаз|klozet|раковин|lavabo|смесител|batarya|무фта|муфта|manşon|manson|дюбел|dübel|dubel|гвозд|çivi|civi|болт|cıvata|civata|гайк|somun|шайб|pul\b|rondela|шпильк|saplama|tij\b|gijon|саморез|vida\b|фиксатор|paspay|анкер|ankraj|کлетка|клетка|тележк|баллон|tüpü|tupu|saati|редуктор|горелк|pürmüz|purmuz|conta|прокладк|хомут|kelepçe|kablo bağı|mandal|kilit|menteşe|петля|ручка|kalem|klasör|dosya|sandalye|koltuk|masa|dolap|ranza|yatak|baret|yelek|gözlük|очки|botu|ayakkabı|ботинк|светильник|прожектор|лампа|aydınlatma|aydinlatma|люк\b|kapak|kapağı|kapagi|рубанок|rende|терка|кельма|шпатель|spatula|ножовка|testere|штроборез|захват|миксер|пистолет|tabanca|герметик|germetik|лента|скотч|bant|валик|rulo|кювета|ванночка|стенд|pano|panosu|yangın\s*hortumu|рукав\s*пожарн|lazer|указка|тахеометр|taheometre|нивелир|nivo|çöp\s*poşet|cop\s*poset|çöp\s*torba|мешк.*мусор|küp\s*şeker|сахар\s*кусков/i.test(text) &&

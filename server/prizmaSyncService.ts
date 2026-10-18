@@ -6,6 +6,13 @@ import { normalizeVendorName } from '../src/utils/vendorNormalizer';
 import { normalizeCategoryName, translateRussianMaterialToTurkish, ensureRussianOriginalName } from '../src/utils/categoryClassifier';
 import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore, collection, getDocs, doc, writeBatch } from 'firebase/firestore';
+import {
+  InvoiceLineCheck,
+  DocumentLinesResult,
+  buildLineCheck,
+  extractPdfText,
+  readInvoiceDocumentText
+} from './invoiceDocumentLines';
 
 let defaultDb: any = null;
 try {
@@ -42,6 +49,9 @@ export interface PrizmaInvoiceRecord {
   invoiceFileId?: number;
   excludedFreightAmount?: number;
   excludedFreightGrossAmount?: number;
+  /** Kalemlerin kaynağı: fatura belgesi (doğrulanmış) veya STF sipariş satırları */
+  linesSource?: 'invoice_pdf' | 'stf_order';
+  lineCheck?: InvoiceLineCheck;
   items: Array<{
     id: string;
     materialName: string;
@@ -58,6 +68,8 @@ export interface PrizmaInvoiceRecord {
      isNetNormalized?: boolean;
     activityName?: string;
     category?: string;
+    lineSource?: string;
+    [key: string]: any;
   }>;
   isDeleted: boolean;
   prizmaSource: boolean;
@@ -133,6 +145,14 @@ const extractShortSpecNote = (s?: string): string => {
   return '';
 };
 
+/** Kayıttaki kalemlerin tamamı fatura belgesinden mi okunmuş? */
+export function hasDocumentLines(rec: any): boolean {
+  return Boolean(
+    rec && rec.linesSource === 'invoice_pdf' && Array.isArray(rec.items) && rec.items.length > 0 &&
+    rec.items.every((it: any) => it?.lineSource === 'invoice_pdf')
+  );
+}
+
 export function isCleanMaterialRecord(inv: any): boolean {
   if (!inv || inv.isDeleted) return false;
   // Kesinlikle STF'si olmalı (kullanıcı isteği: doğrudan fatura kalemleri olan onaylı siparişler)
@@ -187,10 +207,137 @@ class PrizmaSyncService {
   private lastSyncAt: string | null = null;
   private lastError: string | null = null;
   private orderRowsCache = new Map<number, any[]>();
+  /** demandId → fatura belgesi okuma sonucu (aynı dosya her gece yeniden indirilmesin) */
+  private docLinesCache = new Map<number, DocumentLinesResult & { invoiceTotal: number }>();
 
   constructor() {
     this.loadInitialFromDisk();
     this.loadOrderRowsFromDisk();
+    this.loadDocLinesFromDisk();
+  }
+
+  private loadDocLinesFromDisk() {
+    try {
+      const filePath = path.join(BACKUP_DIR, 'prizma_invoice_doc_lines.json');
+      if (fs.existsSync(filePath)) {
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        for (const [k, v] of Object.entries(parsed || {})) this.docLinesCache.set(Number(k), v as any);
+      }
+    } catch (_) {}
+  }
+
+  private saveDocLinesToDisk() {
+    try {
+      const obj: Record<number, any> = {};
+      this.docLinesCache.forEach((v, k) => { obj[k] = v; });
+      fs.writeFileSync(path.join(BACKUP_DIR, 'prizma_invoice_doc_lines.json'), JSON.stringify(obj), 'utf-8');
+    } catch (_) {}
+  }
+
+  /** Talebin "Счет на оплату" dosyasını Prizma'dan bulur ve PDF metnini döndürür. */
+  private async fetchInvoiceDocumentText(demandId: number, knownFileId?: number): Promise<{ fileId?: number; text?: string; note?: string }> {
+    let fileId = knownFileId;
+    if (!fileId) {
+      const files = await (prizmaService as any).authorizedGet(`/api/process/list-files/BTF/${demandId}`);
+      if (Array.isArray(files)) {
+        const schet = files.find((f: any) =>
+          Number(f.doctype) === 2 || /счет/i.test(f.docTypeNameRU || '') || /счет/i.test(f.docTypeNameTR || '') ||
+          /proforma/i.test(f.docTypeNameEN || '') || /schet/i.test(f.fileName || ''));
+        fileId = schet?.id;
+      }
+    }
+    if (!fileId) return { note: 'Prizma talebinde "Счет на оплату" belgesi yok' };
+    const res = await prizmaService.downloadFile(`/api/process/get-file/BTF/${demandId}/${fileId}/fatura.pdf`);
+    if (res.status === 404 || (res.status === 200 && !res.data?.length)) return { fileId, note: `Belge Prizma'da bulunamadı (HTTP ${res.status})` };
+    // Geçici hatalar (5xx, yetki) kalıcı sonuç sayılmaz: üst katman "Belge okunamadı" der ve tekrar dener
+    if (res.status !== 200) throw new Error(`Prizma dosya servisi HTTP ${res.status}`);
+    if (res.data.subarray(0, 5).toString('latin1') !== '%PDF-') {
+      return { fileId, note: `Belge PDF değil (${res.contentType}); metin katmanı okunamıyor` };
+    }
+    const text = await extractPdfText(res.data);
+    if (!text || text.replace(/\s+/g, '').length < 50) return { fileId, note: 'PDF taranmış görüntü; metin katmanı yok' };
+    return { fileId, text };
+  }
+
+  /**
+   * Bir Prizma faturasının kalemlerini belirler: fatura belgesi okunup tutarı tutuyorsa belgedeki
+   * kalemler, aksi halde STF satırları (lineCheck ile "doğrulanmadı" işaretli). Fark asla nakliyeye yazılmaz.
+   */
+  public async resolveInvoiceLines(params: {
+    demandId: number;
+    fileId?: number;
+    invoiceTotal: number;
+    docYear: string;
+    stfItems: any[];
+    stfFreightNet: number;
+    stfFreightGross: number;
+    previous?: Partial<PrizmaInvoiceRecord> | null;
+    allowDownload?: boolean;
+  }): Promise<{ items: any[]; freightNet: number; freightGross: number; linesSource: 'invoice_pdf' | 'stf_order'; lineCheck: InvoiceLineCheck }> {
+    const { demandId, invoiceTotal, previous } = params;
+    const prevCheck = previous?.lineCheck;
+    if (
+      prevCheck?.status === 'verified' && hasDocumentLines(previous) &&
+      Math.abs((prevCheck.invoiceTotal || 0) - invoiceTotal) < 0.01 &&
+      (!params.fileId || !prevCheck.fileId || prevCheck.fileId === params.fileId)
+    ) {
+      return {
+        items: previous.items,
+        freightNet: Number(previous.excludedFreightAmount) || 0,
+        freightGross: Number(previous.excludedFreightGrossAmount) || 0,
+        linesSource: 'invoice_pdf',
+        lineCheck: prevCheck
+      };
+    }
+
+    let docResult: DocumentLinesResult | undefined;
+    const cached = this.docLinesCache.get(demandId);
+    if (cached && Math.abs(cached.invoiceTotal - invoiceTotal) < 0.01 && (!params.fileId || cached.fileId === params.fileId)) {
+      docResult = cached;
+    } else if (params.allowDownload !== false) {
+      try {
+        const fetched = await this.fetchInvoiceDocumentText(demandId, params.fileId);
+        docResult = fetched.text
+          ? readInvoiceDocumentText(fetched.text, { invoiceTotal, docYear: params.docYear, stfItems: params.stfItems, fileId: fetched.fileId })
+          : { fileId: fetched.fileId, verified: false, note: fetched.note || 'Belge okunamadı' };
+        this.docLinesCache.set(demandId, { ...docResult, invoiceTotal });
+      } catch (err: any) {
+        // Ağ hatası kalıcı sonuç sayılmaz, önbelleğe yazılmaz
+        docResult = { verified: false, note: `Belge okunamadı: ${err.message}` };
+      }
+    }
+
+    if (docResult?.verified && docResult.items?.length) {
+      return {
+        items: docResult.items,
+        freightNet: docResult.freightNet || 0,
+        freightGross: docResult.freightGross || 0,
+        linesSource: 'invoice_pdf',
+        lineCheck: buildLineCheck({
+          items: docResult.items,
+          freightGross: docResult.freightGross || 0,
+          invoiceTotal,
+          source: 'invoice_pdf',
+          fileId: docResult.fileId,
+          documentNote: docResult.note
+        })
+      };
+    }
+
+    return {
+      items: params.stfItems,
+      freightNet: params.stfFreightNet,
+      freightGross: params.stfFreightGross,
+      linesSource: 'stf_order',
+      lineCheck: buildLineCheck({
+        items: params.stfItems,
+        freightGross: params.stfFreightGross,
+        invoiceTotal,
+        source: 'stf_order',
+        fileId: docResult?.fileId,
+        documentNote: docResult?.note
+      })
+    };
   }
 
   public setDb(d: any) {
@@ -326,6 +473,8 @@ class PrizmaSyncService {
 
       const mappedItems = rawItemsList
         .map((it, idx) => {
+          // Fatura belgesinden okunmuş kalem: isim, birim ve fiyat belgeden gelir; STF satırıyla ezilmez.
+          if (it.lineSource === 'invoice_pdf') return { ...it };
           const matchedRow = Array.isArray(cachedOrderRows)
             ? (cachedOrderRows.find((r: any) => `prizma_row_${r.id}` === it.id) || cachedOrderRows[idx])
             : undefined;
@@ -907,6 +1056,38 @@ class PrizmaSyncService {
         syncedInvoices.push(record);
       }
 
+      // STF sipariş satırları faturanın kendisi değildir: her faturanın kalemlerini "Счет на оплату"
+      // belgesinden doğrula. Belge okunamazsa STF satırları kalır ama fatura "doğrulanmadı" işaretlenir.
+      const previousById = new Map<string, PrizmaInvoiceRecord>();
+      (await this.loadPreviousRecords()).forEach(r => previousById.set(r.id, r));
+      let verifiedFromDocument = 0;
+      for (let i = 0; i < syncedInvoices.length; i += 4) {
+        const chunk = syncedInvoices.slice(i, i + 4);
+        await Promise.all(chunk.map(async rec => {
+          const resolved = await this.resolveInvoiceLines({
+            demandId: rec.prizmaDemandId,
+            fileId: rec.invoiceFileId,
+            invoiceTotal: Number(rec.totalAmount) || 0,
+            docYear: String(rec.date || '').slice(0, 4),
+            stfItems: rec.items,
+            stfFreightNet: Number(rec.excludedFreightAmount) || 0,
+            stfFreightGross: Number(rec.excludedFreightGrossAmount) || 0,
+            previous: previousById.get(rec.id)
+          });
+          rec.items = resolved.items;
+          rec.linesSource = resolved.linesSource;
+          rec.lineCheck = resolved.lineCheck;
+          rec.excludedFreightAmount = resolved.freightNet > 0 ? Number(resolved.freightNet.toFixed(2)) : 0;
+          rec.excludedFreightGrossAmount = resolved.freightGross > 0 ? Number(resolved.freightGross.toFixed(2)) : 0;
+          if (resolved.linesSource === 'invoice_pdf') verifiedFromDocument++;
+        }));
+        this.syncProgress = {
+          percent: Math.min(94, 90 + Math.round(((i + chunk.length) / Math.max(1, syncedInvoices.length)) * 4)),
+          message: `Fatura belgeleri okunuyor (${Math.min(i + chunk.length, syncedInvoices.length)}/${syncedInvoices.length}), ${verifiedFromDocument} fatura belgeden doğrulandı...`
+        };
+      }
+      this.saveDocLinesToDisk();
+
       this.syncProgress = { percent: 95, message: 'Veriler güvenle kaydediliyor...' };
 
       // Persist to memory & disk
@@ -968,6 +1149,123 @@ class PrizmaSyncService {
     } finally {
       this.isSyncing = false;
     }
+  }
+
+  /** Senkron öncesi kayıtlar (önceki doğrulanmış fatura kalemlerini korumak için) */
+  private async loadPreviousRecords(): Promise<PrizmaInvoiceRecord[]> {
+    if (this.memoryCache && this.memoryCache.length > 0) return this.memoryCache;
+    if (this.dbInstance) {
+      try {
+        const snap = await getDocs(collection(this.dbInstance, 'prizma_invoices'));
+        return snap.docs.map(d => ({ id: d.id, ...d.data() } as PrizmaInvoiceRecord));
+      } catch (_) {}
+    }
+    return [];
+  }
+
+  /**
+   * Daha önce senkronlanmış (90 günden eski olanlar dahil) Prizma faturalarının kalemlerini fatura
+   * belgesiyle doğrular. apply=false iken hiçbir şey yazmaz, yalnızca rapor döner.
+   * apply=true iken değişen her kaydın önceki hali `invoice_line_backups` koleksiyonuna yedeklenir.
+   */
+  public async reconcileStoredInvoiceLines(options: { apply?: boolean; limit?: number; recheck?: boolean } = {}): Promise<{
+    scanned: number;
+    verifiedFromDocument: number;
+    stfMatchesTotal: number;
+    mismatch: number;
+    errors: number;
+    changedIds: string[];
+    backups: number;
+    samples: Array<{ id: string; invoiceNumber: string; supplier: string; status: string; diff: number; note?: string }>;
+  }> {
+    // Yalnızca uygulamada kullanılan (onaylı, STF'li malzeme) faturalar; beton/hizmet vb. elenenler indirilmez
+    const all = (await this.loadPreviousRecords()).filter(r => r && !r.isDeleted && r.prizmaDemandId && isCleanMaterialRecord(r));
+    const todo = all
+      // lineCheck'i olmayan veya "belgeden doğrulandı" deyip kalemleri başka bir yazımla (eski sürüm senkronu) ezilmiş kayıtlar
+      .filter(r => options.recheck || !r.lineCheck || (r.linesSource === 'invoice_pdf' && !hasDocumentLines(r)))
+      .slice(0, options.limit && options.limit > 0 ? options.limit : undefined);
+
+    const report = { scanned: todo.length, verifiedFromDocument: 0, stfMatchesTotal: 0, mismatch: 0, errors: 0, changedIds: [] as string[], backups: 0, samples: [] as any[] };
+    const updated: PrizmaInvoiceRecord[] = [];
+
+    for (let i = 0; i < todo.length; i += 4) {
+      const chunk = todo.slice(i, i + 4);
+      await Promise.all(chunk.map(async rec => {
+        const stfItems = (rec.items || []).filter((it: any) => it?.lineSource !== 'invoice_pdf');
+        const resolved = await this.resolveInvoiceLines({
+          demandId: rec.prizmaDemandId,
+          fileId: rec.invoiceFileId,
+          invoiceTotal: Number(rec.totalAmount) || 0,
+          docYear: String(rec.date || '').slice(0, 4),
+          stfItems: stfItems.length ? stfItems : (rec.items || []),
+          stfFreightNet: Number(rec.excludedFreightAmount) || 0,
+          stfFreightGross: Number(rec.excludedFreightGrossAmount) || 0,
+          previous: options.recheck ? null : rec
+        });
+        if (resolved.linesSource !== 'invoice_pdf' && /^Belge okunamadı:/.test(resolved.lineCheck.documentNote || '')) {
+          // Prizma'ya ulaşılamadı: sonuç kalıcı sayılmaz, kayıt değiştirilmez (bir sonraki çalıştırmada yeniden denenir)
+          report.errors++;
+          return;
+        }
+        if (resolved.lineCheck.status === 'verified') report.verifiedFromDocument++;
+        else if (resolved.lineCheck.status === 'stf_matches_total') report.stfMatchesTotal++;
+        else report.mismatch++;
+        if (report.samples.length < 400 && resolved.lineCheck.status !== 'stf_matches_total') {
+          report.samples.push({
+            id: rec.id, invoiceNumber: rec.invoiceNumber, supplier: rec.supplier,
+            status: resolved.lineCheck.status, diff: resolved.lineCheck.diff, note: resolved.lineCheck.documentNote
+          });
+        }
+        updated.push({
+          ...rec,
+          items: resolved.items as any,
+          linesSource: resolved.linesSource,
+          lineCheck: resolved.lineCheck,
+          excludedFreightAmount: resolved.freightNet > 0 ? Number(resolved.freightNet.toFixed(2)) : 0,
+          excludedFreightGrossAmount: resolved.freightGross > 0 ? Number(resolved.freightGross.toFixed(2)) : 0
+        });
+      }));
+      this.syncProgress = { percent: Math.round(((i + chunk.length) / Math.max(1, todo.length)) * 100), message: `Fatura belgeleri doğrulanıyor (${Math.min(i + chunk.length, todo.length)}/${todo.length})...` };
+    }
+    this.saveDocLinesToDisk();
+    report.changedIds = updated.map(u => u.id);
+
+    if (options.apply && this.dbInstance && updated.length > 0) {
+      const cleanDoc = (obj: any): any => {
+        if (obj === undefined) return null;
+        if (obj === null || typeof obj !== 'object') return obj;
+        if (Array.isArray(obj)) return obj.map(cleanDoc);
+        return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined).map(([k, v]) => [k, cleanDoc(v)]));
+      };
+      const originals = new Map(all.map(r => [r.id, r]));
+      const stamp = new Date().toISOString();
+      for (let i = 0; i < updated.length; i += 50) {
+        const batch = writeBatch(this.dbInstance);
+        for (const rec of updated.slice(i, i + 50)) {
+          const original = originals.get(rec.id);
+          if (original) {
+            batch.set(doc(this.dbInstance, 'invoice_line_backups', `${rec.id}__${stamp.replace(/[:.]/g, '-')}`), cleanDoc({
+              collection: 'prizma_invoices', docId: rec.id, backedUpAt: stamp, reason: 'invoice_line_reconcile', data: original
+            }));
+            report.backups++;
+          }
+          batch.set(doc(this.dbInstance, 'prizma_invoices', rec.id), cleanDoc({
+            items: rec.items,
+            linesSource: rec.linesSource,
+            lineCheck: rec.lineCheck,
+            excludedFreightAmount: rec.excludedFreightAmount,
+            excludedFreightGrossAmount: rec.excludedFreightGrossAmount
+          }), { merge: true });
+        }
+        await batch.commit();
+      }
+      const byId = new Map(updated.map(u => [u.id, u]));
+      if (this.memoryCache) this.memoryCache = this.memoryCache.map(r => byId.get(r.id) || r);
+      this.cleanListCache = null;
+      this.cacheTimestamp = 0;
+      if (this.memoryCache) this.saveToDisk(this.memoryCache);
+    }
+    return report;
   }
 
   public getSyncStatus() {
