@@ -10,7 +10,8 @@ import { checkRecordPermission, getUserAuthorizedJobsiteIds, canonicalizeJobsite
 import { comparativeAnalysesStore, materialSynonymsStore, comparativeConfig, updateComparativeConfig, processComparativeAnalysisBatch, learnApprovedSynonyms, recalculateComparativeAnalysis } from './server/comparativeEngine';
 import { prizmaService } from './server/prizmaService';
 import { prizmaSyncService, cleanRawMaterialName } from './server/prizmaSyncService';
-import { MaterialAliasStore, buildMergeAliases, catalogKeyForName } from './server/materialCatalog';
+import { MaterialAliasStore, buildMergeAliases, buildSplitAlias, aliasKeysForItem, aliasDocId, catalogKeyForName } from './server/materialCatalog';
+import { buildMergeSuggestions } from './src/utils/materialMergeSuggestions';
 import { materialFingerprint } from './src/utils/materialFingerprint';
 
 import { EventEmitter } from 'events';
@@ -7753,6 +7754,92 @@ app.delete('/api/materials/aliases', async (req, res) => {
     const result = await materialAliasStore.remove(idList);
     memoryStore.materialComparisons = undefined;
     res.json({ success: true, removed: result.removed.length, persisted: result.persisted, ...(result.error ? { warning: result.error } : {}) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Otomatik birleştirme önerileri (asla otomatik uygulanmaz) + katalog sağlık durumu
+app.get('/api/materials/merge-suggestions', async (req, res) => {
+  try {
+    const { data: comps } = await computeMaterialComparisons();
+    const view = ensureComparisonGroupIntegrity(comps);
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const suggestions = buildMergeSuggestions(view as any, { limit });
+    res.json({
+      suggestions,
+      catalog: {
+        groups: view.length,
+        manualGroups: view.filter((c: any) => c.catalogLocked).length,
+        aliases: materialAliasStore.index.size,
+        aliasSource: materialAliasStore.source,
+        lastAliasWriteOk: materialAliasStore.lastWriteOk,
+        persistent: materialAliasStore.source === 'firestore' && materialAliasStore.lastWriteOk !== false
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Yanlış gruplanan tek bir fatura satırını kendi kaydına ayır (kalıcı, geri alınabilir)
+app.post('/api/materials/split', async (req, res) => {
+  try {
+    const { groupName, groupId, invoiceId, originalName } = req.body || {};
+    if ((!groupName && !groupId) || !originalName) {
+      return res.status(400).json({ error: 'groupName/groupId ve originalName zorunludur.' });
+    }
+    const { data: comps } = await computeMaterialComparisons();
+    const view = ensureComparisonGroupIntegrity(comps);
+    const group: any = (groupId && (view.find((c: any) => c.id === groupId) || comps.find((c: any) => c.id === groupId)))
+      || view.find((c: any) => c.materialName === groupName) || comps.find((c: any) => c.materialName === groupName);
+    if (!group) return res.status(404).json({ error: `Malzeme bulunamadı: '${groupName || groupId}'` });
+    const history: any[] = Array.isArray(group.history) ? group.history : [];
+    const entry = history.find((h: any) => (h.rawOriginalName || h.originalName) === originalName && (!invoiceId || h.invoiceId === invoiceId))
+      || history.find((h: any) => h.originalName === originalName && (!invoiceId || h.invoiceId === invoiceId));
+    if (!entry) return res.status(404).json({ error: 'Bu satır seçilen malzemede bulunamadı.' });
+    if (history.length < 2) return res.status(400).json({ error: 'Malzemede tek satır var, ayrılacak bir şey yok.' });
+    const rawOrig = String(entry.rawOriginalName || entry.originalName || '');
+    if (!isGenuineOriginalLine(rawOrig)) {
+      return res.status(422).json({ error: 'Bu satırın orijinal fatura metni ayırt edici değil, ayrılamıyor.' });
+    }
+    // Gruptaki tüm satırlar aynı fatura satırıysa "ayırmak" grubu yeniden adlandırmaktan ibaret olur; reddet
+    const selectedFp = materialFingerprint(rawOrig);
+    if (history.every((h: any) => materialFingerprint(String(h.rawOriginalName || h.originalName || '')) === selectedFp)) {
+      return res.status(400).json({ error: 'Bu malzemedeki tüm satırlar aynı fatura satırı; ayrılacak farklı bir satır yok.' });
+    }
+
+    const translated = /[а-яё]/i.test(rawOrig) ? translateRussianMaterialToTurkish(rawOrig) : '';
+    let targetName = (translated && translated.trim().length > 3 ? translated : cleanRawMaterialName(unwrapSyntheticPrefixes(rawOrig)) || rawOrig).trim();
+    if (catalogKeyForName(targetName) === catalogKeyForName(group.materialName)) targetName = `${targetName} (Ayrı Kayıt)`;
+    const alias = buildSplitAlias({
+      originalName: rawOrig,
+      targetName,
+      sourceGroupName: group.materialName,
+      createdBy: decodeURIComponent(String(req.headers['x-user-role'] || '')) || 'Kullanıcı'
+    });
+    if (!alias) return res.status(422).json({ error: 'Bu satır için ayırt edici bir anahtar üretilemedi.' });
+
+    // Bu satırı eski hedefe bağlayan daha öncelikli alias'ları (Prizma kodu / ad) kaldır
+    const overriding = aliasKeysForItem({ materialCode: entry.materialCode, materialName: entry.rawMaterialName })
+      .filter(k => k.kind === 'code' || k.kind === 'name')
+      .map(k => aliasDocId(k.kind, k.key))
+      .filter(id => materialAliasStore.index.list().some(a => a.id === id));
+    if (overriding.length) await materialAliasStore.remove(overriding);
+    const saveResult = await materialAliasStore.save([alias]);
+    memoryStore.materialComparisons = undefined;
+
+    const { data: after } = await computeMaterialComparisons();
+    const newGroup = after.find((c: any) => c.catalogKey === alias.targetKey);
+    const moved = (newGroup?.history || []).filter((h: any) => (h.rawOriginalName || h.originalName) === rawOrig).length;
+    res.json({
+      success: moved > 0,
+      message: moved > 0 ? `Satır '${targetName}' adıyla ayrı kayda alındı (${moved} satır).` : 'Satır ayrılamadı.',
+      targetName: newGroup?.materialName || targetName,
+      movedEntries: moved,
+      persisted: saveResult.persisted,
+      ...(saveResult.persisted ? {} : { warning: `Ayırma kalıcı depoya yazılamadı, yalnızca bu sunucuda geçerli: ${saveResult.error || ''}` })
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

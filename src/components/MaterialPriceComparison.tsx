@@ -9,6 +9,7 @@ import {
   findCheaperEquivalentBrandSuggestion
 } from '../utils/dualMaterialComparisonEngine';
 import { SearchableFilterDropdown } from './SearchableFilterDropdown';
+import { materialFingerprint } from '../utils/materialFingerprint';
 import { DateRangeFilterDropdown } from './DateRangeFilterDropdown';
 import { DateFilterState, matchesDateFilter } from '../utils/filterHelpers';
 import { normalizeVendorName, areVendorsEqual, extractCanonicalVendors } from '../utils/vendorNormalizer';
@@ -235,6 +236,85 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const [manualSource, setManualSource] = useState<string>('');
   const [manualTarget, setManualTarget] = useState<string>('');
   const [isMergingManual, setIsMergingManual] = useState<boolean>(false);
+
+  // Otomatik birleştirme önerileri + yanlış gruplanan satırı ayırma
+  type MergeSuggestionView = { sourceId: string; sourceName: string; targetId: string; targetName: string; score: number; reason: string };
+  const [showSuggestionsModal, setShowSuggestionsModal] = useState<boolean>(false);
+  const [mergeSuggestions, setMergeSuggestions] = useState<MergeSuggestionView[]>([]);
+  const [catalogStatus, setCatalogStatus] = useState<{ groups: number; manualGroups: number; aliases: number; persistent: boolean; aliasSource: string } | null>(null);
+  const [isLoadingSuggestions, setIsLoadingSuggestions] = useState<boolean>(false);
+  const [busySuggestionKey, setBusySuggestionKey] = useState<string>('');
+  const DISMISSED_SUGGESTIONS_KEY = 'ges_dismissed_merge_suggestions';
+  const readDismissedSuggestions = (): string[] => {
+    try { return JSON.parse(localStorage.getItem(DISMISSED_SUGGESTIONS_KEY) || '[]'); } catch { return []; }
+  };
+  const suggestionKey = (s: MergeSuggestionView) => `${s.sourceName}→${s.targetName}`;
+  const authHeaders = () => ({ 'Content-Type': 'application/json', 'x-session-token': user?.token || '', 'x-user-role': encodeURIComponent(user?.role || '') });
+
+  const loadMergeSuggestions = async () => {
+    setIsLoadingSuggestions(true);
+    try {
+      const res = await fetch('/api/materials/merge-suggestions?_t=' + Date.now(), { headers: authHeaders() });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Öneriler alınamadı');
+      const dismissed = new Set(readDismissedSuggestions());
+      setMergeSuggestions((data.suggestions || []).filter((s: MergeSuggestionView) => !dismissed.has(suggestionKey(s))));
+      setCatalogStatus(data.catalog || null);
+    } catch (err: any) {
+      console.error('Merge suggestions error:', err);
+      alert('Birleştirme önerileri alınamadı: ' + err.message);
+    } finally {
+      setIsLoadingSuggestions(false);
+    }
+  };
+
+  const applyMergeSuggestion = async (s: MergeSuggestionView) => {
+    setBusySuggestionKey(suggestionKey(s));
+    try {
+      const res = await fetch('/api/materials/merge', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ sourceName: s.sourceName, targetName: s.targetName, sourceId: s.sourceId, targetId: s.targetId })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Bilinmeyen hata');
+      setMergeSuggestions(prev => prev.filter(x => suggestionKey(x) !== suggestionKey(s) && x.sourceName !== s.sourceName));
+      if (data.warning) alert(`${data.message}\n\n⚠️ ${data.warning}`);
+      if (onRefreshData) await onRefreshData();
+    } catch (err: any) {
+      alert('Birleştirme hatası: ' + err.message);
+    } finally {
+      setBusySuggestionKey('');
+    }
+  };
+
+  const dismissMergeSuggestion = (s: MergeSuggestionView) => {
+    try {
+      const list = readDismissedSuggestions();
+      list.push(suggestionKey(s));
+      localStorage.setItem(DISMISSED_SUGGESTIONS_KEY, JSON.stringify(list.slice(-500)));
+    } catch { /* tarayıcı depolaması yoksa yalnızca bu oturumda gizle */ }
+    setMergeSuggestions(prev => prev.filter(x => suggestionKey(x) !== suggestionKey(s)));
+  };
+
+  const splitHistoryLine = async (mat: MaterialComparison, hist: any) => {
+    const orig = hist.rawOriginalName || hist.originalName;
+    if (!orig) return;
+    if (!window.confirm(`"${orig}" satırı "${mat.materialName}" malzemesinden ayrılıp ayrı bir kayda alınsın mı?\n\nBu karar kalıcıdır; aynı satır yeni faturalarda da ayrı kayda düşer.`)) return;
+    try {
+      const res = await fetch('/api/materials/split', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ groupName: mat.materialName, groupId: (mat as any).id, invoiceId: hist.invoiceId, originalName: orig })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || data.message || 'Bilinmeyen hata');
+      alert(data.warning ? `${data.message}\n\n⚠️ ${data.warning}` : data.message);
+      if (onRefreshData) await onRefreshData();
+    } catch (err: any) {
+      alert('Ayırma hatası: ' + err.message);
+    }
+  };
 
   // Category Edit Modal State
   const [categoryEditModal, setCategoryEditModal] = useState<{ materialName: string; currentCategory: string } | null>(null);
@@ -1350,8 +1430,22 @@ export const MaterialPriceComparison: React.FC<Props> = ({
 
                             <td className="py-3 px-4">
                               {hist.originalName ? (
-                                <div className="bg-slate-900 text-amber-300 border border-slate-800 p-2 rounded text-[11px] font-mono leading-snug max-w-xs sm:max-w-md">
-                                  "{hist.originalName}"
+                                <div className="flex items-start gap-1.5">
+                                  <div className="bg-slate-900 text-amber-300 border border-slate-800 p-2 rounded text-[11px] font-mono leading-snug max-w-xs sm:max-w-md">
+                                    "{hist.originalName}"
+                                  </div>
+                                  {mat.history.some((h: any) => materialFingerprint(h.rawOriginalName || h.originalName) !== materialFingerprint((hist as any).rawOriginalName || hist.originalName)) && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        splitHistoryLine(mat, hist);
+                                      }}
+                                      className="shrink-0 text-[10px] font-bold text-rose-300 bg-rose-950/50 border border-rose-800/60 hover:bg-rose-900/60 px-1.5 py-1 rounded"
+                                      title="Bu satır yanlış malzemeye gruplandıysa ayrı kayda al"
+                                    >
+                                      Ayır
+                                    </button>
+                                  )}
                                 </div>
                               ) : (
                                 <span className="text-slate-500 italic">
@@ -2145,6 +2239,19 @@ export const MaterialPriceComparison: React.FC<Props> = ({
           >
             <Link2 className="w-4 h-4 text-indigo-400" />
             <span>Manuel Birleştir</span>
+          </button>
+
+          {/* Otomatik birleştirme önerileri */}
+          <button
+            onClick={() => {
+              setShowSuggestionsModal(true);
+              loadMergeSuggestions();
+            }}
+            className="px-3 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl border border-slate-700 transition-all flex items-center justify-center space-x-1.5 cursor-pointer"
+            title="Aynı ölçülere ve benzer fatura satırına sahip, ayrı görünen malzemeleri bulur"
+          >
+            <Link2 className="w-4 h-4 text-emerald-400" />
+            <span>Birleştirme Önerileri</span>
           </button>
 
           <div className="bg-slate-800/90 border border-slate-700/80 px-4 py-2.5 rounded-xl text-center min-w-28">
@@ -3493,6 +3600,75 @@ export const MaterialPriceComparison: React.FC<Props> = ({
       )}
 
       {/* Manual Merge Modal */}
+      {showSuggestionsModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-3xl w-full p-6 shadow-2xl border border-slate-200 space-y-4 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h2 className="text-base font-bold text-slate-900 flex items-center space-x-2">
+                <Link2 className="w-4 h-4 text-emerald-600" />
+                <span>Birleştirme Önerileri</span>
+              </h2>
+              <button onClick={() => setShowSuggestionsModal(false)} className="text-slate-400 hover:text-slate-700">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              Aynı ölçülere ve benzer fatura satırına sahip olduğu halde ayrı görünen malzemeler. Öneriler otomatik uygulanmaz;
+              "Birleştir" dediğiniz eşleşme kalıcı olur ve yeni OCR / Prizma faturalarında da geçerli olur.
+            </p>
+
+            {catalogStatus && !catalogStatus.persistent && (
+              <div className="text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                ⚠️ Birleştirmeler şu an kalıcı depoya (Firestore) yazılamıyor; sunucu yeniden başlarsa kaybolur. Firestore kuralında
+                <span className="font-mono"> material_aliases </span> izni eklenmeli.
+              </div>
+            )}
+
+            <div className="overflow-y-auto flex-1 space-y-2">
+              {isLoadingSuggestions && <p className="text-xs text-slate-500">Öneriler hesaplanıyor...</p>}
+              {!isLoadingSuggestions && mergeSuggestions.length === 0 && (
+                <p className="text-xs text-slate-500">Şu an birleştirilmesi önerilen malzeme yok.</p>
+              )}
+              {mergeSuggestions.map(s => {
+                const key = suggestionKey(s);
+                return (
+                  <div key={key} className="border border-slate-200 rounded-xl p-3 text-xs flex flex-col sm:flex-row sm:items-center gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold text-slate-800 break-words">{s.sourceName}</div>
+                      <div className="text-slate-400">↓ birleşecek kayıt</div>
+                      <div className="font-bold text-emerald-700 break-words">{s.targetName}</div>
+                      <div className="text-[11px] text-slate-500 mt-1">{s.reason}</div>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        disabled={busySuggestionKey === key}
+                        onClick={() => applyMergeSuggestion(s)}
+                        className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-lg"
+                      >
+                        {busySuggestionKey === key ? 'Birleştiriliyor...' : 'Birleştir'}
+                      </button>
+                      <button
+                        onClick={() => dismissMergeSuggestion(s)}
+                        className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg"
+                      >
+                        Farklı Ürün
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {catalogStatus && (
+              <p className="text-[11px] text-slate-400 border-t border-slate-100 pt-2">
+                {catalogStatus.groups} malzeme • {catalogStatus.manualGroups} elle birleştirilmiş kayıt • {catalogStatus.aliases} kalıcı eşleşme
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
       {showManualMergeModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">

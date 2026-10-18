@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { MaterialAliasIndex, MaterialAliasStore, buildMergeAliases, catalogKeyForName, aliasKeysForItem } from './materialCatalog';
+import { MaterialAliasIndex, MaterialAliasStore, buildMergeAliases, buildSplitAlias, catalogKeyForName, aliasKeysForItem } from './materialCatalog';
 
 console.log('=== MATERIAL CATALOG (ALIAS) TESTS ===');
 
@@ -61,6 +61,22 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alias-test-'));
   assert.ok(reloaded.index.version > v);
   assert.equal(reloaded.index.lookup({ materialCode: 'ST-000123' }), undefined);
   console.log('✓ Geri alma (alias silme) çalışıyor ve önbellek damgası artıyor');
+
+  // Satır ayırma: yanlış gruba düşen satır kendi kaydına taşınır ve aynı satır yeniden gelirse orada kalır
+  const split = buildSplitAlias({ originalName: 'Скотч малярный 48 мм*50 м', targetName: 'Скотч малярный 48x50 (Ayrı Kayıt)', sourceGroupName: TARGET, now: '2026-10-18T00:00:00.000Z' });
+  assert.ok(split);
+  assert.equal(split!.kind, 'orig');
+  assert.equal(split!.targetKey, catalogKeyForName('Скотч малярный 48x50 (Ayrı Kayıt)'));
+  const splitIndex = new MaterialAliasIndex([split!]);
+  assert.equal(splitIndex.lookup({ originalName: 'Скотч малярный 48мм х 50м', originalIsGenuine: true, materialName: 'x' })?.targetName, 'Скотч малярный 48x50 (Ayrı Kayıt)');
+  assert.equal(buildSplitAlias({ originalName: '12', targetName: 'a', sourceGroupName: 'b' }), null);
+  console.log('✓ Satır ayırma alias\'ı doğru; ayırt edici olmayan satırda alias üretilmiyor');
+
+  // Kalıcılık durumu raporlanıyor (db yokken: disk kaynağı, Firestore yazımı başarısız)
+  assert.equal(reloaded.source, 'disk');
+  await reloaded.save([split!]);
+  assert.equal(reloaded.lastWriteOk, false);
   fs.rmSync(dir, { recursive: true, force: true });
+  console.log('✓ Kalıcılık durumu (kaynak / son yazım) raporlanıyor');
   console.log('✅ Tüm katalog testleri geçti');
 })().catch(e => { console.error(e); process.exit(1); });
