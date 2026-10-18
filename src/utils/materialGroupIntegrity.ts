@@ -1253,7 +1253,8 @@ export function ensureComparisonGroupIntegrity<T extends { materialName: string;
   const out: T[] = [];
   for (const comp of comparisons) {
     const history = Array.isArray(comp.history) ? comp.history : [];
-    if (history.length < 2) {
+    // Kullanıcının elle birleştirdiği katalog kaydı (sunucuda kalıcı alias) tarayıcıda yeniden bölünmez
+    if (history.length < 2 || (comp as any).catalogLocked) {
       out.push(comp);
       continue;
     }
