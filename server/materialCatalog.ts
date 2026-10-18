@@ -180,6 +180,37 @@ export function buildMergeAliases(params: {
   return Array.from(out.values());
 }
 
+/**
+ * Yanlış gruplanmış tek bir fatura satırını kendi katalog kaydına ayırır. Yalnızca orijinal satırın
+ * parmak izi kullanılır (aynı metne sahip satırlar aynı üründür); Prizma kodu / ad anahtarları grup
+ * kardeşleriyle paylaşılabileceği için kullanılmaz.
+ */
+export function buildSplitAlias(params: {
+  originalName: string;
+  targetName: string;
+  targetCategory?: string;
+  sourceGroupName: string;
+  createdBy?: string;
+  now?: string;
+}): MaterialAlias | null {
+  const key = materialFingerprint(params.originalName);
+  if (!isDistinctiveFingerprint(key)) return null;
+  const id = aliasDocId('orig', key);
+  return {
+    id,
+    kind: 'orig',
+    key,
+    targetKey: catalogKeyForName(params.targetName),
+    targetName: params.targetName,
+    ...(params.targetCategory ? { targetCategory: params.targetCategory } : {}),
+    sourceName: `AYRILDI: ${params.sourceGroupName}`.slice(0, 500),
+    sample: String(params.originalName).slice(0, 300),
+    createdBy: params.createdBy || 'Kullanıcı',
+    createdAt: params.now || new Date().toISOString(),
+    isDeleted: false
+  };
+}
+
 // ----------------------------------------------------------------------------
 // Kalıcılık (Firestore + disk yedeği). Firestore Web SDK çevrimdışıyken yazma vaatleri hiç çözülmeyebilir;
 // bu yüzden her çağrı zaman aşımıyla sarılır ve disk yedeği her zaman güncellenir.
@@ -196,6 +227,10 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 
 export class MaterialAliasStore {
   readonly index = new MaterialAliasIndex();
+  /** Son yüklemenin kaynağı: 'firestore' kalıcıdır, 'disk' yalnızca bu sunucu örneğinde geçerlidir */
+  source: 'firestore' | 'disk' | 'none' = 'none';
+  /** Son Firestore yazma denemesi başarılı mı? (null = henüz yazılmadı) */
+  lastWriteOk: boolean | null = null;
   private loaded = false;
   private loading: Promise<void> | null = null;
 
@@ -240,6 +275,7 @@ export class MaterialAliasStore {
             console.warn('[MATERIAL ALIAS] Firestore okunamadı, disk yedeği kullanılıyor:', err.message);
           }
         }
+        this.source = list === null ? 'disk' : 'firestore';
         if (list === null) list = this.readDisk();
         this.index.replaceAll(list);
         if (list.length) this.writeDisk();
@@ -255,16 +291,21 @@ export class MaterialAliasStore {
     this.index.upsert(aliases);
     this.writeDisk();
     const db = this.getDb();
-    if (!db) return { persisted: false, error: 'Firestore bağlı değil' };
+    if (!db) {
+      this.lastWriteOk = false;
+      return { persisted: false, error: 'Firestore bağlı değil' };
+    }
     try {
       await withTimeout(
         Promise.all(aliases.map(a => setDoc(doc(db, COLLECTION, a.id), a))),
         FIRESTORE_TIMEOUT_MS * 2,
         'material_aliases yazma'
       );
+      this.lastWriteOk = true;
       return { persisted: true };
     } catch (err: any) {
       console.warn('[MATERIAL ALIAS] Firestore yazma uyarısı:', err.message);
+      this.lastWriteOk = false;
       return { persisted: false, error: err.message };
     }
   }
