@@ -6,10 +6,9 @@ import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { detectSuperIntelligentProcurementAnomalies } from '../utils/aiForensicAuditor';
-import { isExemptFromBenchmarkAudit } from '../utils/auditRiskEngine';
-import { ensureRussianOriginalName } from '../utils/categoryClassifier';
 import { isLowPriorityConsumable } from '../utils/lowPriorityConsumables';
-import { analyzeMaterialSegment, areMaterialSegmentsCompatible } from '../utils/materialSegmentIntelligence';
+import { analyzeMaterialSegment } from '../utils/materialSegmentIntelligence';
+import { AnomalyAlert, SERIOUS_PRICE_IMPACT_RUB, buildSameMaterialPriceAlerts, isMinorPriceAlert, isServiceItem } from '../utils/priceAnomalyEngine';
 import {
   DualComparisonLens,
   buildMode1AppleToAppleComparisons,
@@ -59,49 +58,7 @@ interface Props {
   onDeleteInvoice?: (id: string) => void | Promise<void>;
 }
 
-export interface AnomalyAlert {
-  id: string;
-  type:
-    | 'SAME_VENDOR_INFLATION'
-    | 'JOBSITE_PRICE_GAP'
-    | 'ZERO_DISCOUNT_HIGH_VALUE'
-    | 'CROSS_JOBSITE_ARBITRAGE'
-    | 'SPLIT_INVOICE_SMURFING'
-    | 'PRICE_CREEP'
-    | 'BASKET_SHRINKAGE';
-  severity: 'CRITICAL' | 'WARNING' | 'INFO';
-  title: string;
-  materialName: string;
-  category: string;
-  vendorName: string;
-  jobsiteName?: string;
-  previousPrice?: number;
-  currentPrice?: number;
-  percentageChange: number;
-  financialImpact: number;
-  dateStr: string;
-  description: string;
-  recommendation: string;
-  invoiceNo?: string;
-  quantity?: number;
-  unit?: string;
-  russianSubtitle?: string;
-  minUnitPrice?: number;
-  maxUnitPrice?: number;
-  avgUnitPrice?: number;
-  historyRows?: Array<{
-    date: string;
-    invoiceNo: string;
-    supplier: string;
-    jobsiteName: string;
-    quantity: number;
-    unit: string;
-    unitPrice: number;
-    originalName?: string;
-    conversionFormula?: string;
-  }>;
-  marketCluster?: 'STEEL_REBAR' | 'CONCRETE_CEMENT' | 'COPPER_CABLE' | 'LOGISTICS_GAP' | 'GENERAL';
-}
+export type { AnomalyAlert };
 
 export interface AnomalyAcknowledgement {
   anomalyId: string;
@@ -137,9 +94,11 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
   const [selectedSeverity, setSelectedSeverity] = useState<string>('ALL');
   const [selectedJobsite, setSelectedJobsite] = useState<string>('ALL');
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [sortBy, setSortBy] = useState<'IMPACT' | 'PERCENTAGE' | 'DATE'>('PERCENTAGE');
+  const [sortBy, setSortBy] = useState<'IMPACT' | 'PERCENTAGE' | 'DATE'>('IMPACT');
   // Ofis/kartuş/deterjan/ikram gibi düşük öncelikli, çok değişken sarflar varsayılan olarak gizli
   const [showLowPriority, setShowLowPriority] = useState<boolean>(false);
+  // Etkisi küçük (10.000 ₽ altı) fiyat farkları önemli kalemleri gölgelemesin diye varsayılan olarak gizli
+  const [showMinorPriceAlerts, setShowMinorPriceAlerts] = useState<boolean>(false);
 
   const mode1Comparisons = useMemo(() => buildMode1AppleToAppleComparisons(comparisons), [comparisons]);
   const mode2Families = useMemo(() => buildMode2CrossBrandFamilies(comparisons), [comparisons]);
@@ -386,74 +345,6 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
   const allAlerts: AnomalyAlert[] = useMemo(() => {
     const list: AnomalyAlert[] = [];
 
-    // Filter out services/transport
-    const isServiceItem = (name: string, category: string) => {
-      const n = (name || '').toLowerCase();
-      const c = (category || '').toLowerCase();
-      return (
-        c.includes('hizmet') || c.includes('lojistik') || c.includes('nakliye') || c.includes('taşıma') || c.includes('tasima') ||
-        n.includes('доставк') || n.includes('транспорт') || n.includes('услуг') ||
-        n.includes('погрузк') || n.includes('разгрузк') || n.includes('перевозк') ||
-        n.includes('nakliye') || n.includes('taşıma') || n.includes('tasima') || n.includes('kargo')
-      );
-    };
-
-    // Helper: Verify that two history rows represent strictly the same "elma-elma" material in the original Russian invoice text AND belong to the same Brand/Quality Segment (unless it's a GOST/DIN Commodity)
-    const areHistoryEntriesStrictlyEquivalent = (a: any, b: any, matName: string, category?: string): boolean => {
-      if (!a || !b) return false;
-      const pA = Number(a.normalizedUnitPrice || a.unitPrice || 0);
-      const pB = Number(b.normalizedUnitPrice || b.unitPrice || 0);
-      if (pA <= 0 || pB <= 0) return false;
-
-      // 0. Smart Commodity vs. Brand/Quality Segment Gate ("Demir demirdir, ama Mercedes ile Lada kıyaslanmaz")
-      if (!areMaterialSegmentsCompatible(a, b, matName, category)) {
-        return false;
-      }
-
-      const origA = String(a.originalName || '').toLowerCase().replace(/,/g, '.');
-      const origB = String(b.originalName || '').toLowerCase().replace(/,/g, '.');
-      const combA = `${origA} ${matName.toLowerCase()}`;
-      const combB = `${origB} ${matName.toLowerCase()}`;
-
-      // 1. Conflicting product sub-types in original Russian text must never be compared
-      const incompatiblePairs: Array<[RegExp, RegExp]> = [
-        [/тахеометр|leica|зарядн|трегер/i, /гипсокартон|гипрок|gyproc|гкл\b/i],
-        [/лента|ультранеодил|бандажн/i, /рулон|эпп|экп|техноэласт|изопласт|виллатекс/i],
-        [/шпонка|гидрошпонк|waterbar/i, /мембран|эпп|экп|техноэласт|изопласт|виллатекс/i],
-        [/sikaplan|пвх.*мембран|мембран.*пвх/i, /эпп|экп|техноэласт|изопласт|виллатекс|битум/i],
-        [/паста|финиш/i, /штукатурк.*30\s*кг|ротбанд\s*30/i],
-        [/куртка/i, /костюм/i],
-        [/охран/i, /рабоч|итр/i],
-        [/бетонн|кость/i, /звездочк|стульчик|пластик/i],
-        [/связь|аренда/i, /элемент.*ригель|ригель/i],
-        [/широкоформатн|плоттер|914\s*мм|610\s*мм/i, /а4|a4|а3|a3|500\s*л|светокопи|svetocopy/i],
-        [/станция|перекачк|насос/i, /^дизельное\s*топливо|^mazot$/i],
-      ];
-      for (const [rx1, rx2] of incompatiblePairs) {
-        if ((rx1.test(combA) && rx2.test(combB)) || (rx2.test(combA) && rx1.test(combB))) {
-          return false;
-        }
-      }
-
-      // 2. If both rows have genuine Russian descriptions, check metric / thickness / diameter consistency
-      const cleanDescA = origA.replace(/к\.?\s*п\.?\s*\d+(?:\.\d+)?/gi, ' ');
-      const cleanDescB = origB.replace(/к\.?\s*п\.?\s*\d+(?:\.\d+)?/gi, ' ');
-      const metricA = cleanDescA.match(/(?:^|[^a-zа-яё0-9])[mм]\s*(\d{1,2})(?![0-9])/i)?.[1];
-      const metricB = cleanDescB.match(/(?:^|[^a-zа-яё0-9])[mм]\s*(\d{1,2})(?![0-9])/i)?.[1];
-      if (metricA && metricB && metricA !== metricB) return false;
-
-      // 3. Guard against residual pack-vs-piece or unit conversion artifacts (> 250% spread) unless Russian headwords match
-      const ratio = Math.max(pA, pB) / Math.min(pA, pB);
-      if (ratio > 3.5) {
-        const cyrWordsA = (cleanDescA.match(/[а-яё]{4,}/gi) || []).map(w => w.slice(0, 5));
-        const cyrWordsB = new Set((cleanDescB.match(/[а-яё]{4,}/gi) || []).map(w => w.slice(0, 5)));
-        const sharedRoots = cyrWordsA.filter(w => cyrWordsB.has(w));
-        if (sharedRoots.length === 0) return false;
-      }
-
-      return true;
-    };
-
     // If Mode 2 (Muadil Marka Ekonomi Fırsatları) is selected, generate Cross-Brand Economy Alerts
     if (anomalyLens === 'MODE_2_BRAND_EQUIVALENT') {
       mode2Families.forEach((fam, fIdx) => {
@@ -492,191 +383,11 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
       return list.sort((a, b) => b.financialImpact - a.financialImpact);
     }
 
-    // 1. Same Supplier Price Hike Detection (Canonical Elma-Elma Normalized Comparisons)
-    mode1Comparisons.forEach((comp) => {
-      if (!comp || !comp.materialName || !Array.isArray(comp.history) || comp.history.length < 2) return;
-      if (isServiceItem(comp.materialName, comp.category)) return;
-      if (isExemptFromBenchmarkAudit(comp.materialName, comp.category).isExempt) return;
-
-      const byVendor: Record<string, any[]> = {};
-      comp.history.forEach((h: any) => {
-        const sup = (h.supplier || '').trim();
-        if (!sup || !h.unitPrice || h.unitPrice <= 0) return;
-        const vKey = sup.toLowerCase();
-        if (!byVendor[vKey]) byVendor[vKey] = [];
-        byVendor[vKey].push(h);
-      });
-
-      const mappedHistoryRows = comp.history.map((h: any) => {
-        const netUp = Number(h.normalizedUnitPrice || h.unitPrice || 0);
-        const vatPct = Number(h.vatPercentage) || 22;
-        const grossUp = Number(h.grossUnitPrice) || Number((netUp * (1 + vatPct / 100)).toFixed(2));
-        return {
-          date: (h.date || '').split('T')[0],
-          invoiceNo: h.invoiceNumber || 'Fatura',
-          supplier: h.supplier || 'Tedarikçi',
-          jobsiteName: h.jobsiteName || 'Genel Şantiye',
-          quantity: Number(h.normalizedQuantity || h.quantity || 1),
-          unit: comp.standardUnit || comp.unit || h.unit || 'Adet',
-          unitPrice: netUp,
-          grossUnitPrice: grossUp,
-          vatPercentage: vatPct,
-          originalName: ensureRussianOriginalName(comp.materialName, h.originalName),
-          conversionFormula: h.conversionFormula
-        };
-      });
-
-      Object.values(byVendor).forEach((vHist) => {
-        if (vHist.length < 2) return;
-        const sorted = [...vHist].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-        const first = sorted[0];
-        const latest = sorted[sorted.length - 1];
-        if (!areHistoryEntriesStrictlyEquivalent(first, latest, comp.materialName, comp.category)) return;
-        let prevPrice = Number(first.normalizedUnitPrice || first.unitPrice || 0);
-        let currPrice = Number(latest.normalizedUnitPrice || latest.unitPrice || 0);
-        const currQty = Number(latest.normalizedQuantity || latest.quantity || 1);
-
-        // Smart VAT Ratio Detector: if ratio is 1.20x or 1.22x (±0.6%), normalize to Net
-        if (prevPrice > 0 && currPrice > 0) {
-          const ratio = currPrice / prevPrice;
-          if (Math.abs(ratio - 1.22) <= 0.006 || Math.abs(ratio - 1.20) <= 0.006) {
-            currPrice = prevPrice;
-          } else if (Math.abs(1 / ratio - 1.22) <= 0.006 || Math.abs(1 / ratio - 1.20) <= 0.006) {
-            prevPrice = currPrice;
-          }
-        }
-
-        if (prevPrice > 0 && currPrice > prevPrice) {
-          const priceDiff = currPrice - prevPrice;
-          const pctIncrease = Number(((priceDiff / prevPrice) * 100).toFixed(1));
-          const totalImpact = Math.round(priceDiff * currQty);
-
-          if (pctIncrease >= 5 && totalImpact >= 500) {
-            const marketInfo = getMarketIntelligence(comp.materialName, comp.category);
-            const stdUnit = comp.standardUnit || comp.unit || latest.unit || 'Adet';
-            list.push({
-              id: `same_vendor_hike_${latest.invoiceNumber || 'inv'}_${comp.id || comp.materialName.replace(/\s+/g, '_')}`,
-              type: 'SAME_VENDOR_INFLATION',
-              severity: pctIncrease >= 15 ? 'CRITICAL' : 'WARNING',
-              title: language === 'RU'
-                ? `Повышение цены у того же поставщика: ${latest.supplier} (+%${pctIncrease})`
-                : `Aynı Firmadan Fiyat Artışı: ${latest.supplier} (+%${pctIncrease} Zam)`,
-              materialName: comp.materialName,
-              russianSubtitle: ensureRussianOriginalName(comp.materialName, latest.originalName || first.originalName),
-              category: comp.category,
-              vendorName: latest.supplier,
-              jobsiteName: latest.jobsiteName,
-              previousPrice: prevPrice,
-              currentPrice: currPrice,
-              minUnitPrice: comp.minUnitPrice,
-              maxUnitPrice: comp.maxUnitPrice,
-              avgUnitPrice: comp.avgUnitPrice,
-              percentageChange: pctIncrease,
-              financialImpact: totalImpact,
-              dateStr: (latest.date || '').split('T')[0],
-              invoiceNo: latest.invoiceNumber,
-              quantity: currQty,
-              unit: stdUnit,
-              historyRows: mappedHistoryRows,
-              marketCluster: marketInfo.cluster,
-              description: language === 'RU'
-                ? `Цена за единицу (${stdUnit}) материала "${comp.materialName}" у поставщика "${latest.supplier}" выросла с ${formatRuble(prevPrice)} (${(first.date || '').split('T')[0]}) до ${formatRuble(currPrice)} (${(latest.date || '').split('T')[0]}) (+${pctIncrease}%).`
-                : `"${latest.supplier}" firmasından alınan "${comp.materialName}" malzemesinin standart birim fiyatı (${stdUnit}) ${(first.date || '').split('T')[0]} tarihli alımda ${formatRuble(prevPrice)}/${stdUnit} iken, ${(latest.date || '').split('T')[0]} tarihli faturada ${formatRuble(currPrice)}/${stdUnit} seviyesine yükselmiştir (+%${pctIncrease} artış).`,
-              recommendation: language === 'RU'
-                ? `Проверьте рыночные котировки и потребуйте у поставщика возврата к прежней цене ${formatRuble(prevPrice)}/${stdUnit}.`
-                : `Tedarikçi ile önceki anlaşma fiyatı olan ${formatRuble(prevPrice)}/${stdUnit} baz alınarak revize iskonto talep edilmelidir.`
-            });
-          }
-        }
-      });
-    });
-
-    // 2. Elma-Elma Malzeme Fiyat Farkı & Şantiyeler / Tedarikçiler Arası Sapma Tespiti
-    mode1Comparisons.forEach((comp, idx) => {
-      if (!comp || !comp.materialName || !Array.isArray(comp.history) || comp.history.length < 2) return;
-      if (isServiceItem(comp.materialName, comp.category)) return;
-      if (isExemptFromBenchmarkAudit(comp.materialName, comp.category).isExempt) return;
-
-      if (comp.priceDifferencePercentage >= 5 && comp.minUnitPrice > 0) {
-        const ratio = comp.maxUnitPrice / comp.minUnitPrice;
-        if (Math.abs(ratio - 1.22) <= 0.006 || Math.abs(ratio - 1.20) <= 0.006) return;
-
-        const stdUnit = comp.standardUnit || comp.unit || 'Adet';
-        const sortedByPrice = [...comp.history].sort((a, b) => Number(a.unitPrice) - Number(b.unitPrice));
-        const cheapestRec = sortedByPrice[0];
-        const priciestRec = sortedByPrice[sortedByPrice.length - 1];
-        if (!areHistoryEntriesStrictlyEquivalent(cheapestRec, priciestRec, comp.materialName, comp.category)) return;
-
-        // Calculate actual financial overpayment of purchases above minUnitPrice
-        const actualOverpayment = comp.history.reduce((sum: number, h: any) => {
-          const uPrice = Number(h.normalizedUnitPrice || h.unitPrice || 0);
-          const uQty = Number(h.normalizedQuantity || h.quantity || 1);
-          if (uPrice > comp.minUnitPrice) {
-            return sum + (uPrice - comp.minUnitPrice) * uQty;
-          }
-          return sum;
-        }, 0);
-
-        const totalImpact = Math.max(Math.round(actualOverpayment), Math.round((comp.maxUnitPrice - comp.minUnitPrice) * (priciestRec?.quantity || 1)));
-        if (totalImpact < 300) return;
-
-        const cleanMatName = comp.materialName.replace(/[^a-zA-Z0-9ğüşıöçĞÜŞİÖÇа-яА-Я]/g, '_');
-        const alertId = comp.id
-          ? `jobsite_gap_${comp.id}_${idx}`
-          : `jobsite_gap_${cleanMatName}_${stdUnit.replace(/\s+/g, '_')}_${idx}`;
-
-        const mappedHistoryRows = comp.history.map((h: any) => {
-          const netUp = Number(h.normalizedUnitPrice || h.unitPrice || 0);
-          const vatPct = Number(h.vatPercentage) || 22;
-          const grossUp = Number(h.grossUnitPrice) || Number((netUp * (1 + vatPct / 100)).toFixed(2));
-          return {
-            date: (h.date || '').split('T')[0],
-            invoiceNo: h.invoiceNumber || 'Fatura',
-            supplier: h.supplier || 'Tedarikçi',
-            jobsiteName: h.jobsiteName || 'Genel Şantiye',
-            quantity: Number(h.normalizedQuantity || h.quantity || 1),
-            unit: stdUnit,
-            unitPrice: netUp,
-            grossUnitPrice: grossUp,
-            vatPercentage: vatPct,
-            originalName: ensureRussianOriginalName(comp.materialName, h.originalName),
-            conversionFormula: h.conversionFormula
-          };
-        });
-
-        list.push({
-          id: alertId,
-          type: 'JOBSITE_PRICE_GAP',
-          severity: comp.priceDifferencePercentage >= 20 ? 'CRITICAL' : 'WARNING',
-          title: language === 'RU'
-            ? `Разница цен на один и тот же материал: +%${comp.priceDifferencePercentage}`
-            : `Elma-Elma Malzeme Fiyat Farkı: +%${comp.priceDifferencePercentage} Sapma (${comp.history.length} Alım)`,
-          materialName: comp.materialName,
-          russianSubtitle: ensureRussianOriginalName(comp.materialName, priciestRec?.originalName || cheapestRec?.originalName),
-          category: comp.category,
-          vendorName: `${cheapestRec?.supplier || comp.cheapestJobsiteName} (${formatRuble(comp.minUnitPrice)}) ⟷ ${priciestRec?.supplier || comp.priciestJobsiteName} (${formatRuble(comp.maxUnitPrice)})`,
-          jobsiteName: priciestRec?.jobsiteName || comp.priciestJobsiteName,
-          previousPrice: comp.minUnitPrice,
-          currentPrice: comp.maxUnitPrice,
-          minUnitPrice: comp.minUnitPrice,
-          maxUnitPrice: comp.maxUnitPrice,
-          avgUnitPrice: comp.avgUnitPrice,
-          percentageChange: comp.priceDifferencePercentage,
-          financialImpact: totalImpact,
-          dateStr: (priciestRec?.date || new Date().toISOString()).split('T')[0],
-          invoiceNo: priciestRec?.invoiceNumber,
-          unit: stdUnit,
-          historyRows: mappedHistoryRows,
-          marketCluster: 'LOGISTICS_GAP',
-          description: language === 'RU'
-            ? `Материал "${comp.materialName}" (${stdUnit}) закупался на объекте "${cheapestRec?.jobsiteName || comp.cheapestJobsiteName}" у "${cheapestRec?.supplier || '-'}" по цене ${formatRuble(comp.minUnitPrice)}/${stdUnit}, а на объекте "${priciestRec?.jobsiteName || comp.priciestJobsiteName}" у "${priciestRec?.supplier || '-'}" по цене ${formatRuble(comp.maxUnitPrice)}/${stdUnit} (+%${comp.priceDifferencePercentage}).`
-            : `Birebir aynı teknik özellikteki "${comp.materialName}" malzemesi (${stdUnit} bazında normalize edilmiş elma-elma kıyas) en uygun "${cheapestRec?.jobsiteName || comp.cheapestJobsiteName}" şantiyesinde "${cheapestRec?.supplier || '-'}" firmasından ${formatRuble(comp.minUnitPrice)}/${stdUnit} fiyata alınmışken, "${priciestRec?.jobsiteName || comp.priciestJobsiteName}" şantiyesinde "${priciestRec?.supplier || '-'}" firmasından ${formatRuble(comp.maxUnitPrice)}/${stdUnit} fiyata alınmıştır (+%${comp.priceDifferencePercentage} fiyat farkı).`,
-          recommendation: language === 'RU'
-            ? `Рекомендуется закупать данный материал через поставщика "${cheapestRec?.supplier || comp.cheapestJobsiteName}" по базовой цене ${formatRuble(comp.minUnitPrice)}/${stdUnit}.`
-            : `Sonraki siparişlerde en düşük birim fiyatı veren "${cheapestRec?.supplier || comp.cheapestJobsiteName}" (${formatRuble(comp.minUnitPrice)}/${stdUnit}) referans alınarak alım yapılmalıdır.`
-        });
-      }
-    });
+    // 1-2. Aynı malzeme (aynı katalog grubu + aynı marka/model/varyant) fiyat artışı ve fiyat farkı
+    list.push(...buildSameMaterialPriceAlerts(mode1Comparisons, {
+      language,
+      getMarketCluster: (materialName, category) => getMarketIntelligence(materialName, category).cluster
+    }));
 
     // 3. High-Value Purchases with 0% Discount
     discounts.forEach(dsc => {
@@ -830,9 +541,17 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
     () => allAlerts.filter(a => isLowPriorityConsumable(a.materialName, a.category, a.russianSubtitle)).length,
     [allAlerts]
   );
-  const priorityAlerts = useMemo(
+  const consumableFilteredAlerts = useMemo(
     () => (showLowPriority ? allAlerts : allAlerts.filter(a => !isLowPriorityConsumable(a.materialName, a.category, a.russianSubtitle))),
     [allAlerts, showLowPriority]
+  );
+  const minorPriceAlertCount = useMemo(
+    () => consumableFilteredAlerts.filter(isMinorPriceAlert).length,
+    [consumableFilteredAlerts]
+  );
+  const priorityAlerts = useMemo(
+    () => (showMinorPriceAlerts ? consumableFilteredAlerts : consumableFilteredAlerts.filter(a => !isMinorPriceAlert(a))),
+    [consumableFilteredAlerts, showMinorPriceAlerts]
   );
 
   // Separate active vs acknowledged
@@ -1174,6 +893,30 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
             {showLowPriority
               ? (language === 'RU' ? 'Скрыть расходники' : 'Sarfları Gizle')
               : (language === 'RU' ? 'Показать расходники' : 'Sarfları da Göster')}
+          </button>
+        </div>
+      )}
+
+      {/* Minor price differences toggle */}
+      {minorPriceAlertCount > 0 && (
+        <div className="bg-slate-50 rounded-2xl px-4 py-3 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+          <div className="text-slate-600 font-medium">
+            {showMinorPriceAlerts
+              ? (language === 'RU'
+                  ? `Показаны также ${minorPriceAlertCount} мелких ценовых отклонений (эффект менее ${formatRuble(SERIOUS_PRICE_IMPACT_RUB)}).`
+                  : `Etkisi ${formatRuble(SERIOUS_PRICE_IMPACT_RUB)} altında kalan ${minorPriceAlertCount} küçük fiyat farkı da gösteriliyor.`)
+              : (language === 'RU'
+                  ? `${minorPriceAlertCount} мелких ценовых отклонений (эффект менее ${formatRuble(SERIOUS_PRICE_IMPACT_RUB)}) скрыто, чтобы важные материалы были на виду.`
+                  : `Etkisi ${formatRuble(SERIOUS_PRICE_IMPACT_RUB)} altında kalan ${minorPriceAlertCount} küçük fiyat farkı, önemli malzemeler öne çıksın diye gizlendi.`)}
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowMinorPriceAlerts(v => !v)}
+            className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-bold whitespace-nowrap cursor-pointer"
+          >
+            {showMinorPriceAlerts
+              ? (language === 'RU' ? 'Скрыть мелкие' : 'Küçükleri Gizle')
+              : (language === 'RU' ? 'Показать мелкие' : 'Küçükleri de Göster')}
           </button>
         </div>
       )}
