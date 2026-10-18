@@ -10078,7 +10078,7 @@ async function createNightlyBackup() {
 }
 
 // PRIZMA OTOMATİK ENTEGRASYON VE ÇİFT KAYIT / SİLİNEN FATURA HORTLAMA KORUMALI VERİTABANI İÇE AKTARIMI
-export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<{
+export async function integratePrizmaInvoicesInternal(dbInstance: any, options: { enrichOnly?: boolean } = {}): Promise<{
   success: boolean;
   addedCount: number;
   enrichedCount: number;
@@ -10308,6 +10308,8 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
         ...((pInv as any).lineCheck ? { lineCheck: (pInv as any).lineCheck, linesSource: (pInv as any).linesSource || 'stf_order' } : {})
       };
 
+      // Kalem onarımı (enrichOnly) yalnızca mevcut faturaları günceller, yeni fatura eklemez
+      if (options.enrichOnly) { skippedCount++; continue; }
       newInvoicesToSave.push(newInvDoc);
       addedCount++;
 
@@ -11884,7 +11886,7 @@ async function reconcilePrizmaInvoiceLines(options: { apply: boolean; limit?: nu
         }
         if (pending > 0) { await batch.commit(); invoiceBackups += pending; }
       }
-      integration = await integratePrizmaInvoicesInternal(db);
+      integration = await integratePrizmaInvoicesInternal(db, { enrichOnly: true });
       memoryStore.invoices = undefined;
       memoryStore.materialComparisons = undefined;
     }

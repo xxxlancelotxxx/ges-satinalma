@@ -27,6 +27,8 @@ export interface InvoiceLineCheck {
   linesGrossSum: number;
   /** fatura tutarı − (kalemler + açık nakliye satırları), KDV dahil */
   diff: number;
+  /** Bu sonucu üreten belge okuyucu sürümü; eski sürümle doğrulanamayan faturalar yeniden okunur */
+  parserVersion?: number;
   fileId?: number;
   documentNote?: string;
 }
@@ -42,9 +44,12 @@ export interface DocumentLinesResult {
   parserVersion?: number;
 }
 
-export const CURRENT_DOC_LINES_PARSER_VERSION = 2;
+// 3: Kiril nakliye/hizmet satırı tespiti düzeltildi, AI okuması satır aritmetiğiyle doğrulanıyor,
+//    doğrulanamayan faturalar yeni sürümle bir kez daha okunuyor.
+export const CURRENT_DOC_LINES_PARSER_VERSION = 3;
 
-const FREIGHT_OR_SERVICE_RE = /\b(?:доставк\w*|организация\s*доставк\w*|грузоперевоз\w*|перевозк\w*|транспортн\w+\s*(?:услуг|расход)\w*|автоуслуг\w*|манипулятор\w*|логистик\w*|погрузк\w*|погрузочн\w*|разгрузк\w*|разгрузочн\w*|такелаж\w*|аренда\b|kiralama\b|услуг[аи]\s+по|работы\s+по|nakliye|teslimat\s*hizmet|kargo)/i;
+// JS'te \b yalnızca Latin harflerde çalışır; Kiril kelime başı için açık sınır kullanılır
+const FREIGHT_OR_SERVICE_RE = /(?:^|[^a-zа-яё0-9])(?:доставк[a-zа-яё]*|организация\s*доставк[a-zа-яё]*|грузоперевоз[a-zа-яё]*|перевозк[a-zа-яё]*|транспортн[a-zа-яё]+\s*(?:услуг|расход)[a-zа-яё]*|автоуслуг[a-zа-яё]*|манипулятор[a-zа-яё]*|логистик[a-zа-яё]*|погрузк[a-zа-яё]*|погрузочн[a-zа-яё]*|разгрузк[a-zа-яё]*|разгрузочн[a-zа-яё]*|такелаж[a-zа-яё]*|аренд[аы]|kiralama|услуг[аи]\s+по|работы\s+по|nakliye|teslimat\s*hizmet|kargo)/i;
 const FREIGHT_EXCEPTION_RE = /шлифмашин|диск|круг|лента|шкурка|смесь|клей|раствор|состав|пен[аы]|пистолет|коробк|клин|дюбел|анкер|швеллер|угол|труба|арматур|лист|балка|сетка|кабель|провод|доска|брус|фанер|блок|плит|пила|хомут|профиль|шина|паста/i;
 
 export function isFreightOrServiceText(text: string): boolean {
@@ -98,16 +103,17 @@ export function buildItemsFromParsedInvoice(
     const qty = line.quantity || 1;
     const grossUnitPrice = round2(grossAmt / qty);
     const unitPriceNet = round2(netAmt / qty);
-    const translated = translateRussianMaterialToTurkish(line.name) || line.name;
-    const stf = bestStfMatch(line.name, ctx.stfItems || []);
+    const lineName = cleanDocumentLineName(line.name);
+    const translated = translateRussianMaterialToTurkish(lineName) || lineName;
+    const stf = bestStfMatch(lineName, ctx.stfItems || []);
     items.push({
       id: `inv_line_${line.no}`,
       materialName: translated,
-      originalName: line.name,
+      originalName: lineName,
       ...(stf?.materialCode ? { materialCode: stf.materialCode } : {}),
       ...(line.article ? { article: line.article } : {}),
       quantity: qty,
-      unit: mapDocumentUnit(line.unitRaw),
+      unit: documentLineUnit(line.name, line.unitRaw),
       unitPrice: unitPriceNet,
       unitPriceNet,
       grossUnitPrice,
@@ -117,10 +123,13 @@ export function buildItemsFromParsedInvoice(
       isNetNormalized: true,
       lineSource: 'invoice_pdf',
       invoiceLineNo: line.no,
-      category: normalizeCategoryName('', `${line.name} ${translated}`)
+      category: normalizeCategoryName('', `${lineName} ${translated}`)
     });
   }
-  return { items, freightNet: round2(freightNet), freightGross: round2(freightGross) };
+  // Bir STF stok kodu birden çok farklı fatura satırına eşleştiyse hiçbirine verilmez
+  const shared = sharedDocumentCodes(items);
+  const finalItems = shared.size ? items.map(({ materialCode, ...rest }) => (materialCode && !shared.has(materialCode) ? { ...rest, materialCode } : rest)) : items;
+  return { items: finalItems, freightNet: round2(freightNet), freightGross: round2(freightGross) };
 }
 
 export async function extractPdfText(data: Buffer): Promise<string> {
@@ -204,12 +213,12 @@ export async function readInvoiceDocumentWithGemini(
             },
             {
               text: `Извлеки все товарные строки из этого счета на оплату / УПД.
-Ожидаемая общая сумма счета к оплате (с НДС): ${ctx.invoiceTotal} руб.
 Правила:
 1. Поле "name" должно содержать точное оригинальное наименование товара на русском языке со всеми размерами (например, 1200х600х180 мм, плотность, марка).
 2. Поле "unitRaw" должно содержать точную единицу измерения из таблицы (шт, м3, м2, уп, пог. м, кг, т, рул и т.д.).
 3. Поле "pricesIncludeVat": true, если сумма строки ("Сумма") уже включает НДС ("В том числе НДС" или "Без НДС"); false, если НДС начисляется сверху на сумму строки.
-4. Проверь арифметику: quantity * price = amount.`
+4. Проверь арифметику: quantity * price = amount.
+5. Не подгоняй числа: переписывай только то, что напечатано в документе.`
             }
           ]
         }
@@ -286,6 +295,18 @@ export async function readInvoiceDocumentWithGemini(
       };
     });
 
+    // AI'ın okuduğu her satır kendi içinde tutarlı olmalı (miktar × fiyat = tutar); tutmayan belge kabul edilmez
+    const badLine = parsedLines.find(l => !l.name || !(l.quantity > 0) || !(l.amount > 0) ||
+      Math.abs(l.quantity * l.price - l.amount) > Math.max(1, l.amount * 0.01));
+    if (badLine) {
+      return {
+        fileId: ctx.fileId,
+        verified: false,
+        note: `AI OCR satır ${badLine.no}: miktar × fiyat tutarı vermiyor`,
+        parserVersion: CURRENT_DOC_LINES_PARSER_VERSION
+      };
+    }
+
     const parsedDoc: ParsedInvoiceDocument = {
       lines: parsedLines,
       totalWithVat: typeof rawJson.totalWithVat === 'number' ? rawJson.totalWithVat : undefined,
@@ -327,6 +348,87 @@ export async function readInvoiceDocumentWithGemini(
   }
 }
 
+/**
+ * Belgeden okunmuş kalemler arasında kalmış nakliye/hizmet satırlarını (eski sürümde Kiril tespiti
+ * çalışmadığı için malzeme sayılanlar) nakliye toplamına taşır. Tutarlar belgedeki gibi kalır.
+ */
+export function splitFreightFromDocumentItems(items: any[]): { items: any[]; freightNet: number; freightGross: number; moved: number } {
+  const kept: any[] = [];
+  let freightNet = 0;
+  let freightGross = 0;
+  let moved = 0;
+  for (const it of items || []) {
+    if (it?.lineSource === 'invoice_pdf' && isFreightOrServiceText(String(it.originalName || ''))) {
+      freightNet += Number(it.totalPrice) || 0;
+      freightGross += Number(it.grossTotalPrice) || 0;
+      moved++;
+      continue;
+    }
+    kept.push(it);
+  }
+  return { items: kept, freightNet: round2(freightNet), freightGross: round2(freightGross), moved };
+}
+
+// Bazı 1C düzenlerinde birim sütunu isimden sonra gelir ("Арм. Пруток ... ГОСТ 34028-2016 т  83,846  72 500,00"):
+// birim boş okunur ve isim "т" ile biter. Ton dışındaki son ekler (25 кг, 200 л) ambalaj ölçüsüdür, birim değildir.
+const TRAILING_TON_RE = /\sтн?\.?$/i;
+
+function documentLineUnit(name: string, unitRaw: string): string {
+  if (!String(unitRaw || '').trim() && TRAILING_TON_RE.test(String(name || '').trim())) return 'TON';
+  return mapDocumentUnit(unitRaw);
+}
+
+function sharedDocumentCodes(items: any[]): Set<string> {
+  const names = new Map<string, Set<string>>();
+  for (const it of items || []) {
+    if (it?.lineSource !== 'invoice_pdf' || !it.materialCode) continue;
+    if (!names.has(it.materialCode)) names.set(it.materialCode, new Set());
+    names.get(it.materialCode)!.add(String(it.originalName || '').toLowerCase().trim());
+  }
+  return new Set([...names].filter(([, n]) => n.size > 1).map(([code]) => code));
+}
+
+// Tablo başlığının sütun numaraları ("1 2 3 4 5 6 7") ilk satırın adına yapışabiliyor: "2 3 4 5 6 7 1 Вентилятор BL 8800"
+export function cleanDocumentLineName(name: string): string {
+  const text = String(name || '');
+  const m = text.match(/^((?:\d{1,2}\s+){4,})(?=\S)/);
+  if (!m) return text;
+  const nums = m[1].trim().split(/\s+/).map(Number);
+  const head = nums.slice(0, -1);
+  const isColumnRun = head[0] === 2 && head.every((n, i) => n === 2 + i) && nums[nums.length - 1] === 1;
+  return isColumnRun ? text.slice(m[1].length) : text;
+}
+
+/**
+ * Eski sürümde okunmuş belge satırlarını onarır: birimi ADET kalmış "... т" satırları ton olur,
+ * başlık sütun numarası yapışmış adlar temizlenir, aynı faturada birden çok farklı satıra dağıtılmış
+ * STF stok kodu kaldırılır (kod ortak olunca "Вентилятор" ile "Рукав гофра" aynı malzeme sayılıyordu).
+ * Miktar ve tutarlar belgedeki gibi kalır.
+ */
+export function repairDocumentItems(items: any[]): { items: any[]; fixed: number } {
+  let fixed = 0;
+  const sharedCodes = sharedDocumentCodes(items);
+  const out = (items || []).map((it: any) => {
+    if (it?.lineSource !== 'invoice_pdf') return it;
+    let next = it;
+    if (it.materialCode && sharedCodes.has(it.materialCode)) {
+      const { materialCode, ...rest } = next;
+      next = rest;
+    }
+    if (String(it.unit || '').toUpperCase() === 'ADET' && TRAILING_TON_RE.test(String(it.originalName || '').trim())) {
+      next = { ...next, unit: 'TON' };
+    }
+    const cleanName = cleanDocumentLineName(it.originalName);
+    if (cleanName !== it.originalName) {
+      const cleanMaterial = cleanDocumentLineName(it.materialName);
+      next = { ...next, originalName: cleanName, materialName: cleanMaterial !== it.materialName ? cleanMaterial : (translateRussianMaterialToTurkish(cleanName) || cleanName) };
+    }
+    if (next !== it) fixed++;
+    return next;
+  });
+  return { items: out, fixed };
+}
+
 /** STF/belge kalemlerinin fatura tutarını tutup tutmadığını hesaplar (uydurma nakliye yok). */
 export function buildLineCheck(params: {
   items: any[];
@@ -359,6 +461,7 @@ export function buildLineCheck(params: {
     invoiceTotal: params.invoiceTotal,
     linesGrossSum,
     diff,
+    parserVersion: CURRENT_DOC_LINES_PARSER_VERSION,
     ...(params.fileId ? { fileId: params.fileId } : {}),
     ...(params.documentNote ? { documentNote: params.documentNote } : {})
   };

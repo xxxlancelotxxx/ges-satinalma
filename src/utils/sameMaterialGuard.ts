@@ -23,6 +23,12 @@ export interface ProductIdentity {
   rebarDiameter?: string;
   variants: Set<string>;
   isCommodity: boolean;
+  /** Ürün adının ilk kelimesinin kökü (лопата → лопат) */
+  headRoot?: string;
+  /** Metindeki tüm Kiril kelime kökleri */
+  roots: Set<string>;
+  /** "L=2,5 м" gibi açık uzunluk */
+  length?: string;
 }
 
 export interface SameProductVerdict {
@@ -105,6 +111,18 @@ function extractModelCodes(text: string): Set<string> {
   return codes;
 }
 
+const ROOT_LEN = 5;
+
+function extractRoots(text: string): { headRoot?: string; roots: Set<string> } {
+  const words = String(text || '').toLowerCase().replace(/ё/g, 'е').match(/[а-я]{4,}/g) || [];
+  return { headRoot: words[0]?.slice(0, ROOT_LEN), roots: new Set(words.map(w => w.slice(0, ROOT_LEN))) };
+}
+
+function extractExplicitLength(text: string): string | undefined {
+  const m = String(text || '').match(/(?:^|[^a-zа-я])[lд]\s*=\s*(\d+(?:[.,]\d+)?)/i);
+  return m ? String(Number(m[1].replace(',', '.'))) : undefined;
+}
+
 export function getProductIdentity(originalName: string, materialName = '', category = ''): ProductIdentity {
   const text = String(originalName || materialName || '');
   const brandInfo = extractOriginalBrandAndSeries(text);
@@ -123,7 +141,9 @@ export function getProductIdentity(originalName: string, materialName = '', cate
     grades: extractGrades(text),
     rebarDiameter: extractRebarDiameter(text),
     variants,
-    isCommodity: brandInfo.isCommodity || segment.comparisonMode === 'COMMODITY_STANDARD'
+    isCommodity: brandInfo.isCommodity || segment.comparisonMode === 'COMMODITY_STANDARD',
+    ...extractRoots(text),
+    length: extractExplicitLength(text)
   };
 }
 
@@ -169,6 +189,11 @@ export function compareProductIdentities(a: ProductIdentity, b: ProductIdentity)
     return { same: false, reason: `çap farkı: Ø${a.rebarDiameter} ⟷ Ø${b.rebarDiameter}` };
   }
 
+  // 3b. Açık uzunluk farkı (kalıp kirişi L=1,5 м ⟷ L=2,5 м)
+  if (a.length && b.length && a.length !== b.length) {
+    return { same: false, reason: `uzunluk farkı: L=${a.length} ⟷ L=${b.length}` };
+  }
+
   const sharesCode = shareAny(a.modelCodes, b.modelCodes);
 
   // 4. İki tarafta da tanınan marka var ve farklı (Knauf ⟷ Volma, ТехноНИКОЛЬ ⟷ Икопал)
@@ -182,6 +207,16 @@ export function compareProductIdentities(a: ProductIdentity, b: ProductIdentity)
 
   // GOST/DIN emtiada (demir, kereste, agrega) üretici kodu kıyası yapılmaz
   if (a.isCommodity && b.isCommodity) return { same: true };
+
+  // 5b. Ürün adı başka bir şey: iki tarafın baş kelimesi de diğer metinde geçmiyor (Вентилятор ⟷ Рукав гофра)
+  if (a.headRoot && b.headRoot && a.headRoot !== b.headRoot && !b.roots.has(a.headRoot) && !a.roots.has(b.headRoot)) {
+    return { same: false, reason: `farklı ürün: ${a.headRoot}… ⟷ ${b.headRoot}…` };
+  }
+  // 5c. Yedek parça / aksesuar ana ürünle kıyaslanmaz (Черенок для лопаты ⟷ Лопата)
+  const isAccessory = (x: ProductIdentity) => /^(черен|рукоя|насад|запас|сменн|комплек|чехол|крышк|заглу)/.test(x.headRoot || '');
+  if (isAccessory(a) !== isAccessory(b) && a.headRoot !== b.headRoot) {
+    return { same: false, reason: `aksesuar ⟷ ana ürün: ${a.headRoot}… ⟷ ${b.headRoot}…` };
+  }
 
   // 6. Sözlük dışı marka iki tarafta da var ve farklı
   if (!a.dictionaryBrand && !b.dictionaryBrand && a.dynamicBrand && b.dynamicBrand && a.dynamicBrand !== b.dynamicBrand && !sharesCode) {
