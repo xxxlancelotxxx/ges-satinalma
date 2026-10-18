@@ -5,11 +5,13 @@ import { normalizeStandardUnit, getMaterialBenchmarkUnit, convertMaterialUnit, a
 import { normalizeVendorName, getVendorKey, areVendorsEqual } from './src/utils/vendorNormalizer';
 import { normalizeCategoryName, CANONICAL_28_CATEGORIES, translateRussianMaterialToTurkish, ensureRussianOriginalName, resolveItemCategory } from './src/utils/categoryClassifier';
 import { analyzeMaterialSegment } from './src/utils/materialSegmentIntelligence';
-import { splitGroupBySpec, getProductTypeLabel } from './src/utils/materialGroupIntegrity';
+import { splitGroupBySpec, getProductTypeLabel, ensureComparisonGroupIntegrity } from './src/utils/materialGroupIntegrity';
 import { checkRecordPermission, getUserAuthorizedJobsiteIds, canonicalizeJobsiteId } from './src/utils/permissions';
 import { comparativeAnalysesStore, materialSynonymsStore, comparativeConfig, updateComparativeConfig, processComparativeAnalysisBatch, learnApprovedSynonyms, recalculateComparativeAnalysis } from './server/comparativeEngine';
 import { prizmaService } from './server/prizmaService';
 import { prizmaSyncService, cleanRawMaterialName } from './server/prizmaSyncService';
+import { MaterialAliasStore, buildMergeAliases, catalogKeyForName } from './server/materialCatalog';
+import { materialFingerprint } from './src/utils/materialFingerprint';
 
 import { EventEmitter } from 'events';
 EventEmitter.defaultMaxListeners = 50;
@@ -919,6 +921,9 @@ const BACKUP_DIR = path.join(os.tmpdir(), 'data_backup');
 if (!fs.existsSync(BACKUP_DIR)) {
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
 }
+
+// Kalıcı malzeme eşleştirme (alias) deposu: elle birleştirmeler + Prizma stok kodu bağları
+const materialAliasStore = new MaterialAliasStore(() => db, BACKUP_DIR);
 
 function saveLocalBackup(filename: string, data: any): boolean {
   try {
@@ -2772,6 +2777,13 @@ function isSyntheticRussianFallback(s: string): boolean {
   if (!t) return true;
   const rx = /^(?:Арматура рифленая А500С ГОСТ 34028|Рулонная гидроизоляция|Сетка сварная арматурная Вр-1|Проволока стальная вязальная ТОЧ|Каркас арматурный сварной|Каркас металлический|Уголок стальной равнополочный ГОСТ 8509|Труба стальная профильная ГОСТ|Труба стальная электросварная ГОСТ|Блок газобетонный стеновой|Клей для газобетона сухая смесь|Инструмент\s*\/\s*крепеж для газобетона|Фанера ламинированная ФОФ для опалубки|Утеплитель каменная вата|Экструдированный пенополистирол|Саморезы по гипсокартону фосфатированные|Ножовка по гипсокартону|Профиль\s*\/\s*подвес для гипсокартона|Гипсокартонный лист|Компрессор воздушный электрический|Эмаль алкидная ПФ-115|Валик малярный с бюгелем|Ершик для унитаза с подставкой|Щетка металлическая зачистная|Черенок деревянный для щетки|Щетка для уборки помещений|Кисть малярная|Пленка стрейч упаковочная|Пленка полиэтиленовая техническая|Тент строительный защитный|Электроды сварочные покрытые|Пропан технический в баллонах|Круг \(диск\) отрезной по металлу|Очиститель монтажной пены профессиональный|Пистолет для монтажной пены профессиональный|Пена монтажная профессиональная под пистолет|Диспенсер для упаковочного скотча|Скотч упаковочный клейкий|Лента малярная креппированная|Перчатки рабочие защитные|Каска строительная защитная|Клипса \(держатель\) для монтажного пистолета|Гвозди строительные ГОСТ|Саморезы строительные оцинкованные|Рым-болт оцинкованный DIN|Болт оцинкованный с шестигранной головкой|Гайка шестигранная оцинкованная DIN|Шайба плоская\s*\/\s*пружинная|Анкерный болт\s*\/\s*шпилька|Хомут кабельный нейлоновый|Наконечник\s*\/\s*гильза кабельная|Кабель силовой медный ВВГнг|Зубило плоское\s*\/\s*пика|Нож строительный сегментный|Запчасть для тепловой пушки|Коронка биметаллическая по металлу|Тачка строительная усиленная|Известь хлорная\s*\/\s*средство|Утеплитель теплоизоляционный минераловатный|Доска магнитно-маркерная офисная|Рулетка измерительная\s*\/\s*уровень|Ключ гаечный комбинированный|Пиломатериал обрезной|Плита ориентированно-стружечная|Бетон товарный БСГ|Цемент портландцемент|Песок строительный карьерный|Щебень гранитный|Кирпич строительный|Смесь сухая ремонтная|Клей плиточный цементный|Грунтовка строительная глубокого|Растворитель технический|Краска строительная водно-дисперсионная|Валик малярный строительный|Шпатель малярный из нержавеющей|Кельма\s*\/\s*гладилка|Герметик силиконовый|Пена монтажная полиуретановая|Гидроизоляция рулонная|Рукав пожарный напорный|Клапан \(вентиль\) пожарный|Труба полипропиленовая\s*\/\s*ПВХ|Кран шаровой латунный|Фитинг соединительный|Хомут трубный стальной|Прокладка уплотнительная сантехническая|Выключатель автоматический модульный|Щит распределительный\s*\/\s*коробка|Розетка электрическая\s*\/\s*вилка|Светильник светодиодный строительный|Электроинструмент\s*\/\s*оснастка|Диск отрезной\s*\/\s*круг|Полотно пильное\s*\/\s*диск|Инструмент слесарно-монтажный|Инвентарь строительный|Емкость\s*\/\s*ведро строительное|Дюбель строительный распорный|Гвозди строительные\s*\/\s*монтажные|Фурнитура дверная|Строп грузоподъемный|Комплектующие опалубки|Жилет сигнальный|Спецобувь защитная|Спецодежда рабочая|Средства индивидуальной защиты|Огнетушитель порошковый|Компьютерная периферия и оргтехника|Картридж лазерный\s*\/\s*тонер|Мешки для мусора полиэтиленовые|Бумага офисная для принтера|Канцелярские принадлежности|Канцелярские|Хозяйственные товары и средства|Хозяйственно-бытовое обеспечение|бытовое обеспечение офиса и площадки|ГСМ,\s*дизельное топливо|Оборудование стройплощадки|Строительно-монтажный материал)/i;
   return rx.test(raw) || rx.test(t);
+}
+
+/** originalName gerçek bir fatura satırı mı (sentetik Rusça şablon / kısa çizim notu değil)? */
+function isGenuineOriginalLine(orig?: string): boolean {
+  const raw = String(orig || '').trim();
+  const cleaned = cleanRawMaterialName(unwrapSyntheticPrefixes(raw));
+  return Boolean(cleaned) && !isShortDrawingOrSpecNote(cleaned) && !isSyntheticRussianFallback(raw);
 }
 
 const smartNormalizeMemoCache = new Map<string, { materialName: string; category?: string }>();
@@ -6594,18 +6606,27 @@ app.delete('/api/invoices/:id', async (req, res) => {
 
 app.get('/api/materials/compare', async (req, res) => {
   try {
+    const { data, quotaExceeded } = await computeMaterialComparisons();
+    if (quotaExceeded) res.setHeader('X-Quota-Exceeded', 'true');
+    res.json(data);
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceeded: boolean }> {
     const { data: invs, quotaExceeded: q1 } = await getInvoicesCached();
     const { data: dscs, quotaExceeded: q2 } = await getDiscountsCached();
-    if (q1 || q2) res.setHeader('X-Quota-Exceeded', 'true');
+    const quotaExceeded = Boolean(q1 || q2);
+    await materialAliasStore.ensureLoaded();
+    const aliasIndex = materialAliasStore.index;
 
     const prizmaInvsForCompare = await prizmaSyncService.getInvoicesCached().catch(() => []);
-    const sourceStamp = `${invs.length}_${memoryStore.invoices?.timestamp || 0}_${dscs.length}_${memoryStore.discounts?.timestamp || 0}_${prizmaInvsForCompare.length}`;
+    const sourceStamp = `${invs.length}_${memoryStore.invoices?.timestamp || 0}_${dscs.length}_${memoryStore.discounts?.timestamp || 0}_${prizmaInvsForCompare.length}_alias${aliasIndex.version}`;
     if (
       memoryStore.materialComparisons &&
       memoryStore.materialComparisons.sourceStamp === sourceStamp &&
       Date.now() - memoryStore.materialComparisons.timestamp < CACHE_TTL_MS
     ) {
-      return res.json(memoryStore.materialComparisons.data);
+      return { data: memoryStore.materialComparisons.data, quotaExceeded };
     }
 
     const allInvoices = [...invs];
@@ -6774,6 +6795,7 @@ app.get('/api/materials/compare', async (req, res) => {
     const preMaterialMap = new Map<string, {
       canonName: string;
       canonCat: string;
+      locked?: boolean;
       rawUnits: Set<string>;
       entries: Array<{
         inv: any;
@@ -6834,6 +6856,7 @@ app.get('/api/materials/compare', async (req, res) => {
     };
 
     const origBridgeMap = new Map<string, string>();
+    const prizmaCodeKeyMap = new Map<string, string>();
 
     allInvoices.forEach(inv => {
       if (!inv.items || !Array.isArray(inv.items)) return;
@@ -6864,8 +6887,9 @@ app.get('/api/materials/compare', async (req, res) => {
 
         const norm = smartNormalizeItem({ ...item, supplier: item.supplier || inv.supplier });
         let canonName = norm.materialName || item.materialName;
-        const canonCat = resolveItemCategory({ originalName: item.originalName, materialName: item.materialName, canonName, rawCategory: norm.category || item.category, manualCategory: item.categoryManual ? item.category : undefined });
-        let canonKey = canonName.toLowerCase().trim();
+        let canonCat = resolveItemCategory({ originalName: item.originalName, materialName: item.materialName, canonName, rawCategory: norm.category || item.category, manualCategory: item.categoryManual ? item.category : undefined });
+        // Grup anahtarı = ad parmak izi: "4,2х76" / "4.2x76", kelime sırası, Kiril/Latin harf farkları aynı gruba düşer
+        let canonKey = catalogKeyForName(canonName);
         const combinedText = `${canonName} ${item.originalName || ''} ${item.materialName || ''}`;
 
         // 1. Beton Filtresi: (Yalnızca hazır beton / grobeton elenir; çimento, kum, mıcır, kuru harç, şap, yapıştırıcı korunur!)
@@ -6889,7 +6913,43 @@ app.get('/api/materials/compare', async (req, res) => {
         // 3. Genuine Russian OriginalName Bridging:
         // Eğer iki farklı faturadaki kalemin Rusça orijinal fatura satırı (originalName) birebir aynıysa,
         // farklı Türkçe çeviriler yüzünden ayrı satırlara bölünmesini engelle!
-        const bridgeKey = getGenuineRussianOrigBridgeKey(item.originalName, item.materialName);
+        // 2.5 KALICI KATALOG EŞLEŞMESİ: Elle birleştirme kararları (alias) kural motorundan ve köprülerden ÖNCE uygulanır.
+        const aliasHit = aliasIndex.lookup({
+          materialCode: item.materialCode,
+          originalName: item.originalName,
+          originalIsGenuine: isGenuineOriginalLine(item.originalName),
+          materialName: item.materialName,
+          canonName
+        });
+        const catalogLocked = Boolean(aliasHit);
+        let linkedByPrizmaCode = false;
+        if (aliasHit) {
+          canonKey = aliasHit.targetKey;
+          canonName = aliasHit.targetName;
+          if (aliasHit.targetCategory) canonCat = aliasHit.targetCategory;
+        } else {
+          // 2.6 Prizma stok kartı kodu: aynı kod = aynı malzeme (aynı birimde fiyat oranı makulse)
+          const prizmaCode = String(item.materialCode || '').trim().toUpperCase();
+          if (prizmaCode) {
+            const codeKey = prizmaCodeKeyMap.get(prizmaCode);
+            if (codeKey && codeKey !== canonKey && preMaterialMap.has(codeKey)) {
+              const codeGroup = preMaterialMap.get(codeKey)!;
+              const unitNormForCode = normalizeStandardUnit(item.unit || 'Adet');
+              const refForCode = codeGroup.entries.find(e => normalizeStandardUnit(e.unit) === unitNormForCode);
+              const codeRatio = refForCode && refForCode.priceNum > 0 && priceNum > 0
+                ? Math.max(refForCode.priceNum, priceNum) / Math.min(refForCode.priceNum, priceNum)
+                : 1;
+              if (codeRatio <= 2.5) {
+                canonKey = codeKey;
+                linkedByPrizmaCode = true;
+              }
+            } else if (!codeKey) {
+              prizmaCodeKeyMap.set(prizmaCode, canonKey);
+            }
+          }
+        }
+
+        const bridgeKey = catalogLocked || linkedByPrizmaCode ? '' : getGenuineRussianOrigBridgeKey(item.originalName, item.materialName);
         if (bridgeKey) {
           const existingCanonKey = origBridgeMap.get(bridgeKey);
           if (existingCanonKey && preMaterialMap.has(existingCanonKey)) {
@@ -6903,7 +6963,7 @@ app.get('/api/materials/compare', async (req, res) => {
               ? Math.max(refEntry.priceNum, priceNum) / Math.min(refEntry.priceNum, priceNum)
               : 1;
             if (existingCanonKey === canonKey || ratio <= 2.5) {
-              if (scoreTurkishMaterialName(canonName) > scoreTurkishMaterialName(existingGroup.canonName)) {
+              if (!existingGroup.locked && scoreTurkishMaterialName(canonName) > scoreTurkishMaterialName(existingGroup.canonName)) {
                 existingGroup.canonName = canonName;
                 existingGroup.canonCat = canonCat;
               }
@@ -6918,12 +6978,18 @@ app.get('/api/materials/compare', async (req, res) => {
           preMaterialMap.set(canonKey, {
             canonName,
             canonCat,
+            locked: catalogLocked,
             rawUnits: new Set<string>(),
             entries: []
           });
         } else {
           const grp = preMaterialMap.get(canonKey)!;
-          if (scoreTurkishMaterialName(canonName) > scoreTurkishMaterialName(grp.canonName)) {
+          if (catalogLocked) {
+            // Kullanıcının seçtiği hedef ad ve kategori her zaman korunur
+            grp.canonName = canonName;
+            grp.canonCat = canonCat;
+            grp.locked = true;
+          } else if (!grp.locked && scoreTurkishMaterialName(canonName) > scoreTurkishMaterialName(grp.canonName)) {
             grp.canonName = canonName;
           }
         }
@@ -6943,6 +7009,7 @@ app.get('/api/materials/compare', async (req, res) => {
     const consolidatedPreMap = new Map<string, {
       canonName: string;
       canonCat: string;
+      locked?: boolean;
       rawUnits: Set<string>;
       entries: Array<{
         inv: any;
@@ -6953,17 +7020,22 @@ app.get('/api/materials/compare', async (req, res) => {
       }>;
     }>();
     preMaterialMap.forEach((preGroup) => {
-      const finalKey = preGroup.canonName.toLowerCase().trim();
+      const finalKey = catalogKeyForName(preGroup.canonName);
       if (!consolidatedPreMap.has(finalKey)) {
         consolidatedPreMap.set(finalKey, {
           canonName: preGroup.canonName,
           canonCat: preGroup.canonCat,
+          locked: preGroup.locked,
           rawUnits: new Set(preGroup.rawUnits),
           entries: [...preGroup.entries]
         });
       } else {
         const target = consolidatedPreMap.get(finalKey)!;
-        if (scoreTurkishMaterialName(preGroup.canonName) > scoreTurkishMaterialName(target.canonName)) {
+        if (preGroup.locked) {
+          target.canonName = preGroup.canonName;
+          target.canonCat = preGroup.canonCat;
+          target.locked = true;
+        } else if (!target.locked && scoreTurkishMaterialName(preGroup.canonName) > scoreTurkishMaterialName(target.canonName)) {
           target.canonName = preGroup.canonName;
         }
         preGroup.rawUnits.forEach(u => target.rawUnits.add(u));
@@ -6976,6 +7048,8 @@ app.get('/api/materials/compare', async (req, res) => {
     const integrityKeys = Array.from(consolidatedPreMap.keys());
     for (const key of integrityKeys) {
       const grp = consolidatedPreMap.get(key)!;
+      // Kullanıcının elle birleştirdiği katalog kaydı otomatik olarak yeniden bölünmez
+      if (grp.locked) continue;
       const parts = splitGroupBySpec(grp.entries, (e: any) => String(e.item?.originalName || e.item?.materialName || ''), (e: any) => String(e.unit || ''));
       if (parts.length <= 1) continue;
       consolidatedPreMap.delete(key);
@@ -7004,6 +7078,7 @@ app.get('/api/materials/compare', async (req, res) => {
 
     // Pass 1.8: GRUP KATEGORİSİ = satırların çoğunluk oyu (ilk gelen satırın kategorisi değil).
     consolidatedPreMap.forEach((grp) => {
+      if (grp.locked) return; // elle birleştirilen kaydın kategorisi kullanıcının seçtiği hedeften gelir
       const votes = new Map<string, number>();
       grp.entries.forEach((e: any) => {
         const c = resolveItemCategory({ originalName: e.item?.originalName, materialName: e.item?.materialName, canonName: grp.canonName, rawCategory: e.item?.category, manualCategory: e.item?.categoryManual ? e.item?.category : undefined });
@@ -7022,6 +7097,8 @@ app.get('/api/materials/compare', async (req, res) => {
     const materialMap = new Map<string, {
       materialName: string;
       category: string;
+      catalogKey: string;
+      catalogLocked: boolean;
       rawUnits: Set<string>;
       items: Array<{
         inv: any;
@@ -7057,6 +7134,8 @@ app.get('/api/materials/compare', async (req, res) => {
           materialMap.set(targetKey, {
             materialName: displayMaterialName,
             category: preGroup.canonCat,
+            catalogKey: canonKey,
+            catalogLocked: Boolean(preGroup.locked),
             rawUnits: new Set<string>(),
             items: []
           });
@@ -7234,6 +7313,9 @@ app.get('/api/materials/compare', async (req, res) => {
           conversionFactor: conv.factor,
           invoiceNumber: inv.invoiceNumber,
           originalName: resolvedOrigName,
+          rawOriginalName: item.originalName || '',
+          rawMaterialName: item.materialName || '',
+          materialCode: item.materialCode || undefined,
           comparisonMode: entrySeg.comparisonMode,
           qualitySegment: entrySeg.qualitySegment,
           qualitySegmentLabel: entrySeg.qualitySegmentLabel,
@@ -7286,6 +7368,8 @@ app.get('/api/materials/compare', async (req, res) => {
         id: groupKey,
         materialName: matGroup.materialName,
         category: matGroup.category,
+        catalogKey: matGroup.catalogKey,
+        catalogLocked: matGroup.catalogLocked,
         comparisonMode: groupSeg.comparisonMode,
         comparisonModeLabel: groupSeg.comparisonModeLabel,
         qualitySegment: groupSeg.qualitySegment,
@@ -7317,9 +7401,8 @@ app.get('/api/materials/compare', async (req, res) => {
       timestamp: Date.now(),
       sourceStamp
     };
-    res.json(sortedComparisons);
-  } catch (err: any) { res.status(500).json({ error: err.message }); }
-});
+    return { data: sortedComparisons, quotaExceeded };
+}
 
 app.put('/api/materials/update-category', async (req, res) => {
   if (!db) return res.status(500).json({ error: 'Firestore bağlı değil.' });
@@ -7580,34 +7663,96 @@ Aşağıdaki JSON şemasına BİREBİR uyarak yanıt dön:
 });
 
 app.post('/api/materials/merge', async (req, res) => {
-  if (!db) return res.status(500).json({ error: 'Firestore bağlı değil.' });
   try {
-    const { sourceName, targetName } = req.body;
-    if (!sourceName || !targetName) return res.status(400).json({ error: 'Kaynak ve hedef malzeme isimleri gereklidir.' });
-
-    const invSnap = await getDocs(query(collection(db, 'invoices'), where('isDeleted', '==', false)));
-    const srcLower = sourceName.toLowerCase().trim();
-    const tgtTrim = targetName.trim();
-
-    for (const docSnap of invSnap.docs) {
-      const data = docSnap.data();
-      if (Array.isArray(data.items)) {
-        let changed = false;
-        const updatedItems = data.items.map((it: any) => {
-          if (it.materialName && it.materialName.toLowerCase().trim() === srcLower) {
-            changed = true;
-            return { ...it, materialName: tgtTrim };
-          }
-          return it;
-        });
-
-        if (changed) {
-          await updateDoc(doc(db, 'invoices', docSnap.id), { items: updatedItems });
-        }
-      }
+    const { sourceName, targetName, sourceId, targetId } = req.body || {};
+    if ((!sourceName && !sourceId) || (!targetName && !targetId)) {
+      return res.status(400).json({ error: 'Kaynak ve hedef malzeme isimleri gereklidir.' });
     }
 
-    res.json({ success: true, message: `'${sourceName}' malzemesi '${targetName}' ile birleştirildi.` });
+    // Ekranda görünen grupları birebir bul: sunucu grupları + istemcideki bütünlük bölmesinin aynısı
+    const { data: comps } = await computeMaterialComparisons();
+    const clientView = ensureComparisonGroupIntegrity(comps);
+    const findGroup = (name?: string, id?: string) => {
+      const n = String(name || '').trim();
+      const byId = id ? (clientView.find((c: any) => c.id === id) || comps.find((c: any) => c.id === id)) : undefined;
+      return byId || clientView.find((c: any) => c.materialName === n) || comps.find((c: any) => c.materialName === n);
+    };
+    const source: any = findGroup(sourceName, sourceId);
+    const target: any = findGroup(targetName, targetId);
+    if (!source) return res.status(404).json({ error: `Kaynak malzeme bulunamadı: '${sourceName || sourceId}'` });
+    if (!target) return res.status(404).json({ error: `Hedef malzeme bulunamadı: '${targetName || targetId}'` });
+    if (source.id === target.id || source.materialName === target.materialName) {
+      return res.status(400).json({ error: 'Kaynak ve hedef malzeme aynı olamaz.' });
+    }
+
+    const toEntry = (h: any) => ({
+      materialCode: h.materialCode,
+      originalName: h.rawOriginalName || h.originalName,
+      originalIsGenuine: isGenuineOriginalLine(h.rawOriginalName || h.originalName),
+      materialName: h.rawMaterialName || h.materialName
+    });
+    const sourceHistory: any[] = Array.isArray(source.history) ? source.history : [];
+    const targetHistory: any[] = Array.isArray(target.history) ? target.history : [];
+    const aliases = buildMergeAliases({
+      sourceGroupNames: [source.materialName],
+      targetName: target.materialName,
+      targetCategory: target.category,
+      entries: [...sourceHistory, ...targetHistory].map(toEntry),
+      createdBy: decodeURIComponent(String(req.headers['x-user-role'] || '')) || 'Kullanıcı'
+    });
+    if (aliases.length === 0) {
+      return res.status(422).json({ error: 'Kaynak malzemenin satırlarından ayırt edici bir eşleştirme anahtarı üretilemedi.' });
+    }
+
+    const saveResult = await materialAliasStore.save(aliases);
+    memoryStore.materialComparisons = undefined;
+
+    // Doğrulama: birleştirmeden sonra kaynak satırlar gerçekten hedef grupta mı?
+    const { data: after } = await computeMaterialComparisons();
+    const targetKey = catalogKeyForName(target.materialName);
+    const merged = after.find((c: any) => c.catalogKey === targetKey && c.catalogLocked);
+    const lineId = (h: any) => `${h.invoiceId}|${h.rawOriginalName || h.originalName}|${h.originalUnitPrice}|${h.originalQuantity}`;
+    const mergedIds = new Set((merged?.history || []).map(lineId));
+    const movedEntries = sourceHistory.filter(h => mergedIds.has(lineId(h))).length;
+
+    res.json({
+      success: true,
+      message: `'${source.materialName}' malzemesi '${target.materialName}' ile birleştirildi (${movedEntries}/${sourceHistory.length} satır taşındı).`,
+      targetName: merged?.materialName || target.materialName,
+      aliasesCreated: aliases.length,
+      movedEntries,
+      sourceEntries: sourceHistory.length,
+      persisted: saveResult.persisted,
+      ...(saveResult.persisted ? {} : { warning: `Eşleştirme kalıcı depoya yazılamadı, yalnızca bu sunucuda geçerli: ${saveResult.error || ''}` })
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Kalıcı malzeme eşleştirmeleri (elle birleştirmeler): listele / geri al
+app.get('/api/materials/aliases', async (_req, res) => {
+  try {
+    await materialAliasStore.ensureLoaded();
+    res.json(materialAliasStore.index.list().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))));
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/materials/aliases', async (req, res) => {
+  try {
+    await materialAliasStore.ensureLoaded();
+    const { ids, targetName } = req.body || {};
+    const idList: string[] = Array.isArray(ids)
+      ? ids
+      : targetName
+        ? materialAliasStore.index.list().filter(a => a.targetName === targetName).map(a => a.id)
+        : [];
+    if (idList.length === 0) return res.status(400).json({ error: 'Silinecek eşleştirme bulunamadı (ids veya targetName gerekli).' });
+    const result = await materialAliasStore.remove(idList);
+    memoryStore.materialComparisons = undefined;
+    res.json({ success: true, removed: result.removed.length, persisted: result.persisted, ...(result.error ? { warning: result.error } : {}) });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

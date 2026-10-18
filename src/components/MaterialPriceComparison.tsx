@@ -793,8 +793,12 @@ export const MaterialPriceComparison: React.FC<Props> = ({
         if (onRefreshData) {
           await onRefreshData();
         }
-        setSelectedMaterialName(manualTarget);
-        setExpandedMaterialName(manualTarget);
+        const mergedName = data.targetName || manualTarget;
+        setSelectedMaterialName(mergedName);
+        setExpandedMaterialName(mergedName);
+        if (data.warning) {
+          alert(data.warning);
+        }
         setShowManualMergeModal(false);
         setManualSource('');
         setManualTarget('');
