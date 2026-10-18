@@ -32,10 +32,11 @@ import {
 } from 'recharts';
 import { InvoiceRecord, Jobsite } from '../types';
 import { formatRuble } from '../utils/format';
-import { classifyItemCategory, isPrizmaAutoSyncedInvoice } from '../utils/dashboardStats';
+import { NormalizedProcurementItem, resolveSpendJobsite } from '../utils/procurementAnalyticsCore';
 
 interface JobsiteBreakdownProps {
-  invoices: InvoiceRecord[];
+  /** Dashboard'un tek harcama defteri: KPI ve diğer panellerle aynı (KDV dahil fatura toplamına ölçekli) kalemler. */
+  spendItems: NormalizedProcurementItem[];
   jobsites: Jobsite[];
   selectedJobsiteId?: string;
   onNavigateToTab: (tabId: string) => void;
@@ -82,7 +83,7 @@ const PALETTE = [
 ];
 
 export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
-  invoices = [],
+  spendItems = [],
   jobsites = [],
   selectedJobsiteId: propJobsiteId,
   onNavigateToTab,
@@ -118,12 +119,10 @@ export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
       };
     });
 
-    // Faturaları tara
-    invoices.forEach(inv => {
-      if (inv.isDeleted || inv.isPermanentlyDeleted || inv.test || isPrizmaAutoSyncedInvoice(inv) || (!inv.jobsiteId && !inv.jobsiteName)) return;
-      const matchedJobsite = jobsites.find(j => j.id === inv.jobsiteId || (inv.jobsiteName && j.name.toLowerCase() === inv.jobsiteName.toLowerCase()));
-      const siteId = matchedJobsite ? matchedJobsite.id : (inv.jobsiteId || 'site_' + inv.jobsiteName);
-      const siteName = matchedJobsite ? matchedJobsite.name : (inv.jobsiteName || 'Şantiye');
+    // Paylaşılan harcama defterini tara (fatura sayısı = farklı fatura kimliği)
+    const siteInvoiceIds: Record<string, Set<string>> = {};
+    spendItems.forEach(it => {
+      const { id: siteId, name: siteName } = resolveSpendJobsite(it, jobsites);
 
       if (!siteMap[siteId]) {
         siteMap[siteId] = {
@@ -139,60 +138,43 @@ export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
       }
 
       const site = siteMap[siteId];
-      site.invoiceCount += 1;
-      site.recentInvoices.push(inv);
-
-      const items = Array.isArray(inv.items) ? inv.items : [];
-      let invoiceTotal = 0;
-
-      if (items.length > 0) {
-        items.forEach(it => {
-          const matName = (it.materialName || it.originalName || 'Diğer Malzeme').trim();
-          const qty = Number(it.quantity) || 1;
-          const price = Number(it.unitPrice) || 0;
-          const total = Number(it.totalPrice) || qty * price;
-          const category = classifyItemCategory(it.materialName, it.originalName, inv.supplier, it.category || inv.category);
-
-          invoiceTotal += total;
-          site.itemCount += 1;
-
-          // Kategori toplamı
-          site.categories[category] = (site.categories[category] || 0) + total;
-
-          // Malzeme toplamı
-          if (!site.materials[matName]) {
-            site.materials[matName] = {
-              name: matName,
-              category,
-              totalSpend: 0,
-              totalQty: 0,
-              unit: it.unit || 'adet',
-              count: 0,
-              avgUnitPrice: 0,
-              lastDate: inv.date || inv.created_at || '',
-              supplier: inv.supplier || ''
-            };
-          }
-
-          const m = site.materials[matName];
-          m.totalSpend += total;
-          m.totalQty += qty;
-          m.count += 1;
-          if (inv.date && (!m.lastDate || inv.date > m.lastDate)) {
-            m.lastDate = inv.date;
-          }
-        });
-      } else {
-        const fallbackTotal = Number(inv.totalAmount) || 0;
-        if (fallbackTotal > 0) {
-          const category = classifyItemCategory(inv.supplier, '', inv.supplier, inv.category);
-          site.categories[category] = (site.categories[category] || 0) + fallbackTotal;
-          site.itemCount += 1;
-          invoiceTotal = fallbackTotal;
-        }
+      const ids = siteInvoiceIds[siteId] || (siteInvoiceIds[siteId] = new Set<string>());
+      if (!ids.has(it.invoiceId)) {
+        ids.add(it.invoiceId);
+        site.invoiceCount += 1;
+        site.recentInvoices.push(it.rawInvoice);
       }
 
-      site.totalSpend += invoiceTotal > 0 ? invoiceTotal : (Number(inv.totalAmount) || 0);
+      const matName = (it.materialName || it.originalName || 'Diğer Malzeme').trim();
+      const category = it.canonicalCategory;
+      const total = it.totalPrice;
+      const itemDate = it.rawInvoice?.date || it.date || '';
+
+      site.totalSpend += total;
+      site.itemCount += 1;
+      site.categories[category] = (site.categories[category] || 0) + total;
+
+      if (!site.materials[matName]) {
+        site.materials[matName] = {
+          name: matName,
+          category,
+          totalSpend: 0,
+          totalQty: 0,
+          unit: it.unit || 'adet',
+          count: 0,
+          avgUnitPrice: 0,
+          lastDate: itemDate,
+          supplier: it.supplier || ''
+        };
+      }
+
+      const m = site.materials[matName];
+      m.totalSpend += total;
+      m.totalQty += it.quantity;
+      m.count += 1;
+      if (itemDate && (!m.lastDate || itemDate > m.lastDate)) {
+        m.lastDate = itemDate;
+      }
     });
 
     const list = Object.values(siteMap).filter(s => s.totalSpend > 0 || s.invoiceCount > 0);
@@ -207,7 +189,7 @@ export const SmartDashboardInsights: React.FC<JobsiteBreakdownProps> = ({
       sites: sortedSites,
       overallTotalSpend
     };
-  }, [invoices, jobsites]);
+  }, [spendItems, jobsites]);
 
   // Seçili şantiye bilgisi (ALL ise tüm şantiyelerin toplamı)
   const currentSite = useMemo<JobsiteDetailStat>(() => {

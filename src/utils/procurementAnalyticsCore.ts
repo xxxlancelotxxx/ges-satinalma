@@ -285,7 +285,8 @@ export function getNormalizedProcurementItems(invoices: InvoiceRecord[] = []): N
         const canonCat = resolveItemCategory({
           originalName: rawOrig,
           materialName: `${rawName} ${supplier}`.trim(),
-          rawCategory: rawCat
+          rawCategory: rawCat,
+          manualCategory: it.categoryManual ? it.category : undefined
         });
         const qty = Number(it.quantity) > 0 ? Number(it.quantity) : 1;
         const uPrice = Number(it.unitPrice) || 0;
@@ -429,6 +430,7 @@ export function filterNormalizedProcurementItems(
         item.invoiceNumber.toLowerCase().includes(q) ||
         item.jobsiteName.toLowerCase().includes(q) ||
         item.category.toLowerCase().includes(q) ||
+        item.supervisorName.toLowerCase().includes(q) ||
         (item.subType && item.subType.toLowerCase().includes(q));
       if (!match) return false;
     }
@@ -443,6 +445,57 @@ export function filterNormalizedProcurementItems(
 
     return true;
   });
+}
+
+/**
+ * Maps a dashboard filter onto item-level filter options. Date bounds are left out on purpose:
+ * callers pass invoices already cut to the period (current or previous), so re-applying the
+ * custom dates here would wipe the previous period used for change percentages.
+ */
+export function toProcurementFilterOptions(filter?: any): ProcurementFilterOptions | undefined {
+  if (!filter) return undefined;
+  return {
+    selectedJobsiteId: filter.selectedJobsiteId,
+    selectedJobsite: filter.selectedJobsite,
+    selectedVendor: filter.selectedVendor,
+    selectedSupervisorId: filter.selectedSupervisorId,
+    selectedSupervisor: filter.selectedSupervisor,
+    selectedCategory: filter.selectedCategory,
+    searchTerm: filter.searchTerm,
+    invoiceNoFilter: filter.invoiceNoFilter || filter.invoiceNo
+  };
+}
+
+/**
+ * The one spend ledger behind every Genel Bakış panel (KPI, category, jobsite, monthly, vendor,
+ * Şantiye Bazlı İcmal). Each line is scaled so an invoice's lines add up to its totalAmount,
+ * i.e. the VAT-inclusive invoice total; category and search filters apply per line.
+ */
+export function getDashboardSpendItems(invoices: InvoiceRecord[] = [], filter?: any): NormalizedProcurementItem[] {
+  return filterNormalizedProcurementItems(getNormalizedProcurementItems(invoices), toProcurementFilterOptions(filter));
+}
+
+export const UNASSIGNED_JOBSITE_ID = 'unassigned';
+export const UNASSIGNED_JOBSITE_NAME = 'Şantiye Belirtilmemiş';
+
+/** Resolves an item's jobsite against the jobsite list by id, then by name; unknown ones keep their own name. */
+export function resolveSpendJobsite(
+  item: { jobsiteId?: string; jobsiteName?: string; rawInvoice?: any },
+  jobsites: Array<{ id: string; name: string }> = []
+): { id: string; name: string } {
+  const rawId = String(item.rawInvoice?.jobsiteId || item.jobsiteId || '').trim();
+  const rawName = String(item.rawInvoice?.jobsiteName || '').trim();
+  const byId = rawId ? jobsites.find(j => j.id === rawId) : undefined;
+  if (byId) return { id: byId.id, name: byId.name };
+  const lowerName = rawName.toLocaleLowerCase('tr');
+  const byName = lowerName ? jobsites.find(j => String(j.name || '').trim().toLocaleLowerCase('tr') === lowerName) : undefined;
+  if (byName) return { id: byName.id, name: byName.name };
+  if (rawId || rawName) return { id: rawId || `site_${rawName}`, name: rawName || rawId };
+  return { id: UNASSIGNED_JOBSITE_ID, name: UNASSIGNED_JOBSITE_NAME };
+}
+
+export function sumSpend(items: NormalizedProcurementItem[] = []): number {
+  return items.reduce((acc, it) => acc + (Number(it.totalPrice) || 0), 0);
 }
 
 /**
