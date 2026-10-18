@@ -917,10 +917,12 @@ export function detectSuperIntelligentProcurementAnomalies(
     }
   });
 
-  // 2. Sepet Küçültme (Basket Shrinkage)
+  // 2. Sepet Küçültme (Basket Shrinkage) — Nakliye / Hizmet kalemlerini hariç tutarak gerçek malzeme sayısını kıyasla
+  const FREIGHT_REGEX = /\b(доставка|транспортн|автоуслуг|перевозк|манипулятор|логистик|погруз|разгруз|резка|рубка|услуг[аи]?|аренда|nakliye|teslimat|kargo|sevkiyat|lojistik|vinç|kesim|indirme|yükleme)\b/i;
   discounts.forEach(dsc => {
     if ((dsc as any).isDeleted) return;
-    const items = dsc.items || [];
+    const rawItems = dsc.items || [];
+    const items = rawItems.filter((it: any) => !FREIGHT_REGEX.test(`${it.materialName || ''} ${it.originalName || ''} ${it.category || ''}`));
     if (items.length >= 2 && dsc.invoiceNo) {
       const invClean = (dsc.invoiceNo || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
       const matched = invoices.find(i => {
@@ -928,8 +930,12 @@ export function detectSuperIntelligentProcurementAnomalies(
         return num && num === invClean;
       });
 
-      if (matched && Array.isArray(matched.items) && matched.items.length > 0 && matched.items.length < items.length) {
-        const missing = items.length - matched.items.length;
+      const matchedMaterialItems = (matched?.items || []).filter(
+        (it: any) => !FREIGHT_REGEX.test(`${it.materialName || ''} ${it.originalName || ''} ${it.category || ''}`)
+      );
+
+      if (matched && matchedMaterialItems.length > 0 && matchedMaterialItems.length < items.length) {
+        const missing = items.length - matchedMaterialItems.length;
         const claimedDiscount = Number(dsc.discountAmount) || 0;
         anomalies.push({
           id: `basket_shrinkage_${dsc.id}`,
@@ -937,7 +943,7 @@ export function detectSuperIntelligentProcurementAnomalies(
           severity: 'CRITICAL',
           title: `Sepet Küçültme / Kalem Eksiltme İllüzyonu (${missing} Kalem Eksik)`,
           category: dsc.category || 'Genel',
-          materialName: `${items.length} Kalem Teklif ➔ ${matched.items.length} Kalem Fatura`,
+          materialName: `${items.length} Kalem Teklif ➔ ${matchedMaterialItems.length} Kalem Fatura`,
           supplier: dsc.vendorName,
           vendorName: dsc.vendorName,
           jobsiteName: dsc.jobsiteName,
@@ -946,7 +952,7 @@ export function detectSuperIntelligentProcurementAnomalies(
           date: dsc.orderDate || new Date().toISOString().split('T')[0],
           evidence: [
             `İlk Teklifte: ${items.length} kalem malzeme`,
-            `Kesilen Faturada: ${matched.items.length} kalem malzeme`,
+            `Kesilen Faturada: ${matchedMaterialItems.length} kalem malzeme`,
             `Beyan Edilen İndirim: ${formatRuble(claimedDiscount)}`
           ],
           recommendation: `Fatura tutarındaki düşüş kalem çıkarılmasından kaynaklanmaktadır. Birim fiyatlar birebir kontrol edilmelidir.`

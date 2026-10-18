@@ -23,7 +23,7 @@ export const translations: Record<Language, Record<string, string>> = {
     navGroupManagement: 'Şantiye & Yönetim',
     navDashboard: 'Genel Bakış ve Dashboard',
     navPreApprovalAudit: 'Hızlı Ön Onay Fiyat Denetimi',
-    navDiscountEntry: 'Şef İndirim & Tasarruf Girişi',
+    navDiscountEntry: 'Şef İndirim & TDF Teklif Merkezi',
     navComparativeOffers: '1M+ ₽ Karşılaştırmalı Teklif (TDF)',
     navInvoiceAI: 'AI Otomatik Fatura Okuma',
     navAnomalies: 'Anomali & Fiyat Artış Paneli',
@@ -34,7 +34,7 @@ export const translations: Record<Language, Record<string, string>> = {
     navPerformance: 'Performans & İndirim Raporu',
 
     // Sub-item descriptions TR
-    subDescDiscountEntry: 'Tedarikçi pazarlıkları, teklif kıyaslama ve tasarruf kayıtları',
+    subDescDiscountEntry: 'Çoklu teklif (TDF), 1-5 tur ara pazarlık, birim dönüşümü ve indirim kayıt merkezi',
     subDescComparativeOffers: '1.000.000 ₽ üzeri TDF & çoklu teklif analizi ile indirim girişi',
     subDescPreAudit: 'Satınalma onayı öncesi piyasa ve bütçe fiyat denetimi',
     subDescInvoiceAI: 'Fatura, irsaliye ve çeklerden otomatik AI veri okuma',

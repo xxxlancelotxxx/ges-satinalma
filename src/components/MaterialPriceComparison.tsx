@@ -1,6 +1,13 @@
 import { useAuth } from '../context/AuthContext';
 import { normalizeCategoryName, CANONICAL_CATEGORIES, sortCategoriesByPriority, ensureRussianOriginalName } from '../utils/categoryClassifier';
 import { analyzeMaterialSegment } from '../utils/materialSegmentIntelligence';
+import {
+  DualComparisonLens,
+  CrossBrandEquivalentFamily,
+  buildMode1AppleToAppleComparisons,
+  buildMode2CrossBrandFamilies,
+  findCheaperEquivalentBrandSuggestion
+} from '../utils/dualMaterialComparisonEngine';
 import { SearchableFilterDropdown } from './SearchableFilterDropdown';
 import { DateRangeFilterDropdown } from './DateRangeFilterDropdown';
 import { DateFilterState, matchesDateFilter } from '../utils/filterHelpers';
@@ -84,6 +91,75 @@ interface Props {
   onDeleteInvoice?: (id: string) => void | Promise<void>;
 }
 
+// Origin and Source Identification Helpers
+export const isPrizmaHistoryRecord = (h: any): boolean => {
+  if (!h) return false;
+  if (h.origin === 'prizma') return true;
+  if (h.origin === 'ges_archive') return false;
+  const invId = String(h.invoiceId || '');
+  if (invId.startsWith('inv_prizma_') || invId.startsWith('prizma_')) return true;
+  // If invoiceId starts with inv_sync_, inv_cmp_, or inv_ (timestamp), it's a GES Arşiv invoice!
+  if (invId.startsWith('inv_sync_') || invId.startsWith('inv_cmp_') || /^inv_\d+/.test(invId)) return false;
+  return Boolean(h.prizmaSource);
+};
+
+export const isGesArchiveHistoryRecord = (h: any): boolean => {
+  return !isPrizmaHistoryRecord(h);
+};
+
+export function recalculateMaterialComparisonForSource(
+  c: MaterialComparison,
+  sourceFilter: 'all' | 'prizma_only' | 'local_only'
+): MaterialComparison | null {
+  if (sourceFilter === 'all') {
+    return c;
+  }
+
+  const isMatching = sourceFilter === 'prizma_only' ? isPrizmaHistoryRecord : isGesArchiveHistoryRecord;
+  const filteredHistory = (c.history || []).filter(isMatching);
+
+  if (filteredHistory.length === 0) {
+    return null;
+  }
+
+  let totalSpend = 0;
+  let totalQty = 0;
+  filteredHistory.forEach(h => {
+    const qty = Number(h.normalizedQuantity ?? h.quantity) || 0;
+    const price = Number(h.normalizedUnitPrice ?? h.unitPrice) || 0;
+    const spend = (Number(h.originalUnitPrice ?? price) || 0) * (Number(h.originalQuantity ?? qty) || 1);
+    totalSpend += spend;
+    totalQty += qty;
+  });
+
+  const unitPrices = filteredHistory.map(h => Number(h.normalizedUnitPrice ?? h.unitPrice) || 0).filter(p => p > 0);
+  const minUnitPrice = unitPrices.length > 0 ? Math.min(...unitPrices) : 0;
+  const maxUnitPrice = unitPrices.length > 0 ? Math.max(...unitPrices) : 0;
+  const averageUnitPrice = totalQty > 0 ? (totalSpend / totalQty) : (unitPrices.length > 0 ? unitPrices.reduce((a, b) => a + b, 0) / unitPrices.length : 0);
+
+  let priceDifferencePercentage = 0;
+  if (minUnitPrice > 0 && maxUnitPrice > minUnitPrice) {
+    priceDifferencePercentage = Math.round(((maxUnitPrice - minUnitPrice) / minUnitPrice) * 100);
+  }
+
+  const cheapestEntry = filteredHistory.find(h => (Number(h.normalizedUnitPrice ?? h.unitPrice) || 0) === minUnitPrice);
+  const priciestEntry = filteredHistory.find(h => (Number(h.normalizedUnitPrice ?? h.unitPrice) || 0) === maxUnitPrice);
+
+  return {
+    ...c,
+    history: filteredHistory,
+    totalQuantityPurchased: Number(totalQty.toFixed(2)),
+    totalSpend: Math.round(totalSpend),
+    minUnitPrice: Number(minUnitPrice.toFixed(2)),
+    maxUnitPrice: Number(maxUnitPrice.toFixed(2)),
+    averageUnitPrice: Number(averageUnitPrice.toFixed(2)),
+    avgUnitPrice: Number(averageUnitPrice.toFixed(2)),
+    priceDifferencePercentage,
+    cheapestJobsite: cheapestEntry?.jobsiteName || c.cheapestJobsite,
+    priciestJobsite: priciestEntry?.jobsiteName || c.priciestJobsite,
+  };
+}
+
 export const MaterialPriceComparison: React.FC<Props> = ({
   comparisons,
   invoices = [],
@@ -117,6 +193,16 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const [comparisonModeFilter, setComparisonModeFilter] = useState<'ALL' | 'COMMODITY_STANDARD' | 'BRAND_SEGMENTED'>('ALL');
   const [qualitySegmentFilter, setQualitySegmentFilter] = useState<'ALL' | 'PREMIUM' | 'STANDARD' | 'ECONOMY'>('ALL');
   const [sortBy, setSortBy] = useState<'gap' | 'spend' | 'name' | 'qty'>('gap');
+
+  // Dual Comparison Lens State:
+  // MODE_1_APPLE_TO_APPLE: Same brand + same spec (or GOST commodity) across jobsites/vendors
+  // MODE_2_BRAND_EQUIVALENT: Different brands with identical original technical specs (Knauf vs Volma, Icopal vs TechnoNICOL)
+  const [dualComparisonLens, setDualComparisonLens] = useState<DualComparisonLens>('MODE_1_APPLE_TO_APPLE');
+  const [simSelectedFamilyId, setSimSelectedFamilyId] = useState<string>('');
+  const [simSourceBrandKey, setSimSourceBrandKey] = useState<string>('');
+  const [simTargetBrandKey, setSimTargetBrandKey] = useState<string>('');
+  const [simCustomQty, setSimCustomQty] = useState<string>('');
+  const [mode2SearchTerm, setMode2SearchTerm] = useState<string>('');
 
   // Handle external navigation (from Prizma Invoices, Drive, Pre-Approval, etc.)
   useEffect(() => {
@@ -246,7 +332,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   };
 
   // Valid non-service materials
-  const validComparisons = useMemo(() => {
+  const baseComparisons = useMemo(() => {
     return comparisons.filter(c => {
       const lowerName = c.materialName.toLowerCase();
       const lowerCat = c.category.toLowerCase();
@@ -274,6 +360,65 @@ export const MaterialPriceComparison: React.FC<Props> = ({
       return !isService;
     }).map(c => ({...c, category: normalizeCategoryName(c.category, c.materialName)}));
   }, [comparisons]);
+
+  // Counts for each source toggle
+  const sourceCounts = useMemo(() => {
+    let all = baseComparisons.length;
+    let prizma = 0;
+    let ges = 0;
+    baseComparisons.forEach(c => {
+      if (c.history && c.history.some(isPrizmaHistoryRecord)) prizma++;
+      if (c.history && c.history.some(isGesArchiveHistoryRecord)) ges++;
+    });
+    return { all, prizma, ges };
+  }, [baseComparisons]);
+
+  // Source-filtered raw comparisons
+  const sourceFilteredRawComparisons = useMemo(() => {
+    if (prizmaSourceFilter === 'all') {
+      return baseComparisons;
+    }
+    const res: MaterialComparison[] = [];
+    baseComparisons.forEach(c => {
+      const recalculated = recalculateMaterialComparisonForSource(c, prizmaSourceFilter);
+      if (recalculated) {
+        res.push(recalculated);
+      }
+    });
+    return res;
+  }, [baseComparisons, prizmaSourceFilter]);
+
+  // Mode 1 (Apple-to-Apple): Strictly separates different brands for brand-sensitive materials based on originalName,
+  // while merging different vendor phrasings of the same brand & spec, and keeping GOST commodities unified.
+  const validComparisons = useMemo(() => {
+    return buildMode1AppleToAppleComparisons(sourceFilteredRawComparisons);
+  }, [sourceFilteredRawComparisons]);
+
+  // Mode 2 (Cross-Brand Equivalent Economy): Groups identical original technical specs across different brands
+  const mode2CrossBrandFamilies = useMemo<CrossBrandEquivalentFamily[]>(() => {
+    return buildMode2CrossBrandFamilies(sourceFilteredRawComparisons);
+  }, [sourceFilteredRawComparisons]);
+
+  // Initialize Mode 2 Simulator selection when families load
+  useEffect(() => {
+    if (mode2CrossBrandFamilies.length > 0) {
+      const currentFam = mode2CrossBrandFamilies.find(f => f.familyId === simSelectedFamilyId) || mode2CrossBrandFamilies[0];
+      if (!simSelectedFamilyId || !mode2CrossBrandFamilies.some(f => f.familyId === simSelectedFamilyId)) {
+        setSimSelectedFamilyId(currentFam.familyId);
+      }
+      if (currentFam && currentFam.brands.length >= 2) {
+        const priciest = currentFam.priciestBrand;
+        const cheapest = currentFam.cheapestBrand;
+        if (!simSourceBrandKey || !currentFam.brands.some(b => b.brandKey === simSourceBrandKey)) {
+          setSimSourceBrandKey(priciest.brandKey);
+          setSimCustomQty(String(priciest.totalQuantity || 100));
+        }
+        if (!simTargetBrandKey || !currentFam.brands.some(b => b.brandKey === simTargetBrandKey)) {
+          setSimTargetBrandKey(cheapest.brandKey);
+        }
+      }
+    }
+  }, [mode2CrossBrandFamilies, simSelectedFamilyId]);
 
   useEffect(() => {
     if (validComparisons.length > 0) {
@@ -562,7 +707,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   }, [filteredMaterials]);
 
   const activeComparison =
-    comparisons.find(c => (c.id && c.id === selectedMaterialName) || `${c.materialName}___${c.unit}` === selectedMaterialName || c.materialName === selectedMaterialName) || comparisons[0];
+    validComparisons.find(c => (c.id && c.id === selectedMaterialName) || `${c.materialName}___${c.unit}` === selectedMaterialName || c.materialName === selectedMaterialName) || validComparisons[0] || comparisons[0];
 
   // AI Normalize Handler
   const handleNormalizeAI = async () => {
@@ -701,8 +846,8 @@ export const MaterialPriceComparison: React.FC<Props> = ({
       }))
     : [];
 
-  const materialsWithGapCount = comparisons.filter(c => c.priceDifferencePercentage > 0).length;
-  const multipleUnitsCount = comparisons.filter(c => c.hasMultipleUnits || (c.detectedUnits && c.detectedUnits.length > 1)).length;
+  const materialsWithGapCount = validComparisons.filter(c => c.priceDifferencePercentage > 0).length;
+  const multipleUnitsCount = validComparisons.filter(c => c.hasMultipleUnits || (c.detectedUnits && c.detectedUnits.length > 1)).length;
 
   const exportToExcel = () => {
     const dataToExport = filteredMaterials.flatMap((mat) =>
@@ -812,7 +957,54 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                     title={seg.comparisonRuleSummary}
                   >
                     <span>{seg.qualitySegmentLabel}</span>
+                    {!isCommodity && seg.brand && seg.brand !== 'Standart Seri' && (
+                      <span className="ml-1 font-mono underline decoration-dotted">• Marka: {seg.brand}</span>
+                    )}
                   </span>
+                );
+              })()}
+              {((mat as any).mergedOriginalWritings && (mat as any).mergedOriginalWritings.length > 1) && (
+                <span
+                  className="text-[10px] font-extrabold text-teal-800 bg-teal-50 px-2 py-0.5 rounded border border-teal-200 flex items-center space-x-1"
+                  title={`Farklı firmaların faturalarında farklı yazılmış olsa da aynı orijinal teknik ürün & marka olduğu anlaşılıp eşitlenen yazımlar:\n• ${(mat as any).mergedOriginalWritings.slice(0, 5).join('\n• ')}`}
+                >
+                  <CheckCircle2 className="w-2.5 h-2.5 text-teal-600" />
+                  <span>{(mat as any).mergedOriginalWritings.length} Farklı Firma Yazımı Eşitlendi</span>
+                </span>
+              )}
+              {(() => {
+                const eqSug = findCheaperEquivalentBrandSuggestion({
+                  originalName: mat.history?.[0]?.originalName,
+                  materialName: mat.materialName,
+                  category: mat.category,
+                  unit: mat.unit,
+                  currentUnitPrice: mat.avgUnitPrice,
+                  quantity: mat.totalQuantityPurchased,
+                  families: mode2CrossBrandFamilies
+                });
+                if (!eqSug) return null;
+                return (
+                  <button
+                    type="button"
+                    onClick={e => {
+                      e.stopPropagation();
+                      const targetFam = mode2CrossBrandFamilies.find(
+                        f => f.canonicalFamilyTitleRu === eqSug.familyTitleRu
+                      );
+                      if (targetFam) {
+                        setSimSelectedFamilyId(targetFam.familyId);
+                        setSimSourceBrandKey(targetFam.priciestBrand.brandKey);
+                        setSimTargetBrandKey(targetFam.cheapestBrand.brandKey);
+                        setSimCustomQty(String(mat.totalQuantityPurchased || 100));
+                      }
+                      setDualComparisonLens('MODE_2_BRAND_EQUIVALENT');
+                    }}
+                    className="text-[10px] font-extrabold text-amber-900 bg-amber-100 hover:bg-amber-200 px-2 py-0.5 rounded border border-amber-300 flex items-center space-x-1 transition-colors cursor-pointer"
+                    title={`Muadil Marka Ekonomi Fırsatı: ${eqSug.suggestedBrandDisplay} tercih edilseydi birim başına ${formatRuble(eqSug.unitSavingsRub)} (%${eqSug.savingsPercentage}) tasarruf sağlanabilirdi. Tıklayarak 2. Seçenekte simüle edin.`}
+                  >
+                    <Zap className="w-2.5 h-2.5 text-amber-700" />
+                    <span>💡 Muadil Marka: {eqSug.suggestedBrandDisplay} (-%{eqSug.savingsPercentage})</span>
+                  </button>
                 );
               })()}
               {hasMergedItems && (
@@ -824,11 +1016,16 @@ export const MaterialPriceComparison: React.FC<Props> = ({
             </div>
           </td>
 
-          <td className="py-3.5 px-4 text-right font-black font-mono text-indigo-950 text-sm">
-            {formatRuble(mat.avgUnitPrice)}{' '}
-            <span className="text-[10px] text-slate-400 font-normal">
-              /{mat.unit}
-            </span>
+          <td className="py-3.5 px-4 text-right font-mono tabular-nums">
+            <div className="font-black text-indigo-950 text-sm">
+              {formatRuble(mat.avgUnitPrice)}{' '}
+              <span className="text-[10px] text-slate-400 font-normal">
+                /{mat.unit}
+              </span>
+            </div>
+            <div className="text-[10px] font-semibold text-slate-500 mt-0.5">
+              KDV Dahil: {formatRuble(mat.avgGrossUnitPrice || Number((mat.avgUnitPrice * 1.22).toFixed(2)))}
+            </div>
           </td>
 
           {/* Cheapest Jobsite */}
@@ -837,11 +1034,14 @@ export const MaterialPriceComparison: React.FC<Props> = ({
               <div className="font-bold text-emerald-900 text-xs">
                 {mat.cheapestJobsiteName}
               </div>
-              <div className="font-black text-emerald-700 font-mono text-xs">
+              <div className="font-black text-emerald-700 font-mono tabular-nums text-xs">
                 {formatRuble(mat.minUnitPrice)}{' '}
                 <span className="text-[10px] font-normal text-slate-500">
-                  /{mat.unit}
+                  /{mat.unit} (Net)
                 </span>
+              </div>
+              <div className="text-[10px] font-mono tabular-nums text-emerald-800/80">
+                Brüt: {formatRuble(mat.minGrossUnitPrice || Number((mat.minUnitPrice * 1.22).toFixed(2)))}
               </div>
             </div>
           </td>
@@ -849,17 +1049,22 @@ export const MaterialPriceComparison: React.FC<Props> = ({
           {/* Priciest Jobsite */}
           <td className="py-3.5 px-4">
             {mat.minUnitPrice === mat.maxUnitPrice ? (
-              <span className="text-slate-400 text-xs font-medium">Tek fiyat</span>
+              <span className="inline-flex items-center space-x-1 px-2 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold font-mono tabular-nums">
+                <span>✓ Sabit Net Fiyat</span>
+              </span>
             ) : (
               <div className="bg-rose-50 border border-rose-200 px-2.5 py-1.5 rounded-lg inline-block">
                 <div className="font-bold text-rose-900 text-xs">
                   {mat.priciestJobsiteName}
                 </div>
-                <div className="font-black text-rose-700 font-mono text-xs">
+                <div className="font-black text-rose-700 font-mono tabular-nums text-xs">
                   {formatRuble(mat.maxUnitPrice)}{' '}
                   <span className="text-[10px] font-normal text-slate-500">
-                    /{mat.unit}
+                    /{mat.unit} (Net)
                   </span>
+                </div>
+                <div className="text-[10px] font-mono tabular-nums text-rose-800/80">
+                  Brüt: {formatRuble(mat.maxGrossUnitPrice || Number((mat.maxUnitPrice * 1.22).toFixed(2)))}
                 </div>
               </div>
             )}
@@ -1075,9 +1280,20 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                             </td>
 
                             <td className="py-3 px-4 font-mono text-[11px]">
-                              <div className="flex items-center space-x-1 text-slate-200 font-bold">
-                                <FileText className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                                <span>{hist.invoiceNumber}</span>
+                              <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
+                                <div className="flex items-center space-x-1 text-slate-200 font-bold">
+                                  <FileText className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                                  <span>{hist.invoiceNumber}</span>
+                                </div>
+                                {isPrizmaHistoryRecord(hist) ? (
+                                  <span className="px-1.5 py-0.2 bg-blue-900/60 text-blue-300 border border-blue-500/40 rounded text-[9px] font-bold">
+                                    Prizma ERP
+                                  </span>
+                                ) : (
+                                  <span className="px-1.5 py-0.2 bg-emerald-950/70 text-emerald-300 border border-emerald-500/40 rounded text-[9px] font-bold">
+                                    GES Arşiv
+                                  </span>
+                                )}
                               </div>
                               <div className="text-[10px] text-slate-400 mt-0.5">
                                 {hist.date}
@@ -1407,48 +1623,89 @@ export const MaterialPriceComparison: React.FC<Props> = ({
             {/* 4 KPI Summary Cards */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
               <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Ortalama Birim Fiyat</div>
-                <div className="text-xl font-black text-indigo-950 font-mono mt-1">
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Ort. Birim Fiyat (KDV Hariç Net)</div>
+                <div className="text-xl font-black text-indigo-950 font-mono tabular-nums mt-1">
                   {formatRuble(mat.avgUnitPrice)} <span className="text-xs font-normal text-slate-400">/{mat.unit}</span>
                 </div>
-                <div className="text-[11px] text-slate-500 mt-1">Tüm alımların ağırlıklı ortalaması</div>
+                <div className="text-[11px] font-mono tabular-nums font-semibold text-slate-500 mt-1">
+                  KDV Dahil (Brüt): {formatRuble(mat.avgGrossUnitPrice || Number((mat.avgUnitPrice * 1.22).toFixed(2)))}
+                </div>
               </div>
 
               <div className="bg-emerald-50/70 rounded-2xl p-4 border border-emerald-200 shadow-xs">
-                <div className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider">En Uygun Birim Fiyat</div>
-                <div className="text-xl font-black text-emerald-700 font-mono mt-1">
+                <div className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider">En Uygun Net Birim Fiyat</div>
+                <div className="text-xl font-black text-emerald-700 font-mono tabular-nums mt-1">
                   {formatRuble(mat.minUnitPrice)} <span className="text-xs font-normal text-emerald-600">/{mat.unit}</span>
                 </div>
-                <div className="text-[11px] font-bold text-emerald-900 mt-1 truncate" title={mat.cheapestJobsiteName}>
+                <div className="text-[11px] font-mono tabular-nums font-semibold text-emerald-800 mt-0.5">
+                  KDV Dahil: {formatRuble(mat.minGrossUnitPrice || Number((mat.minUnitPrice * 1.22).toFixed(2)))}
+                </div>
+                <div className="text-[11px] font-bold text-emerald-900 mt-0.5 truncate" title={mat.cheapestJobsiteName}>
                   Şantiye: {mat.cheapestJobsiteName}
                 </div>
               </div>
 
               <div className="bg-rose-50/70 rounded-2xl p-4 border border-rose-200 shadow-xs">
-                <div className="text-[10px] font-bold text-rose-800 uppercase tracking-wider">En Yüksek Birim Fiyat</div>
-                <div className="text-xl font-black text-rose-700 font-mono mt-1">
+                <div className="text-[10px] font-bold text-rose-800 uppercase tracking-wider">En Yüksek Net Birim Fiyat</div>
+                <div className="text-xl font-black text-rose-700 font-mono tabular-nums mt-1">
                   {formatRuble(mat.maxUnitPrice)} <span className="text-xs font-normal text-rose-600">/{mat.unit}</span>
                 </div>
-                <div className="text-[11px] font-bold text-rose-900 mt-1 truncate" title={mat.priciestJobsiteName}>
+                <div className="text-[11px] font-mono tabular-nums font-semibold text-rose-800 mt-0.5">
+                  KDV Dahil: {formatRuble(mat.maxGrossUnitPrice || Number((mat.maxUnitPrice * 1.22).toFixed(2)))}
+                </div>
+                <div className="text-[11px] font-bold text-rose-900 mt-0.5 truncate" title={mat.priciestJobsiteName}>
                   Şantiye: {mat.priciestJobsiteName}
                 </div>
               </div>
 
               <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Fiyat Makası & Toplam Hacim</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Net Fiyat Makası & Toplam Hacim</div>
                 <div className="flex items-baseline justify-between mt-1">
-                  <span className={`text-xl font-black font-mono ${mat.priceDifferencePercentage > 15 ? 'text-rose-600' : 'text-amber-600'}`}>
+                  <span className={`text-xl font-black font-mono tabular-nums ${mat.priceDifferencePercentage > 15 ? 'text-rose-600' : mat.priceDifferencePercentage > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
                     %{mat.priceDifferencePercentage} Fark
                   </span>
-                  <span className="text-xs font-mono font-bold text-slate-700">
+                  <span className="text-xs font-mono tabular-nums font-bold text-slate-700">
                     {mat.totalQuantityPurchased} {mat.unit}
                   </span>
                 </div>
-                <div className="text-[11px] font-mono font-bold text-slate-600 mt-1">
-                  Toplam: {formatRuble(mat.totalSpend)}
+                <div className="text-[11px] font-mono tabular-nums font-bold text-slate-600 mt-1">
+                  Toplam Net: {formatRuble(mat.totalSpend)}
                 </div>
               </div>
             </div>
+
+            {/* Net Pricing & Zero-Freight Isolation Notice Banner */}
+            {(() => {
+              const freightEntries = mat.history.filter(h => {
+                const inv = invoices.find(i => i.invoiceNumber === h.invoiceNumber || i.id === h.invoiceId);
+                return (Number((h as any).excludedFreightAmount) || Number(inv?.excludedFreightAmount) || 0) > 0;
+              });
+              const totalExcludedFreight = freightEntries.reduce((sum, h) => {
+                const inv = invoices.find(i => i.invoiceNumber === h.invoiceNumber || i.id === h.invoiceId);
+                return sum + (Number((h as any).excludedFreightAmount) || Number(inv?.excludedFreightAmount) || 0);
+              }, 0);
+
+              return (
+                <div className="bg-emerald-50/90 border border-emerald-200 p-3.5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-emerald-950">
+                  <div className="flex items-start space-x-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-extrabold text-emerald-900">
+                        Standart Elma-Elma Kıyaslama: KDV Hariç (Net) & Nakliye Hariç Birim Fiyat
+                      </div>
+                      <p className="text-[11px] text-emerald-800 mt-0.5">
+                        Prizma ERP ve Satınalma Şefi faturaları arasındaki KDV (%20 / %22 НДС) ve nakliye farklarından kaynaklanan sahte sapmaları önlemek için tüm kıyaslamalar <strong>KDV Hariç Net Birim Fiyat</strong> üzerinden yapılmaktadır.
+                        {totalExcludedFreight > 0 && (
+                          <span className="ml-1 font-bold underline">
+                            Nakliye / Hizmet Bedeli ({formatRuble(totalExcludedFreight)}) malzeme birim fiyat kıyaslamasından hariç tutulmuştur.
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Multi-Unit Construction Equivalence Banner */}
             {(mat.hasMultipleUnits || (mat.detectedUnits && mat.detectedUnits.length > 1)) && (
@@ -1581,9 +1838,20 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                           </td>
 
                           <td className="py-3 px-4 font-mono text-[11px]">
-                            <div className="flex items-center space-x-1 text-slate-900 font-bold group-hover:text-indigo-600">
-                              <FileText className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                              <span>{hist.invoiceNumber}</span>
+                            <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
+                              <div className="flex items-center space-x-1 text-slate-900 font-bold group-hover:text-indigo-600">
+                                <FileText className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                                <span>{hist.invoiceNumber}</span>
+                              </div>
+                              {isPrizmaHistoryRecord(hist) ? (
+                                <span className="px-1.5 py-0.2 bg-blue-100 text-blue-800 border border-blue-200 rounded text-[9px] font-bold">
+                                  Prizma ERP
+                                </span>
+                              ) : (
+                                <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-800 border border-emerald-200 rounded text-[9px] font-bold">
+                                  GES Arşiv
+                                </span>
+                              )}
                             </div>
                             <div className="text-[10px] text-slate-500 mt-0.5">
                               {hist.date}
@@ -1640,15 +1908,27 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                             )}
                           </td>
 
-                          <td className="py-3 px-4 text-right font-black font-mono text-slate-900 text-sm">
+                          <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-900 text-sm">
                             {priceDisplayMode === 'normalized' ? (
                               <div>
-                                <div className="text-emerald-700">
+                                <div className="text-emerald-700 font-black">
                                   {formatRuble(hist.unitPrice)}{' '}
                                   <span className="text-[10px] font-normal text-slate-400">
-                                    /{hist.normalizedUnit || mat.unit}
+                                    /{hist.normalizedUnit || mat.unit} (Net)
                                   </span>
                                 </div>
+                                <div className="text-[10px] font-semibold text-slate-500 mt-0.5">
+                                  KDV Dahil (%{hist.vatPercentage || 22} НДС):{' '}
+                                  {formatRuble(
+                                    hist.grossUnitPrice ||
+                                      Number((hist.unitPrice * (1 + (hist.vatPercentage || 22) / 100)).toFixed(2))
+                                  )}
+                                </div>
+                                {((Number((hist as any).excludedFreightAmount) || Number(targetInvoice?.excludedFreightAmount) || 0) > 0) && (
+                                  <div className="text-[9px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded inline-block mt-0.5">
+                                    🚚 Nakliye Hariç ({formatRuble(Number((hist as any).excludedFreightAmount) || Number(targetInvoice?.excludedFreightAmount) || 0)})
+                                  </div>
+                                )}
                                 {hist.conversionApplied && (
                                   <div
                                     className="text-[10px] font-normal text-amber-700 mt-0.5 flex items-center justify-end space-x-1"
@@ -1665,10 +1945,19 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                               </div>
                             ) : (
                               <div>
-                                {formatRuble(hist.originalUnitPrice || hist.unitPrice)}{' '}
-                                <span className="text-[10px] font-normal text-slate-400">
-                                  /{hist.originalUnit || mat.unit}
-                                </span>
+                                <div className="font-black">
+                                  {formatRuble(hist.originalUnitPrice || hist.unitPrice)}{' '}
+                                  <span className="text-[10px] font-normal text-slate-400">
+                                    /{hist.originalUnit || mat.unit} (Net)
+                                  </span>
+                                </div>
+                                <div className="text-[10px] font-semibold text-slate-500 mt-0.5">
+                                  KDV Dahil (%{hist.vatPercentage || 22} НДС):{' '}
+                                  {formatRuble(
+                                    hist.grossUnitPrice ||
+                                      Number(((hist.originalUnitPrice || hist.unitPrice) * (1 + (hist.vatPercentage || 22) / 100)).toFixed(2))
+                                  )}
+                                </div>
                               </div>
                             )}
                           </td>
@@ -1851,7 +2140,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
           <div className="bg-slate-800/90 border border-slate-700/80 px-4 py-2.5 rounded-xl text-center min-w-28">
             <p className="text-[10px] text-slate-400 font-medium uppercase">Kıyaslanan Kalem</p>
             <p className="text-lg font-black text-amber-400 font-mono mt-0.5">
-              {comparisons.length} Malzeme
+              {validComparisons.length} Malzeme
             </p>
           </div>
 
@@ -1863,6 +2152,446 @@ export const MaterialPriceComparison: React.FC<Props> = ({
           </div>
         </div>
       </div>
+
+      {/* DUAL COMPARISON LENS SWITCHER (1. SEÇENEK: ELMA-ELMA vs 2. SEÇENEK: MUADİL MARKA EKONOMİSİ) */}
+      <div className="bg-white rounded-2xl border-2 border-indigo-200/80 p-4 shadow-sm space-y-3">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div>
+            <div className="text-xs font-extrabold text-indigo-700 uppercase tracking-wider flex items-center space-x-1.5">
+              <Layers className="w-4 h-4 text-indigo-600" />
+              <span>Akıllı Çift Modlu Malzeme Kıyaslama Motoru (Faturadaki Orijinal Yazım Bazlı)</span>
+            </div>
+            <p className="text-xs text-slate-600 mt-0.5">
+              Türkçe çeviri hatalarını önlemek için <strong>faturadaki orijinal Rusça metni</strong> baz alır; farklı firmaların farklı fatura yazımlarını mantık yürüterek eşitler.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setDualComparisonLens('MODE_1_APPLE_TO_APPLE')}
+              className={`px-4 py-3 rounded-xl border text-left transition-all cursor-pointer flex items-start space-x-3 ${
+                dualComparisonLens === 'MODE_1_APPLE_TO_APPLE'
+                  ? 'bg-indigo-600 text-white border-indigo-700 shadow-md ring-2 ring-indigo-300'
+                  : 'bg-slate-50 hover:bg-slate-100 text-slate-800 border-slate-200'
+              }`}
+            >
+              <CheckCircle2 className={`w-5 h-5 shrink-0 mt-0.5 ${dualComparisonLens === 'MODE_1_APPLE_TO_APPLE' ? 'text-amber-300' : 'text-indigo-600'}`} />
+              <div>
+                <div className="text-xs font-black whitespace-nowrap">
+                  1. Seçenek: Elma-Elma Birebir Kıyaslama
+                </div>
+                <div className={`text-[11px] mt-0.5 ${dualComparisonLens === 'MODE_1_APPLE_TO_APPLE' ? 'text-indigo-100' : 'text-slate-500'}`}>
+                  Aynı Marka & Ölçü (Şantiye/Firma Denetimi) • Emtiada Marka Bağımsız ({validComparisons.length} Grup)
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setDualComparisonLens('MODE_2_BRAND_EQUIVALENT')}
+              className={`px-4 py-3 rounded-xl border text-left transition-all cursor-pointer flex items-start space-x-3 ${
+                dualComparisonLens === 'MODE_2_BRAND_EQUIVALENT'
+                  ? 'bg-amber-600 text-white border-amber-700 shadow-md ring-2 ring-amber-300'
+                  : 'bg-amber-50/70 hover:bg-amber-100/80 text-amber-950 border-amber-200'
+              }`}
+            >
+              <Scale className={`w-5 h-5 shrink-0 mt-0.5 ${dualComparisonLens === 'MODE_2_BRAND_EQUIVALENT' ? 'text-white' : 'text-amber-600'}`} />
+              <div>
+                <div className="text-xs font-black whitespace-nowrap">
+                  2. Seçenek: Muadil Marka & Ekonomi Analizi
+                </div>
+                <div className={`text-[11px] mt-0.5 ${dualComparisonLens === 'MODE_2_BRAND_EQUIVALENT' ? 'text-amber-100' : 'text-amber-800'}`}>
+                  Aynı Teknik Özellik, Farklı Marka (Knauf vs Volma / Icopal vs TechnoNICOL) ({mode2CrossBrandFamilies.length} Aile)
+                </div>
+              </div>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* MODE 2 WORKSPACE: CROSS-BRAND EQUIVALENT ECONOMY & INTERACTIVE SIMULATOR */}
+      {dualComparisonLens === 'MODE_2_BRAND_EQUIVALENT' && (() => {
+        const totalMode2EconomyRub = mode2CrossBrandFamilies.reduce((sum, f) => sum + f.totalPotentialEconomyRub, 0);
+        const topEconomyFamily = mode2CrossBrandFamilies[0];
+        const activeSimFamily = mode2CrossBrandFamilies.find(f => f.familyId === simSelectedFamilyId) || mode2CrossBrandFamilies[0];
+        const sourceBrandObj = activeSimFamily?.brands.find(b => b.brandKey === simSourceBrandKey) || activeSimFamily?.priciestBrand;
+        const targetBrandObj = activeSimFamily?.brands.find(b => b.brandKey === simTargetBrandKey) || activeSimFamily?.cheapestBrand;
+        const simQtyNum = Math.max(1, Number(simCustomQty) || sourceBrandObj?.totalQuantity || 100);
+        const unitDiffRub = sourceBrandObj && targetBrandObj ? Number((sourceBrandObj.avgUnitPrice - targetBrandObj.avgUnitPrice).toFixed(2)) : 0;
+        const totalSimSavingsRub = Math.round(unitDiffRub * simQtyNum);
+        const simSavingsPct = sourceBrandObj && sourceBrandObj.avgUnitPrice > 0
+          ? Number(((unitDiffRub / sourceBrandObj.avgUnitPrice) * 100).toFixed(1))
+          : 0;
+
+        const filteredMode2Families = mode2CrossBrandFamilies.filter(fam => {
+          const q = mode2SearchTerm.trim().toLowerCase();
+          if (!q) return true;
+          return (
+            fam.canonicalFamilyTitleRu.toLowerCase().includes(q) ||
+            fam.canonicalFamilyTitleTr.toLowerCase().includes(q) ||
+            fam.canonicalSpecLabel.toLowerCase().includes(q) ||
+            fam.brands.some(b =>
+              b.brandDisplay.toLowerCase().includes(q) ||
+              b.originalWritings.some(w => w.toLowerCase().includes(q))
+            )
+          );
+        });
+
+        return (
+          <div className="space-y-6">
+            {/* Mode 2 KPI Summary Strip */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-slate-900 text-white p-5 rounded-2xl border border-slate-800">
+                <div className="text-xs font-bold text-amber-400 uppercase tracking-wider">
+                  Otomatik En Ucuz Muadil Tasarruf Potansiyeli
+                </div>
+                <div className="text-2xl font-black font-mono tabular-nums text-emerald-400 mt-1">
+                  {formatRuble(totalMode2EconomyRub)}
+                </div>
+                <p className="text-[11px] text-slate-300 mt-1">
+                  Aynı teknik özellikteki pahalı markalar yerine en uygun muadil marka tercih edilseydi kazanılacak toplam ekonomi
+                </p>
+              </div>
+
+              <div className="bg-white p-5 rounded-2xl border border-slate-200">
+                <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  En Yüksek Marka Farkı Fırsatı
+                </div>
+                <div className="text-base font-black text-slate-900 mt-1 truncate">
+                  {topEconomyFamily ? topEconomyFamily.canonicalFamilyTitleTr : 'Muadil Aile Yok'}
+                </div>
+                {topEconomyFamily && (
+                  <div className="text-xs font-mono tabular-nums text-amber-700 font-bold mt-1">
+                    {topEconomyFamily.priciestBrand.brandDisplay} → {topEconomyFamily.cheapestBrand.brandDisplay} (%{topEconomyFamily.maxBrandPriceGapPct} Fark • {formatRuble(topEconomyFamily.totalPotentialEconomyRub)})
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-white p-5 rounded-2xl border border-slate-200">
+                <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  İncelenen Teknik Muadil Ailesi
+                </div>
+                <div className="text-2xl font-black font-mono tabular-nums text-indigo-950 mt-1">
+                  {mode2CrossBrandFamilies.length} Teknik Grup
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Standart emtialar (demir, çelik, beton) hariç; alçıpan, membran, izolasyon, sıva ve sarf grupları
+                </p>
+              </div>
+            </div>
+
+            {/* INTERACTIVE BRAND A vs BRAND B ECONOMY SIMULATOR */}
+            {activeSimFamily && sourceBrandObj && targetBrandObj && (
+              <div className="bg-slate-900 text-white p-6 rounded-2xl border border-slate-800 space-y-5">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+                  <div>
+                    <div className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center space-x-2">
+                      <Calculator className="w-4 h-4" />
+                      <span>Muadil Marka & Alternatif Ekonomi Simülatörü (Knauf vs Volma / Icopal vs TechnoNICOL)</span>
+                    </div>
+                    <h2 className="text-lg font-extrabold text-white mt-1">
+                      "Aynı Teknik Özellikte A Markası Yerine B Markasını Alsaydık Ne Kadar Ekonomi Yapardık?"
+                    </h2>
+                  </div>
+
+                  {/* Quick Preset Buttons */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {mode2CrossBrandFamilies.slice(0, 4).map(fam => {
+                      const isSelected = fam.familyId === activeSimFamily.familyId;
+                      return (
+                        <button
+                          key={fam.familyId}
+                          type="button"
+                          onClick={() => {
+                            setSimSelectedFamilyId(fam.familyId);
+                            setSimSourceBrandKey(fam.priciestBrand.brandKey);
+                            setSimTargetBrandKey(fam.cheapestBrand.brandKey);
+                            setSimCustomQty(String(fam.priciestBrand.totalQuantity || 100));
+                          }}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border whitespace-nowrap ${
+                            isSelected
+                              ? 'bg-amber-500 text-slate-950 border-amber-400'
+                              : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                          }`}
+                        >
+                          {fam.priciestBrand.brandDisplay.split(' ')[0]} vs {fam.cheapestBrand.brandDisplay.split(' ')[0]} ({fam.canonicalSpecLabel.split('•')[0].trim()})
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Controls Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-300 mb-1.5">
+                      1. Orijinal Teknik Malzeme Ailesi Seçin
+                    </label>
+                    <select
+                      value={activeSimFamily.familyId}
+                      onChange={e => {
+                        const nextFam = mode2CrossBrandFamilies.find(f => f.familyId === e.target.value);
+                        if (nextFam) {
+                          setSimSelectedFamilyId(nextFam.familyId);
+                          setSimSourceBrandKey(nextFam.priciestBrand.brandKey);
+                          setSimTargetBrandKey(nextFam.cheapestBrand.brandKey);
+                          setSimCustomQty(String(nextFam.priciestBrand.totalQuantity || 100));
+                        }
+                      }}
+                      className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-xs font-bold text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    >
+                      {mode2CrossBrandFamilies.map(fam => (
+                        <option key={fam.familyId} value={fam.familyId}>
+                          {fam.canonicalFamilyTitleTr} [{fam.canonicalSpecLabel}] ({fam.brands.length} Marka)
+                        </option>
+                      ))}
+                    </select>
+                    <div className="text-[11px] font-mono text-amber-300/90 mt-1 truncate">
+                      🇷🇺 {activeSimFamily.canonicalFamilyTitleRu}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-rose-300 mb-1.5">
+                      2. Alınan / Pahalı Marka (A Markası)
+                    </label>
+                    <select
+                      value={sourceBrandObj.brandKey}
+                      onChange={e => {
+                        setSimSourceBrandKey(e.target.value);
+                        const b = activeSimFamily.brands.find(x => x.brandKey === e.target.value);
+                        if (b) setSimCustomQty(String(b.totalQuantity || 100));
+                      }}
+                      className="w-full px-3 py-2.5 bg-slate-800 border border-rose-500/40 rounded-xl text-xs font-bold text-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                    >
+                      {activeSimFamily.brands.map(b => (
+                        <option key={b.brandKey} value={b.brandKey}>
+                          {b.brandDisplay} — Ort: {formatRuble(b.avgUnitPrice)}/{activeSimFamily.unit}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="text-[10px] font-mono text-slate-400 mt-1 truncate" title={sourceBrandObj.originalWritings[0]}>
+                      Fatura: "{sourceBrandObj.originalWritings[0] || activeSimFamily.canonicalFamilyTitleRu}"
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-emerald-300 mb-1.5">
+                      3. Alternatif Muadil Marka (B Markası)
+                    </label>
+                    <select
+                      value={targetBrandObj.brandKey}
+                      onChange={e => setSimTargetBrandKey(e.target.value)}
+                      className="w-full px-3 py-2.5 bg-slate-800 border border-emerald-500/40 rounded-xl text-xs font-bold text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      {activeSimFamily.brands.map(b => (
+                        <option key={b.brandKey} value={b.brandKey}>
+                          {b.brandDisplay} — Ort: {formatRuble(b.avgUnitPrice)}/{activeSimFamily.unit}
+                          {b.brandKey === activeSimFamily.cheapestBrand.brandKey ? ' (★ En Ekonomik Muadil)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="text-[10px] font-mono text-slate-400 mt-1 truncate" title={targetBrandObj.originalWritings[0]}>
+                      Fatura: "{targetBrandObj.originalWritings[0] || activeSimFamily.canonicalFamilyTitleRu}"
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-300 mb-1.5">
+                      4. Kıyaslanacak Alım Miktarı ({activeSimFamily.unit})
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={simCustomQty}
+                      onChange={e => setSimCustomQty(e.target.value)}
+                      className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-xs font-mono font-bold text-amber-300 focus:outline-none focus:ring-2 focus:ring-amber-500 tabular-nums"
+                    />
+                    <div className="text-[10px] text-slate-400 mt-1">
+                      {sourceBrandObj.brandDisplay} toplam alım: <strong className="font-mono">{sourceBrandObj.totalQuantity} {activeSimFamily.unit}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Simulation Result Banner */}
+                <div className="bg-slate-950/90 border border-slate-800 rounded-2xl p-4 grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
+                  <div className="space-y-1">
+                    <div className="text-[11px] text-slate-400">Seçilen Marka Dönüşümü</div>
+                    <div className="text-sm font-black text-white flex items-center space-x-2">
+                      <span className="text-rose-300">{sourceBrandObj.brandDisplay}</span>
+                      <ArrowRight className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span className="text-emerald-300">{targetBrandObj.brandDisplay}</span>
+                    </div>
+                    <div className="text-xs font-mono tabular-nums text-slate-300">
+                      {formatRuble(sourceBrandObj.avgUnitPrice)}/{activeSimFamily.unit} → {formatRuble(targetBrandObj.avgUnitPrice)}/{activeSimFamily.unit}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="text-[11px] text-slate-400">Birim Başına Fiyat Farkı & Oran</div>
+                    <div className={`text-lg font-black font-mono tabular-nums ${unitDiffRub > 0 ? 'text-amber-400' : 'text-slate-300'}`}>
+                      {unitDiffRub > 0 ? `-${formatRuble(unitDiffRub)} / ${activeSimFamily.unit}` : formatRuble(Math.abs(unitDiffRub))}
+                    </div>
+                    <div className="text-xs text-slate-300">
+                      {unitDiffRub > 0
+                        ? `Birim maliyette %${simSavingsPct} net ekonomi`
+                        : unitDiffRub < 0
+                        ? 'Seçilen alternatif marka daha pahalı'
+                        : 'Aynı marka seçildi'}
+                    </div>
+                  </div>
+
+                  <div className="bg-emerald-950/50 border border-emerald-500/30 p-3.5 rounded-xl text-right">
+                    <div className="text-[11px] font-bold text-emerald-300 uppercase">
+                      {simQtyNum} {activeSimFamily.unit} Alımda Net Ekonomi
+                    </div>
+                    <div className="text-2xl font-black font-mono tabular-nums text-emerald-400 mt-0.5">
+                      {totalSimSavingsRub > 0 ? formatRuble(totalSimSavingsRub) : '0 ₽'}
+                    </div>
+                    <div className="text-[10px] text-slate-300 mt-0.5">
+                      {formatRuble(Math.round(sourceBrandObj.avgUnitPrice * simQtyNum))} yerine {formatRuble(Math.round(targetBrandObj.avgUnitPrice * simQtyNum))} ödeme
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* MODE 2 FAMILIES TABLE */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="p-4 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-900">
+                    Teknik Muadil Aileleri & Markalar Arası Fiyat Kıyaslama Matrisi ({filteredMode2Families.length} Aile)
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Faturadaki orijinal yazıma göre teknik özellikleri ve kalınlıkları aynı olup markaları farklı olan malzemeler
+                  </p>
+                </div>
+
+                <div className="relative w-full sm:w-72">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    placeholder="Knauf, Volma, Icopal, ГКЛ, ЭПП ara..."
+                    value={mode2SearchTerm}
+                    onChange={e => setMode2SearchTerm(e.target.value)}
+                    className="w-full pl-9 pr-8 py-2 text-xs bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500 font-medium"
+                  />
+                </div>
+              </div>
+
+              <div className="divide-y divide-slate-200">
+                {filteredMode2Families.map((fam, idx) => (
+                  <div key={fam.familyId} className="p-5 hover:bg-slate-50/70 transition-colors space-y-4">
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-mono font-bold text-slate-400">#{idx + 1}</span>
+                          <span className="text-base font-black text-slate-900">
+                            {fam.canonicalFamilyTitleTr}
+                          </span>
+                          <span className="text-xs font-mono font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded border border-indigo-200">
+                            {fam.canonicalSpecLabel} • Birim: {fam.unit}
+                          </span>
+                        </div>
+                        <div className="text-xs font-mono text-slate-600">
+                          🇷🇺 Orijinal Teknik İmza: <strong>{fam.originalSpecSummary}</strong>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3 shrink-0">
+                        <div className="text-right">
+                          <div className="text-[10px] font-bold text-slate-500 uppercase">
+                            En Ucuz Muadile Geçiş Tasarrufu
+                          </div>
+                          <div className="text-base font-black font-mono tabular-nums text-emerald-700">
+                            {formatRuble(fam.totalPotentialEconomyRub)} (-%{fam.maxBrandPriceGapPct})
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSimSelectedFamilyId(fam.familyId);
+                            setSimSourceBrandKey(fam.priciestBrand.brandKey);
+                            setSimTargetBrandKey(fam.cheapestBrand.brandKey);
+                            setSimCustomQty(String(fam.priciestBrand.totalQuantity || 100));
+                            window.scrollTo({ top: 180, behavior: 'smooth' });
+                          }}
+                          className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center space-x-1.5"
+                        >
+                          <Calculator className="w-3.5 h-3.5" />
+                          <span>Simülatörde Kıyasla</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Side-by-Side Brand Cards within this Technical Family */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {fam.brands.map(b => {
+                        const isCheapest = b.brandKey === fam.cheapestBrand.brandKey;
+                        return (
+                          <div
+                            key={b.brandKey}
+                            className={`p-3.5 rounded-xl border ${
+                              isCheapest
+                                ? 'bg-emerald-50/60 border-emerald-300'
+                                : 'bg-white border-slate-200'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-sm font-black text-slate-900">
+                                {b.brandDisplay}
+                              </span>
+                              {isCheapest ? (
+                                <span className="text-[10px] font-extrabold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded border border-emerald-300">
+                                  ★ En Ekonomik Muadil
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-extrabold text-rose-800 bg-rose-100 px-2 py-0.5 rounded border border-rose-200 font-mono tabular-nums">
+                                  +%{b.diffVsCheapestPct} Daha Pahalı (+{formatRuble(b.diffVsCheapestRub)}/{fam.unit})
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="mt-2 flex items-baseline justify-between">
+                              <div>
+                                <span className="text-[11px] text-slate-500">Ort. Birim Fiyat: </span>
+                                <span className="text-base font-black font-mono tabular-nums text-slate-900">
+                                  {formatRuble(b.avgUnitPrice)}/{fam.unit}
+                                </span>
+                              </div>
+                              <div className="text-xs font-mono tabular-nums text-slate-600">
+                                {b.totalQuantity} {fam.unit}
+                              </div>
+                            </div>
+
+                            <div className="mt-2 text-[11px] font-mono text-slate-600 bg-slate-100/80 p-2 rounded border border-slate-200/80 truncate" title={b.originalWritings.join(' | ')}>
+                              🇷🇺 "{b.originalWritings[0] || fam.canonicalFamilyTitleRu}"
+                            </div>
+
+                            <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+                              <span className="truncate max-w-[60%]" title={b.jobsites.join(', ')}>
+                                Şantiye: {b.jobsites.join(', ') || 'Tüm Şantiyeler'}
+                              </span>
+                              {!isCheapest && b.potentialSavingsIfSwitchedToCheapest > 0 && (
+                                <span className="font-mono font-bold text-emerald-700 shrink-0">
+                                  Kazanç: {formatRuble(b.potentialSavingsIfSwitchedToCheapest)}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
 
       {/* Smart Construction Unit Normalization & AI Intelligence Callout */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950/70 to-slate-900 border border-indigo-500/30 p-4 sm:p-5 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4 text-xs text-slate-200 shadow-md">
@@ -2372,7 +3101,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
             </span>
           </label>
 
-          {/* Prizma ERP Source Filter Toggle */}
+          {/* Prizma ERP & GES Arşiv Source Filter Toggle */}
           <div className="inline-flex rounded-xl p-0.5 bg-slate-200/80 border border-slate-300 text-xs">
             <button
               type="button"
@@ -2383,7 +3112,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Tüm Kaynaklar
+              Tüm Kaynaklar ({sourceCounts.all})
             </button>
             <button
               type="button"
@@ -2393,22 +3122,23 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                   ? 'bg-blue-600 text-white shadow-xs'
                   : 'text-blue-700 hover:text-blue-900'
               }`}
-              title="Sadece son 3 aya ait Prizma ERP faturalarını göster"
+              title="Sadece Prizma ERP'den gelen faturaları ve miktarları göster"
             >
               <span className="font-black text-[11px]">П</span>
-              <span>Prizma ERP (Son 3 Ay)</span>
+              <span>Prizma ERP ({sourceCounts.prizma})</span>
             </button>
             <button
               type="button"
               onClick={() => setPrizmaSourceFilter('local_only')}
-              className={`px-2.5 py-1 font-bold rounded-lg transition-all ${
+              className={`px-2.5 py-1 font-bold rounded-lg transition-all flex items-center space-x-1 ${
                 prizmaSourceFilter === 'local_only'
-                  ? 'bg-white text-slate-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
+                  ? 'bg-emerald-600 text-white shadow-xs'
+                  : 'text-emerald-700 hover:text-emerald-900'
               }`}
-              title="Sadece GES arşivine yüklenen faturaları göster"
+              title="Sadece GES arşivine satınalma personeli ve şefleri tarafından yüklenen faturaları ve miktarları göster"
             >
-              GES Arşiv
+              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span>GES Arşiv ({sourceCounts.ges})</span>
             </button>
           </div>
 
@@ -3037,6 +3767,42 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                   </p>
                 </div>
               </div>
+
+              {/* VAT & Freight Sanitization Summary */}
+              {retroAuditModal.vatAndFreightSanitization && (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 space-y-2">
+                  <div className="text-xs font-black text-emerald-950 uppercase tracking-wider flex items-center space-x-1.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    <span>KDV (НДС %20/%22) & Nakliye (Доставка) Ayrıştırma Sonucu</span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                    <div className="bg-white p-2.5 rounded-xl border border-emerald-200">
+                      <p className="text-[10px] font-bold text-slate-500">Onarılan Fatura</p>
+                      <p className="text-base font-black font-mono tabular-nums text-emerald-800">
+                        {retroAuditModal.vatAndFreightSanitization.invoicesSanitized || 0}
+                      </p>
+                    </div>
+                    <div className="bg-white p-2.5 rounded-xl border border-emerald-200">
+                      <p className="text-[10px] font-bold text-slate-500">Net'e Çevrilen Kalem</p>
+                      <p className="text-base font-black font-mono tabular-nums text-emerald-800">
+                        {retroAuditModal.vatAndFreightSanitization.vatCorrectedItems || 0}
+                      </p>
+                    </div>
+                    <div className="bg-white p-2.5 rounded-xl border border-emerald-200">
+                      <p className="text-[10px] font-bold text-slate-500">Nakliye Ayrıştırılan</p>
+                      <p className="text-base font-black font-mono tabular-nums text-indigo-800">
+                        {retroAuditModal.vatAndFreightSanitization.freightIsolatedInvoices || 0}
+                      </p>
+                    </div>
+                    <div className="bg-white p-2.5 rounded-xl border border-emerald-200">
+                      <p className="text-[10px] font-bold text-slate-500">Normalize Kalem</p>
+                      <p className="text-base font-black font-mono tabular-nums text-slate-800">
+                        {retroAuditModal.vatAndFreightSanitization.itemsNormalized || 0}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Trade Breakdown */}
               {retroAuditModal.auditSummary && (

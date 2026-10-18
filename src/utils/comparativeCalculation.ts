@@ -6,6 +6,7 @@ import {
   TechnicalSpecs
 } from '../types';
 import { convertMaterialUnit } from './constructionUnitConverter';
+export { convertMaterialUnit };
 
 /**
  * Standardizes units to a common canonical unit for comparison

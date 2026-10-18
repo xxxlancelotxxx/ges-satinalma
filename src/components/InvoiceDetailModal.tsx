@@ -3,7 +3,7 @@ import { InvoiceRecord, Jobsite, PurchasingSupervisor, InvoiceItem } from '../ty
 import { formatRuble, formatRubleWithDecimals, openOriginalFileViewer, formatUploadDate, getSafeFileUrl } from '../utils/format';
 import { getPrizmaBtfUrl, getPrizmaStfUrl } from '../utils/prizmaUrlHelper';
 import { useAuth } from '../context/AuthContext';
-import { checkRecordPermission } from '../utils/permissions';
+import { checkRecordPermission, canonicalizeJobsiteId } from '../utils/permissions';
 import { ensureRussianOriginalName } from '../utils/categoryClassifier';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
@@ -36,6 +36,7 @@ interface Props {
   invoice: InvoiceRecord;
   jobsites?: Jobsite[];
   supervisors?: PurchasingSupervisor[];
+  initialIsEditing?: boolean;
   onClose: () => void;
   onNavigateToCompare?: (materialName: string) => void;
   onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => void | Promise<void>;
@@ -46,6 +47,7 @@ export const InvoiceDetailModal: React.FC<Props> = ({
   invoice,
   jobsites = [],
   supervisors = [],
+  initialIsEditing = false,
   onClose,
   onNavigateToCompare,
   onUpdateInvoice,
@@ -54,7 +56,7 @@ export const InvoiceDetailModal: React.FC<Props> = ({
   useModalBackHandler(true, onClose);
 
   const { user } = useAuth();
-  const perm = checkRecordPermission(user, invoice.uploadedBySupervisorId, invoice.uploadedBySupervisorName);
+  const perm = checkRecordPermission(user, invoice);
 
   // Tabs state
   const [activeTab, setActiveTab] = useState<'items' | 'document' | 'metadata'>('items');
@@ -71,7 +73,7 @@ export const InvoiceDetailModal: React.FC<Props> = ({
   const [displaySupervisorName, setDisplaySupervisorName] = useState<string>(invoice.uploadedBySupervisorName);
 
   // Edit form state
-  const [isEditing, setIsEditing] = useState<boolean>(false);
+  const [isEditing, setIsEditing] = useState<boolean>(Boolean(initialIsEditing));
   const [editJobsiteId, setEditJobsiteId] = useState<string>(invoice.jobsiteId || '');
   const [editSupervisorId, setEditSupervisorId] = useState<string>(invoice.uploadedBySupervisorId || '');
   const [editInvoiceNumber, setEditInvoiceNumber] = useState<string>(invoice.invoiceNumber || '');
@@ -83,17 +85,34 @@ export const InvoiceDetailModal: React.FC<Props> = ({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<boolean>(false);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
 
-  // Sync state when invoice changes
+  // Sync state when invoice changes or master lists load
   useEffect(() => {
-    setEditJobsiteId(invoice.jobsiteId || '');
-    setEditSupervisorId(invoice.uploadedBySupervisorId || '');
+    let initialJobId = invoice.jobsiteId || '';
+    if (loadedJobsites.length > 0 && !loadedJobsites.some(j => j.id === initialJobId)) {
+      const matchJob = loadedJobsites.find(j =>
+        (invoice.jobsiteName && j.name.toLowerCase() === invoice.jobsiteName.toLowerCase()) ||
+        j.id === canonicalizeJobsiteId(invoice.jobsiteId, invoice.jobsiteName)
+      );
+      if (matchJob) initialJobId = matchJob.id;
+    }
+
+    let initialSupId = invoice.uploadedBySupervisorId || '';
+    if (loadedSupervisors.length > 0 && !loadedSupervisors.some(s => s.id === initialSupId)) {
+      const matchSup = loadedSupervisors.find(s =>
+        invoice.uploadedBySupervisorName && s.name.toLowerCase() === invoice.uploadedBySupervisorName.toLowerCase()
+      );
+      if (matchSup) initialSupId = matchSup.id;
+    }
+
+    setEditJobsiteId(initialJobId);
+    setEditSupervisorId(initialSupId);
     setEditInvoiceNumber(invoice.invoiceNumber || '');
     setEditSupplier(invoice.supplier || '');
     setEditDate(invoice.date || '');
     setEditTotalAmount(invoice.totalAmount || 0);
     setDisplayJobsiteName(invoice.jobsiteName || '');
     setDisplaySupervisorName(invoice.uploadedBySupervisorName || '');
-  }, [invoice]);
+  }, [invoice, loadedJobsites, loadedSupervisors]);
 
   // Fetch jobsites if missing
   useEffect(() => {
@@ -126,33 +145,57 @@ export const InvoiceDetailModal: React.FC<Props> = ({
   const handleSaveEdit = async () => {
     setIsSaving(true);
     try {
-      const selectedJob = loadedJobsites.find(j => j.id === editJobsiteId);
-      const selectedSup = loadedSupervisors.find(s => s.id === editSupervisorId);
+      const selectedJob = loadedJobsites.find(j => j.id === editJobsiteId || j.name.toLowerCase() === editJobsiteId.toLowerCase());
+      const selectedSup = loadedSupervisors.find(s => s.id === editSupervisorId || s.name.toLowerCase() === editSupervisorId.toLowerCase());
 
-      const newJobsiteName = selectedJob ? selectedJob.name : displayJobsiteName;
-      const newSupervisorName = selectedSup ? selectedSup.name : displaySupervisorName;
+      const finalJobsiteId = selectedJob ? selectedJob.id : (canonicalizeJobsiteId(editJobsiteId, displayJobsiteName) || editJobsiteId);
+      const newJobsiteName = selectedJob ? selectedJob.name : (displayJobsiteName || editJobsiteId);
+      const finalSupervisorId = selectedSup ? selectedSup.id : editSupervisorId;
+      const newSupervisorName = selectedSup ? selectedSup.name : (displaySupervisorName || editSupervisorId);
 
       const updateData: Partial<InvoiceRecord> = {
-        jobsiteId: editJobsiteId,
+        jobsiteId: finalJobsiteId,
         jobsiteName: newJobsiteName,
-        uploadedBySupervisorId: editSupervisorId,
+        uploadedBySupervisorId: finalSupervisorId,
         uploadedBySupervisorName: newSupervisorName,
         invoiceNumber: editInvoiceNumber,
         supplier: editSupplier,
         date: editDate,
-        totalAmount: editTotalAmount
+        totalAmount: Number(editTotalAmount) || 0
       };
 
       if (onUpdateInvoice) {
         await onUpdateInvoice(invoice.id, updateData);
       } else {
-        await fetch(`/api/invoices/${invoice.id}`, {
+        let adminPin = '';
+        try {
+          if (typeof window !== 'undefined') {
+            adminPin = sessionStorage.getItem('admin_pin') || '';
+          }
+        } catch (_) {}
+
+        const res = await fetch(`/api/invoices/${invoice.id}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-session-token': user?.token || '',
+            'x-user-role': encodeURIComponent(user?.role || ''),
+            'x-user-supervisor-id': encodeURIComponent(user?.supervisorId || ''),
+            'x-user-personnel-id': encodeURIComponent(user?.personnelId || ''),
+            'x-user-name': encodeURIComponent(user?.displayName || ''),
+            'x-user-jobsite-ids': encodeURIComponent(JSON.stringify(user?.jobsiteIds || [])),
+            'x-user-default-jobsite-id': encodeURIComponent(user?.defaultJobsiteId || ''),
+            ...(adminPin ? { 'x-admin-pin': adminPin } : {})
+          },
           body: JSON.stringify(updateData)
         });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || 'Fatura güncellenemedi');
+        }
       }
 
+      Object.assign(invoice, updateData);
       setDisplayJobsiteName(newJobsiteName);
       setDisplaySupervisorName(newSupervisorName);
       setSaveSuccessMsg(true);
@@ -160,8 +203,9 @@ export const InvoiceDetailModal: React.FC<Props> = ({
         setSaveSuccessMsg(false);
         setIsEditing(false);
       }, 800);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error saving invoice update:', err);
+      alert(err.message || 'Fatura güncellenirken bir hata oluştu.');
     } finally {
       setIsSaving(false);
     }
@@ -173,11 +217,36 @@ export const InvoiceDetailModal: React.FC<Props> = ({
       if (onDeleteInvoice) {
         await onDeleteInvoice(invoice.id);
       } else {
-        await fetch(`/api/invoices/${invoice.id}`, { method: 'DELETE' });
+        let adminPin = '';
+        try {
+          if (typeof window !== 'undefined') {
+            adminPin = sessionStorage.getItem('admin_pin') || '';
+          }
+        } catch (_) {}
+
+        const res = await fetch(`/api/invoices/${invoice.id}`, {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-session-token': user?.token || '',
+            'x-user-role': encodeURIComponent(user?.role || ''),
+            'x-user-supervisor-id': encodeURIComponent(user?.supervisorId || ''),
+            'x-user-personnel-id': encodeURIComponent(user?.personnelId || ''),
+            'x-user-name': encodeURIComponent(user?.displayName || ''),
+            'x-user-jobsite-ids': encodeURIComponent(JSON.stringify(user?.jobsiteIds || [])),
+            'x-user-default-jobsite-id': encodeURIComponent(user?.defaultJobsiteId || ''),
+            ...(adminPin ? { 'x-admin-pin': adminPin } : {})
+          }
+        });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || 'Fatura çöp kutusuna taşınamadı');
+        }
       }
       onClose();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error deleting invoice:', err);
+      alert(err.message || 'Fatura silinirken bir hata oluştu.');
     } finally {
       setIsDeleting(false);
     }
@@ -403,9 +472,10 @@ export const InvoiceDetailModal: React.FC<Props> = ({
           <div className="bg-rose-50 border-b border-rose-200 text-rose-900 px-6 py-3.5 flex flex-wrap items-center justify-between gap-3 animate-in fade-in duration-150 shrink-0">
             <div className="flex items-center space-x-2">
               <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
-              <span className="text-xs sm:text-sm font-semibold">
-                "{invoice.invoiceNumber}" numaralı faturayı sistemden kalıcı olarak silmek istediğinize emin misiniz?
-              </span>
+              <div className="text-xs sm:text-sm">
+                <span className="font-bold">"{invoice.invoiceNumber || invoice.supplier}"</span> faturası Çöp Kutusuna taşınacaktır.
+                <span className="block text-[11px] text-rose-700 font-normal mt-0.5">Fatura doğrudan kalıcı olarak silinmez, önce Çöp Kutusunda güvenle saklanır. Yalnızca Sistem Yöneticisi Çöp Kutusundan kalıcı olarak silebilir.</span>
+              </div>
             </div>
             <div className="flex items-center space-x-2">
               <button
@@ -414,7 +484,7 @@ export const InvoiceDetailModal: React.FC<Props> = ({
                 className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-3.5 py-2 rounded-lg transition-colors flex items-center space-x-1.5 cursor-pointer shadow-xs disabled:opacity-50"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span>{isDeleting ? 'Siliniyor...' : 'Evet, Kalıcı Olarak Sil'}</span>
+                <span>{isDeleting ? 'Taşınıyor...' : 'Çöp Kutusuna Taşı'}</span>
               </button>
               <button
                 onClick={() => setShowDeleteConfirm(false)}
@@ -944,14 +1014,15 @@ export const InvoiceDetailModal: React.FC<Props> = ({
               </button>
             )}
 
-            {onDeleteInvoice && perm.canDelete && (
+            {perm.canDelete && (
               <button
                 type="button"
                 onClick={() => setShowDeleteConfirm(true)}
                 className="w-full sm:w-auto px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-1.5 cursor-pointer shadow-2xs"
+                title="Faturayı Çöp Kutusuna Taşı"
               >
-                <Trash2 className="w-4 h-4" />
-                <span>Sil</span>
+                <Trash2 className="w-4 h-4 text-rose-600" />
+                <span>Çöp Kutusuna Taşı</span>
               </button>
             )}
 

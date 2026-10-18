@@ -27,6 +27,14 @@ import { formatRuble } from '../utils/format';
 import { getPrizmaBtfUrl, getPrizmaStfUrl } from '../utils/prizmaUrlHelper';
 import { PrizmaInvoice } from './PrizmaInvoicesView';
 import { extractRebarDiameter } from '../utils/constructionUnitConverter';
+import { areSpecSignaturesCompatible } from '../utils/materialGroupIntegrity';
+import {
+  DualComparisonLens,
+  buildSmartOriginalSignature,
+  buildMode1AppleToAppleComparisons,
+  buildMode2CrossBrandFamilies,
+  findCheaperEquivalentBrandSuggestion
+} from '../utils/dualMaterialComparisonEngine';
 
 interface Props {
   invoice: PrizmaInvoice;
@@ -103,6 +111,26 @@ function normalizeText(str: string): string {
     .trim();
 }
 
+function isBenchmarkCompatibleInMode1(item: any, itemSig: ReturnType<typeof buildSmartOriginalSignature>, b: BenchmarkItem): boolean {
+  const bOrig = b.history?.[0]?.originalName || b.materialName;
+  const itemOrig = item.originalName || item.materialName || '';
+  if (itemOrig && bOrig && !areSpecSignaturesCompatible(itemOrig, bOrig)) {
+    return false;
+  }
+  const bSig = buildSmartOriginalSignature({
+    originalName: bOrig,
+    materialName: b.materialName,
+    category: b.category,
+    unit: b.unit,
+    unitPrice: b.avgUnitPrice
+  });
+  if (!itemSig.isCommodity) {
+    if (itemSig.canonicalBrandKey !== bSig.canonicalBrandKey) return false;
+    if ((itemSig.subBrandOrSeries || '') !== (bSig.subBrandOrSeries || '')) return false;
+  }
+  return true;
+}
+
 function findMatchingBenchmark(item: any, invoice: PrizmaInvoice, benchmarks: BenchmarkItem[]): BenchmarkItem | undefined {
   if (!item || !benchmarks.length) return undefined;
   
@@ -110,6 +138,32 @@ function findMatchingBenchmark(item: any, invoice: PrizmaInvoice, benchmarks: Be
   const rawOrigName = (item.originalName || '').trim();
   const itemUnitPrice = Number(item.unitPrice) || 0;
   const itemQuantity = Number(item.quantity) || 0;
+
+  const itemSig = buildSmartOriginalSignature({
+    originalName: rawOrigName,
+    materialName: rawItemName,
+    category: item.category,
+    unit: item.unit,
+    unitPrice: itemUnitPrice
+  });
+
+  // 0. Smart Original Russian Invoice Signature Match (Mode 1 Apple-to-Apple: same family + same spec + same brand & series)
+  if (!itemSig.canonicalFamilyKey.startsWith('FAM_')) {
+    const smartMatch = benchmarks.find(b => {
+      const bOrig = b.history?.[0]?.originalName || b.materialName;
+      const bSig = buildSmartOriginalSignature({
+        originalName: bOrig,
+        materialName: b.materialName,
+        category: b.category,
+        unit: b.unit,
+        unitPrice: b.avgUnitPrice
+      });
+      if (bSig.canonicalFamilyKey !== itemSig.canonicalFamilyKey) return false;
+      if (bSig.canonicalSpecKey !== itemSig.canonicalSpecKey) return false;
+      return isBenchmarkCompatibleInMode1(item, itemSig, b);
+    });
+    if (smartMatch) return smartMatch;
+  }
 
   // 1. Direct Invoice History Match (100% Deterministic & Guaranteed):
   // If this invoice and item were processed into a benchmark's history by the server, match it directly!
@@ -138,11 +192,11 @@ function findMatchingBenchmark(item: any, invoice: PrizmaInvoice, benchmarks: Be
   );
   if (historyMatch) return historyMatch;
 
-  // 2. Exact name or benchmark ID match
+  // 2. Exact name or benchmark ID match (still guarded by Mode 1 brand/series/spec compatibility)
   const cleanName = rawItemName.toLowerCase().trim();
   const exactMatch = benchmarks.find(b => 
-    b.materialName.toLowerCase().trim() === cleanName || 
-    b.id.toLowerCase().trim() === cleanName
+    (b.materialName.toLowerCase().trim() === cleanName || b.id.toLowerCase().trim() === cleanName) &&
+    isBenchmarkCompatibleInMode1(item, itemSig, b)
   );
   if (exactMatch) return exactMatch;
 
@@ -180,7 +234,8 @@ function findMatchingBenchmark(item: any, invoice: PrizmaInvoice, benchmarks: Be
       const plyMatch = benchmarks.find(b => 
         b.category === 'Kalıp & İskele Sistemleri' && 
         /plywood|kontrplak/i.test(b.materialName) && 
-        b.materialName.includes(`${th}mm`)
+        b.materialName.includes(`${th}mm`) &&
+        isBenchmarkCompatibleInMode1(item, itemSig, b)
       );
       if (plyMatch) return plyMatch;
     }
@@ -194,13 +249,14 @@ function findMatchingBenchmark(item: any, invoice: PrizmaInvoice, benchmarks: Be
       const timberMatch = benchmarks.find(b =>
         b.category === 'Kalıp & İskele Sistemleri' &&
         /kereste|tahta/i.test(b.materialName) &&
-        (b.materialName.includes(`${d1}x${d2}`) || b.materialName.includes(`${d1}*${d2}`))
+        (b.materialName.includes(`${d1}x${d2}`) || b.materialName.includes(`${d1}*${d2}`)) &&
+        isBenchmarkCompatibleInMode1(item, itemSig, b)
       );
       if (timberMatch) return timberMatch;
     }
   }
 
-  // E. Normalized text high-similarity match (requires >= 75% token overlap within same category)
+  // E. Normalized text high-similarity match (requires >= 75% token overlap within same category AND Mode 1 compatibility)
   const normItem = normalizeText(combined);
   const itemTokens = normItem.split(' ').filter(t => t.length >= 3);
   if (itemTokens.length >= 2) {
@@ -209,6 +265,9 @@ function findMatchingBenchmark(item: any, invoice: PrizmaInvoice, benchmarks: Be
 
     for (const b of benchmarks) {
       if (item.category && b.category && item.category !== 'MALZEME' && item.category !== 'Diğer Malzeme' && b.category !== item.category) {
+        continue;
+      }
+      if (!isBenchmarkCompatibleInMode1(item, itemSig, b)) {
         continue;
       }
       const bTokens = normalizeText(b.materialName).split(' ').filter(t => t.length >= 3);
@@ -235,6 +294,7 @@ export const PrizmaQuickCompareModal: React.FC<Props> = ({ invoice, onClose, onN
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [onlyWithHistory, setOnlyWithHistory] = useState<boolean>(false);
   const [globalSearchKeyword, setGlobalSearchKeyword] = useState<string>('');
+  const [comparisonLens, setComparisonLens] = useState<DualComparisonLens>('MODE_1_APPLE_TO_APPLE');
 
   const loadBenchmarks = async () => {
     try {
@@ -288,18 +348,84 @@ export const PrizmaQuickCompareModal: React.FC<Props> = ({ invoice, onClose, onN
     return false;
   };
 
+  const mode1Benchmarks = useMemo(() => {
+    return buildMode1AppleToAppleComparisons(benchmarks as any) as unknown as BenchmarkItem[];
+  }, [benchmarks]);
+
+  const crossBrandFamilies = useMemo(() => {
+    return buildMode2CrossBrandFamilies(benchmarks as any);
+  }, [benchmarks]);
+
   // Compute comparison stats for each item in the invoice
   const comparedItems = useMemo(() => {
     return (invoice.items || []).map((item, index) => {
       const currentPrice = Number(item.unitPrice) || 0;
-      const matched = findMatchingBenchmark(item, invoice, benchmarks);
+      const smartSignature = buildSmartOriginalSignature({
+        originalName: item.originalName,
+        materialName: item.materialName,
+        category: item.category,
+        unit: item.unit,
+        unitPrice: currentPrice
+      });
+      const crossBrandSuggestion = findCheaperEquivalentBrandSuggestion({
+        originalName: item.originalName,
+        materialName: item.materialName,
+        category: item.category,
+        unit: item.unit,
+        currentUnitPrice: currentPrice,
+        quantity: Number(item.quantity) || 1,
+        families: crossBrandFamilies
+      });
+
+      const matched = findMatchingBenchmark(item, invoice, mode1Benchmarks);
 
       // Direct authentic history from this matched benchmark (excluding the current invoice)
-      const rawDirectHistory = matched?.history || [];
-      const directOtherHistory = rawDirectHistory.filter(h => !isCurrentInvoiceRecord(h));
+      let directOtherHistory: HistoryRecord[] = [];
+      if (comparisonLens === 'MODE_2_BRAND_EQUIVALENT' && !smartSignature.isCommodity) {
+        const matchingFamily = crossBrandFamilies.find(
+          f =>
+            f.familyId.startsWith(`${smartSignature.canonicalFamilyKey}__${smartSignature.canonicalSpecKey}`) ||
+            (f.familyId.includes(smartSignature.canonicalFamilyKey) && f.canonicalSpecLabel === smartSignature.canonicalSpecLabel)
+        );
+        if (matchingFamily) {
+          directOtherHistory = matchingFamily.brands
+            .flatMap(b => (b.history || []) as unknown as HistoryRecord[])
+            .filter(h => !isCurrentInvoiceRecord(h));
+        }
+      }
+
+      if (directOtherHistory.length === 0) {
+        const rawDirectHistory = matched?.history || [];
+        directOtherHistory = rawDirectHistory.filter(h => {
+          if (isCurrentInvoiceRecord(h)) return false;
+          // In Mode 1 (Apple-to-Apple), filter out incompatible brands, product series, or specs
+          if (comparisonLens === 'MODE_1_APPLE_TO_APPLE') {
+            const itemOrig = item.originalName || item.materialName || '';
+            const hOrig = h.originalName || matched?.materialName || '';
+            if (itemOrig && hOrig && !areSpecSignaturesCompatible(itemOrig, hOrig)) {
+              return false;
+            }
+            if (!smartSignature.isCommodity) {
+              const hSig = buildSmartOriginalSignature({
+                originalName: h.originalName,
+                materialName: matched?.materialName,
+                category: item.category,
+                unit: h.unit,
+                unitPrice: h.unitPrice
+              });
+              if (hSig.canonicalBrandKey !== smartSignature.canonicalBrandKey) {
+                return false;
+              }
+              if ((hSig.subBrandOrSeries || '') !== (smartSignature.subBrandOrSeries || '')) {
+                return false;
+              }
+            }
+          }
+          return true;
+        });
+      }
 
       // Strict discipline: Only show authentic past purchases of this exact material.
-      // Unrelated items from the general category are NOT mixed into the price comparison!
       const activeHistory = directOtherHistory;
       const hasOtherRecords = activeHistory.length > 0;
       const otherInvoicesCount = activeHistory.length;
@@ -353,10 +479,12 @@ export const PrizmaQuickCompareModal: React.FC<Props> = ({ invoice, onClose, onN
         directPriceHistory: directOtherHistory,
         relatedPriceHistory: [],
         matchedBenchmarkName: matched?.materialName,
-        totalItemSavings
+        totalItemSavings,
+        smartSignature,
+        crossBrandSuggestion
       };
     });
-  }, [invoice, benchmarks]);
+  }, [invoice, mode1Benchmarks, crossBrandFamilies, comparisonLens]);
 
 
 
@@ -518,6 +646,38 @@ export const PrizmaQuickCompareModal: React.FC<Props> = ({ invoice, onClose, onN
 
         {/* Modal Scrollable Body */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
+          {/* Dual Comparison Mode Switcher */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-950/70 p-3 rounded-2xl border border-slate-800">
+            <div className="text-xs font-bold text-slate-300 flex items-center space-x-2">
+              <Sparkles className="w-4 h-4 text-indigo-400" />
+              <span>Orijinal Fatura Metni (RU) Bazlı Akıllı Kıyaslama Merceği:</span>
+            </div>
+            <div className="inline-flex rounded-xl bg-slate-900 p-1 border border-slate-800">
+              <button
+                type="button"
+                onClick={() => setComparisonLens('MODE_1_APPLE_TO_APPLE')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${
+                  comparisonLens === 'MODE_1_APPLE_TO_APPLE'
+                    ? 'bg-indigo-600 text-white shadow-xs'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                1. Seçenek: Elma-Elma Birebir Marka/Emtia (Varsayılan)
+              </button>
+              <button
+                type="button"
+                onClick={() => setComparisonLens('MODE_2_BRAND_EQUIVALENT')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${
+                  comparisonLens === 'MODE_2_BRAND_EQUIVALENT'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                2. Seçenek: Muadil Marka & Ekonomi Analizi
+              </button>
+            </div>
+          </div>
+
           {/* Search & Filter Header inside modal */}
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-950/40 p-3 rounded-2xl border border-slate-800">
             <div className="relative flex-1 w-full">
@@ -557,7 +717,7 @@ export const PrizmaQuickCompareModal: React.FC<Props> = ({ invoice, onClose, onN
               <table className="w-full text-left text-xs">
                 <thead>
                   <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 font-bold uppercase text-[10px]">
-                    <th className="py-3 px-3.5">Malzeme Adı & Kod</th>
+                    <th className="py-3 px-3.5">Orijinal Fatura Metni & Marka / Emtia</th>
                     <th className="py-3 px-3 text-right">Miktar & Birim</th>
                     <th className="py-3 px-3 text-right text-white">Bu Fatura Fiyatı</th>
                     <th className="py-3 px-3 text-right text-emerald-400">Piyasa En Düşük</th>
@@ -582,18 +742,30 @@ export const PrizmaQuickCompareModal: React.FC<Props> = ({ invoice, onClose, onN
                                 {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                               </span>
                               <div>
-                                <div className="font-bold text-slate-100 max-w-xs sm:max-w-md truncate" title={item.materialName}>
-                                  {item.materialName}
+                                <div className="font-bold text-slate-100 max-w-xs sm:max-w-md truncate" title={item.originalName || item.materialName}>
+                                  {item.originalName || item.materialName}
                                 </div>
                                 {item.originalName && item.originalName !== item.materialName && (
-                                  <div className="text-[11px] text-amber-300/90 font-mono mt-0.5 max-w-xs sm:max-w-md truncate" title={item.originalName}>
-                                    <span className="text-[9px] text-slate-500 font-sans font-bold uppercase mr-1">RU:</span>
-                                    <span className="italic">{item.originalName}</span>
+                                  <div className="text-[11px] text-slate-400 mt-0.5 max-w-xs sm:max-w-md truncate" title={item.materialName}>
+                                    <span className="text-[9px] text-slate-500 font-sans font-bold uppercase mr-1">TR:</span>
+                                    <span className="italic">{item.materialName}</span>
                                   </div>
                                 )}
-                                <div className="flex items-center space-x-2 text-[10px] text-slate-400 mt-0.5">
-                                  {item.materialCode && <span>Kod: {item.materialCode}</span>}
-                                  {item.category && <span className="text-slate-500">| {item.category}</span>}
+                                <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400 mt-1">
+                                  {item.smartSignature && (
+                                    <span className={`px-1.5 py-0.5 rounded font-bold border ${
+                                      item.smartSignature.isCommodity
+                                        ? 'bg-slate-800 text-slate-200 border-slate-700'
+                                        : 'bg-indigo-950/80 text-indigo-300 border-indigo-500/40'
+                                    }`}>
+                                      {item.smartSignature.isCommodity ? 'Emtia (GOST)' : item.smartSignature.canonicalBrandDisplay}
+                                    </span>
+                                  )}
+                                  {item.crossBrandSuggestion?.hasCheaperEquivalent && (
+                                    <span className="px-1.5 py-0.5 rounded font-black bg-emerald-950/80 text-emerald-300 border border-emerald-500/40">
+                                      💡 Mod 2 Muadil: {item.crossBrandSuggestion.suggestedBrandDisplay} (-%{item.crossBrandSuggestion.savingsPercentage})
+                                    </span>
+                                  )}
                                   {item.hasOtherRecords ? (
                                     <span className="text-indigo-400 font-semibold">
                                       • {item.otherInvoicesCount} geçmiş alım ({item.uniqueJobsites.length} şantiye)
@@ -727,6 +899,33 @@ export const PrizmaQuickCompareModal: React.FC<Props> = ({ invoice, onClose, onN
                                   </div>
                                 </div>
                               </div>
+
+                              {/* Mode 2 Cross-Brand Equivalent Economy Suggestion Banner */}
+                              {item.crossBrandSuggestion?.hasCheaperEquivalent && (
+                                <div className="p-3.5 bg-emerald-950/40 border border-emerald-500/40 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                  <div className="space-y-1">
+                                    <div className="flex items-center space-x-2 text-xs font-black text-emerald-300">
+                                      <Sparkles className="w-4 h-4 text-emerald-400" />
+                                      <span>💡 Muadil Marka Ekonomi Önerisi (Mod 2 — Alternatif Marka Simülasyonu)</span>
+                                      <span className="px-2 py-0.5 rounded bg-emerald-900/80 text-emerald-200 font-mono text-[10px]">
+                                        {item.crossBrandSuggestion.specLabel}
+                                      </span>
+                                    </div>
+                                    <p className="text-xs text-slate-300 leading-relaxed">
+                                      Bu faturadaki <strong>{item.crossBrandSuggestion.currentBrandDisplay}</strong> markası yerine aynı teknik ölçü ve sınıftaki (<em>{item.crossBrandSuggestion.familyTitleRu}</em>) <strong>{item.crossBrandSuggestion.suggestedBrandDisplay}</strong> muadili tercih edilseydi birim fiyatta <strong>%{item.crossBrandSuggestion.savingsPercentage} ({formatRuble(item.crossBrandSuggestion.unitSavingsRub)})</strong>, bu kalemde toplam <strong>{formatRuble(item.crossBrandSuggestion.totalSavingsRub)}</strong> ekonomi sağlanabilirdi.
+                                    </p>
+                                  </div>
+                                  <div className="bg-slate-900/90 px-3.5 py-2 rounded-xl border border-emerald-500/30 text-right shrink-0">
+                                    <span className="block text-[10px] text-slate-400 uppercase font-bold">Muadil Birim Fiyat</span>
+                                    <span className="font-mono font-black text-emerald-400 text-sm">
+                                      {formatRuble(item.crossBrandSuggestion.suggestedUnitPrice)} / {item.unit}
+                                    </span>
+                                    <span className="block text-[10px] font-black text-emerald-300 mt-0.5">
+                                      Potansiyel Ekonomi: +{formatRuble(item.crossBrandSuggestion.totalSavingsRub)}
+                                    </span>
+                                  </div>
+                                </div>
+                              )}
 
                               {/* Highlight cards: En Ucuz Şantiye vs En Yüksek Şantiye */}
                               {item.hasOtherRecords && (

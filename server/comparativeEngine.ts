@@ -195,13 +195,12 @@ export async function processComparativeAnalysisBatch(
     let extractedData: any = null;
 
     try {
-      const b64 = f.buffer ? f.buffer.toString('base64') : (f.base64 ? (f.base64.includes(',') ? f.base64.split(',')[1] : f.base64) : undefined);
+      const b64 = f.buffer ? f.buffer.toString('base64') : f.base64;
       if (b64) {
-        const mimeType = f.mimeType || (f.fileName.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
         extractedData = await processInvoiceTwoStages({
           base64Input: b64,
           fileName: f.fileName,
-          mimeType,
+          mimeType: f.mimeType,
           scanMode: 'full' // MUST extract all item lines for comparative matching!
         });
       }

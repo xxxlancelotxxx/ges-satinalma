@@ -1,0 +1,6 @@
+{
+  "summary": "Prizma senkronize faturaları ve portal malzeme kıyaslama motorunda KDV/Nakliye ayrıştırması, çift katmanlı (Net ve KDV Dahil) birim fiyat standartlaştırması ve geriye dönük tüm veritabanı faturalarının otomatik temizlenmesi için mimari uygulama planı.",
+  "updatedAt": "2026-10-17T11:41:13.377503538Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

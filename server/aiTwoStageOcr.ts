@@ -1,5 +1,4 @@
 // Two-stage AI Document Processor: Extraction & Safe Standardization
-import { GoogleGenAI } from '@google/genai';
 import { PDFParse } from 'pdf-parse';
 
 import { 
@@ -8,17 +7,18 @@ import {
   validateInvoiceData, 
   checkDuplicateInvoice, 
   calculateFileHash,
-  generateContentWithResilience
+  generateContentWithResilience,
+  inspectAndNormalizeDocumentInput
 } from './aiOcrEngine';
-import { normalizeCategoryName } from '../src/utils/categoryClassifier';
+import { normalizeCategoryName, translateRussianMaterialToTurkish } from '../src/utils/categoryClassifier';
 
 const parseNumberSafe = (val: any): number => {
   if (val === undefined || val === null) return 0;
-  if (typeof val === 'number') return val;
+  if (typeof val === 'number') return isNaN(val) ? 0 : val;
   let str = String(val).trim();
   
-  // Remove all spaces
-  str = str.replace(/\s+/g, '');
+  // Remove all spaces and non-breaking spaces
+  str = str.replace(/[\s\u00A0]+/g, '');
   
   // Determine format based on last dot and comma
   const lastDot = str.lastIndexOf('.');
@@ -34,11 +34,9 @@ const parseNumberSafe = (val: any): number => {
     }
   } else if (lastComma > -1) {
     // Only comma: 1234,56 or 1,234
-    // Check if comma is used as decimal (e.g. followed by 1-2 digits)
     if (str.length - lastComma <= 3) {
       str = str.replace(',', '.');
     } else {
-      // comma used as thousand separator: 1,234,567
       str = str.replace(/,/g, '');
     }
   }
@@ -57,7 +55,13 @@ const extractStringSafe = (val: any, fallback: string = ''): string => {
 };
 
 // Stage 1: Raw document extraction & standardization prompt (Merged for speed)
-export function buildStage1ExtractionPrompt(excelCsv?: string, additionalPrompt?: string, pdfText?: string, hasFirstOffer?: boolean): string {
+export function buildStage1ExtractionPrompt(
+  excelCsv?: string,
+  additionalPrompt?: string,
+  pdfText?: string,
+  hasFirstOffer?: boolean,
+  firstOfferText?: string
+): string {
   return `Sen faturaları, teklifleri, irsaliyeleri ve sipariş belgelerini inceleyip standartlaştıran uzman bir malzeme mühendisi ve veri çıkarma asistanısın.
 
 GÖREV:
@@ -94,8 +98,11 @@ Kullanıcı İlk Teklif belgesini (birinci belge) ve Son İndirimli Fatura belge
     - category: Malzemenin Ana Kategorisi (Aşağıdaki listeden BİRİNİ SEÇ)
     - quantity: Miktar (sayısal)
     - unit: Standart birim (Adet, Ton, m³, kg, torba, m, Litre vb.)
-    - unitPrice: Birim fiyat (KESİNLİKLE KDV/NDS DAHİL hesaplanmış sayısal değer. Tabloda KDV hariçse, KDV oranını ekleyerek hesapla!)
-    - totalPrice: Satır toplam tutarı (KESİNLİKLE KDV/NDS DAHİL hesaplanmış sayısal değer!)
+    - unitPrice: Birim fiyat (KESİNLİKLE NET / KDV HARİÇ - Цена без НДС olarak hesaplanmış sayısal değer. Tabloda sadece KDV dahil fiyat varsa, KDV oranını [%20 veya %22 НДС] düşerek Net birim fiyatı hesapla!)
+    - grossUnitPrice: KDV / НДС Dahil birim fiyat (Цена с НДС)
+    - vatPercentage: Kalemin KDV / НДС oranı (örn: 22, 20, 10, 0)
+    - totalPrice: Satır Net toplam tutarı (Сумма без НДС)
+    - grossTotalPrice: Satır KDV Dahil toplam tutarı (Сумма с НДС)
     - brand: Varsa marka
     - model: Varsa model
     - productCode: Varsa Artikül / Ürün Kodu
@@ -118,14 +125,16 @@ KRİTİK KATEGORİ VE AKSESUAR AYRIŞTIRMA KURALLARI ("İÇİN / ДЛЯ"):
 - SADECE YAPISAL DONATI (пруток, арматура а500с, nervürlü demir, filmaşin, çelik hasır) "İnşaat Demiri & Çelik" kategorisindedir.
 - DİĞER: "труба для кабеля / kablo borusu" -> Elektrik & Otomasyon. "изоляция для труб" -> Yalıtım & Alçıpan. "хомут для труб" -> Sarf Malzeme & Hırdavat. "саморез для гипсокартона" -> Sarf Malzeme & Hırdavat. "профиль для гкл" -> Yalıtım & Alçıpan. "крестики для плитки" -> Sarf Malzeme & Hırdavat. "растворитель / tiner" -> Boya & Dış Cephe. "валик / rulo", "кисть / fırça" -> Sarf Malzeme & Hırdavat.
 
+${firstOfferText ? `\n--- İLK TEKLİF BELGESİ METİN/TABLO VERİSİ ---\n${firstOfferText}\n----------------------------------------------\n` : ''}
 ${pdfText ? `\n--- DİJİTAL BELGE METİN KATMANI ---\n${pdfText}\n-----------------------------------\n` : ''}
 ${excelCsv ? `\n--- EXCEL/CSV VERİSİ ---\n${excelCsv}\n------------------------\n` : ''}
 ${additionalPrompt ? `\nEk Kullanıcı Notu: ${additionalPrompt}\n` : ''}
 
 ÖNEMLİ KURALLAR:
 - ASLA uydurma değer üretme. Okunamayan alanları JSON'a ekleme.
+- Metin değerlerinin içinde çift tırnak (") kullanma, şirket ünvanlarında tırnak gerekiyorsa « » veya tek tırnak kullan (Örn: ООО «ТСК Дипломат»).
 - HIZ VE TOKEN TASARRUFU KURALI: 'items' dizisindeki her bir kalem için SADECE değeri olan alanları üret. Eğer bir alan (örn: brand, model, productCode, diameter, dimensions, quality, color vb.) belgede yoksa veya boşsa, o alanı JSON'a ASLA ekleme!
-- KDV/NDS DAHİL FİYAT KURALI: "items" listesindeki her ürünün "unitPrice" ve "totalPrice" değerleri KESİNLİKLE KDV (NDS) DAHİL olarak yazılmalıdır. Eğer tabloda KDV hariç ise (Без НДС), genel toplama bakarak veya KDV oranını uygulayarak KDV dahil rakamı hesapla!
+- NET (KDV HARİÇ) BİRİM FİYAT & NAKLİYE AYRIŞTIRMA KURALI: "items" listesindeki her malzemenin "unitPrice" ve "totalPrice" değerleri KESİNLİKLE NET (KDV / НДС HARİÇ - Цена без НДС) olarak yazılmalı, KDV dahil karşılıkları ise "grossUnitPrice" ve "grossTotalPrice" alanlarına yazılmalıdır. Ayrıca faturadaki Nakliye / Hizmet (Доставка, Транспортные услуги, Автоуслуги, Манипулятор, Погрузка/разгрузка, Резка, Nakliye) satırları malzeme listesine ('items') ASLA eklenmemelidir!
 - EXCEL/CSV TOPLAM SATIRI KURALI: Tablolardaki 'ИТОГО', 'ВСЕГО', 'Toplam', 'Genel Toplam', 'KDV', 'НДС', 'İndirim' satırları ÜRÜN KALEMİ DEĞİLDİR! Bunları 'items' listesine ASLA ekleme; sadece üst subtotal/tax/totalAmount alanlarına yaz.
 
 SADECE GEÇERLİ JSON DÖN (Şablon):
@@ -168,12 +177,12 @@ export function buildStage1SummaryOnlyPrompt(excelCsv?: string, additionalPrompt
   return `Sen faturaları ve ilk teklif belgelerini inceleyen süper hızlı bir veri çıkarma asistanısın.
 
 GÖREV (HIZLI ÜST BİLGİ & TOPLAM TUTAR OKUMA):
-Belgeden SADECE ve YALNIZCA firma adını, fatura/teklif numarasını, tarihini, para birimini ve genel toplam tutarını çıkar.
+Belgeden SADECE ve YALNIZCA firma adını, fatura/teklif numarasını, tarihini, para birimini, yaklaşık kalem sayısını (itemCount) ve genel toplam tutarını çıkar.
 
 ⚠️ KRİTİK HIZ KURALI:
-Tablonun içindeki ürünleri ASLA okuma! Satırları veya kalem sayısını (itemCount) ASLA SAYMA!
-'items' dizisini KESİNLİKLE BOŞ BIRAK ([]). 
-Bu işlem ilk teklif turu içindir. Amaç tablonun içini okumadan, sadece belgenin kime ait olduğunu ve En Alt kısımdaki Genel Toplam tutarını saniyesinde bulmaktır.
+Tablonun içindeki ürünleri tek tek JSON'a yazma! 'items' dizisini KESİNLİKLE BOŞ BIRAK ([]).
+Bu işlem ilk teklif veya pazarlık turu içindir. Amaç sadece belgenin kime ait olduğunu ve En Alt kısımdaki Genel Toplam (KDV/NDS Dahil) tutarını saniyesinde bulmaktır.
+Metin değerlerinin içinde çift tırnak (") kullanma, şirket ünvanlarında tırnak gerekiyorsa « » kullan.
 
 ÇIKARILACAK ALANLAR:
 1. documentType: 'offer' (Teklif) veya 'invoice' (Fatura)
@@ -183,7 +192,8 @@ Bu işlem ilk teklif turu içindir. Amaç tablonun içini okumadan, sadece belge
 3. invoiceNumber: Fatura / Teklif Numarası (№, Счет №, Teklif No)
 4. date: Belge Düzenleme Tarihi (YYYY-MM-DD)
 5. currency: Para birimi (RUB, TRY, USD, EUR)
-6. totalAmount: Belgenin Genel Toplam / Teklif Tutarı (ИТОГО / ВСЕГО / Toplam). Belgenin en altındaki rakamı bul. DİKKAT: Rakamları temizle, ondalık kısım için nokta kullan ve sadece sayı olarak döndür (örn: "815 726,39" veya "815.726,39" -> 815726.39). Boşluk bırakma!
+6. totalAmount: Belgenin Genel Toplam / Teklif Tutarı (ИТОГО / ВСЕГО / Всего к оплате / Toplam). Belgenin en altındaki KDV dahil ödenecek rakamı bul. DİKKAT: Rakamları temizle, ondalık kısım için nokta kullan ve sadece sayı olarak döndür (örn: "815 726,39" veya "815.726,39" -> 815726.39). Boşluk bırakma!
+7. itemCount: Tablodaki toplam satır/kalem sayısı (varsa sıra numarasının son rakamı).
 
 ${pdfText ? `\n--- DİJİTAL BELGE METİN KATMANI ---\n${pdfText}\n-----------------------------------\n` : ''}
 ${excelCsv ? `\n--- EXCEL/CSV VERİSİ ---\n${excelCsv}\n------------------------\n` : ''}
@@ -197,6 +207,7 @@ SADECE GEÇERLİ JSON DÖN:
   "date": { "value": "YYYY-MM-DD", "confidence": 0.95 },
   "currency": { "value": "RUB", "confidence": 0.95 },
   "totalAmount": { "value": 1250000, "confidence": 0.98 },
+  "itemCount": 5,
   "items": []
 }`;
 }
@@ -212,45 +223,6 @@ export function buildStage2StandardizationPrompt(rawExtraction: any): string {
 GÖREV (AŞAMA 2 - STANDARTLAŞTIRMA):
 Aşağıda verilen ham fatura/teklif verisini incele ve her kalem için STANDART TÜRKÇE MALZEME ADI (materialName), KATEGORİ (category) ve STANDART BİRİM (unit) üret.
 
-KATEGORİLER (SADECE AŞAĞIDAKİ 28 KESİN KANONİK KATEGORİDEN BİRİNİ SEÇ, "DİĞER" VEYA TORBA KATEGORİ KESİNLİKLE YASAKTIR):
-1. İnşaat Demiri
-2. Çelik Borular
-3. Çelik Malzemeler
-4. Donatı Malzemeleri
-5. Ankraj Sistemleri
-6. Hazır Beton, Çimento & Agrega
-7. Tuğla, Gazbeton & Duvar Blokları
-8. Kalıp & İskele Sistemleri
-9. Ahşap & Kereste
-10. Yalıtım & Alçıpan
-11. Kimyasallar & Boya
-12. Mekanik & Tesisat
-13. Elektrik & Otomasyon
-14. İş Güvenliği & KKD
-15. El Aletleri & Hırdavat
-16. Sarf Malzeme & Hırdavat
-17. Kaynak Malzemeleri
-18. Seramik & Vitrifiye
-19. İç Mekan, Zemin & Kapı / Doğrama
-20. Tabela, Yönlendirme & Reklam
-21. Ölçüm, Harita & Saha Ekipmanları
-22. Şantiye Mobilya & Yaşam Donanımı
-23. Şantiye Tesis & Konteyner
-24. Temizlik & Hijyen Malzemeleri
-25. Gıda & Mutfak Malzemeleri
-26. Ofis & Kırtasiye
-27. Bilgi İşlem & IT
-28. Araç & İş Makinesi Ekipmanları
-
-STANDARTLAŞTIRMA VE KORUMA KURALLARI:
-1. TEK DİL KURALI (SADECE TÜRKÇE): "materialName" alanı KESİNLİKLE TÜRKÇE olmalıdır. Rusça veya yabancı isimleri birebir Türkçeye çevir (Örn: "Фанера" -> "Plywood / Kontrplak", "Краска" -> "Boya", "Труба" -> "Boru", "Муфта" -> "Manşon", "Арматура" -> "İnşaat Demiri"). ASLA Kiril harfi bırakma!
-2. DETAYLARI KESİNLİKLE SİLME: Marka, model, artikül numarası, ürün kodu, çap, kalınlık, boy, ölçü, renk, kalite sınıfı (Örn: A500C, C25/30, M150) bilgilerini "materialName" içinde mutlaka koru.
-   - Örn: "Муфта P13 d=28/32 мм" -> "P13 Geçiş Manşonu d=28/32 mm" (Asla sadece "Manşon" yapma!)
-3. ÇAP VE EBAT STANDARDI: Çap bilgilerini net formatta (Ø12 mm, d=14 mm) materialName'e ekle.
-4. BİRİM STANDARDI: Adet, Ton, m³, m², Metre, Torba, kg, Koli, Litre, Paket vb. standart birimler kullan.
-5. İNŞAAT DEMİRİ KORUYUCU BAŞLIK / AKSESUAR KURALI: "Колпачок для арматуры 10-18 мм грибок" KESİNLİKLE "İnşaat Demiri Güvenlik Başlığı Mantar Tip 10-18 mm (1000 Adetlik Paket)" olarak çevrilmeli ve kategorisi "Sarf Malzeme & Hırdavat" olmalıdır. ASLA "İnşaat Demiri" veya ton birimli donatı yapılmamalıdır!
-6. TEDARİKÇİ KORUMA KURALI: Aşama 1'de tespit edilen tedarikçi adını (${extractedSupplierVal ? `"${extractedSupplierVal}"` : 'Ham verideki supplier'}) KESİNLİKLE AYNEN KORU, silme veya değiştirme.
-
 GİRDİ (AŞAMA 1 HAM VERİ):
 ${JSON.stringify(rawExtraction, null, 2)}
 
@@ -259,38 +231,7 @@ SADECE GEÇERLİ JSON DÖN:
   "documentType": "${rawExtraction.documentType || 'invoice'}",
   "supplier": ${JSON.stringify(extractedSupplierVal || rawExtraction.supplier || 'Tedarikçi Firma')},
   "vendorName": ${JSON.stringify(extractedSupplierVal || rawExtraction.supplier || 'Tedarikçi Firma')},
-  "taxId": ${JSON.stringify(rawExtraction.taxId?.value || rawExtraction.taxId || '')},
-  "invoiceNumber": ${JSON.stringify(rawExtraction.invoiceNumber?.value || rawExtraction.invoiceNumber || '')},
-  "date": ${JSON.stringify(rawExtraction.date?.value || rawExtraction.date || '')},
-  "currency": ${JSON.stringify(rawExtraction.currency?.value || rawExtraction.currency || 'RUB')},
-  "subtotal": ${JSON.stringify(rawExtraction.subtotal?.value ?? rawExtraction.subtotal ?? 0)},
-  "discount": ${JSON.stringify(rawExtraction.discount?.value ?? rawExtraction.discount ?? 0)},
-  "tax": ${JSON.stringify(rawExtraction.tax?.value ?? rawExtraction.tax ?? 0)},
-  "totalAmount": ${JSON.stringify(rawExtraction.totalAmount?.value ?? rawExtraction.totalAmount ?? 0)},
-  "scopeDeductionReasoning": ${JSON.stringify(rawExtraction.scopeDeductionReasoning?.value ?? rawExtraction.scopeDeductionReasoning ?? "")},
-  "scopeDeductionAmount": ${JSON.stringify(rawExtraction.scopeDeductionAmount?.value ?? rawExtraction.scopeDeductionAmount ?? 0)},
-  "scopeDeductionReason": ${JSON.stringify(rawExtraction.scopeDeductionReason?.value ?? rawExtraction.scopeDeductionReason ?? "")},
-  "items": [
-    {
-      "materialName": "Standart Türkçe Malzeme Adı (Detaylar Korunmuş)",
-      "originalName": "Belgedeki Orijinal İsim",
-      "category": "Seçilen Standart Kategori",
-      "quantity": 10,
-      "unit": "Ton",
-      "unitPrice": 12000,
-      "totalPrice": 120000,
-      "brand": "",
-      "model": "",
-      "productCode": "",
-      "diameter": "Ø12 mm",
-      "dimensions": "",
-      "quality": "A500C",
-      "color": "",
-      "confidence": 0.95
-    }
-  ],
-  "overallConfidence": ${rawExtraction.overallConfidence || 0.95},
-  "rawWarnings": ${JSON.stringify(rawExtraction.rawWarnings || [])}
+  "items": []
 }`;
 }
 
@@ -303,6 +244,8 @@ const INVALID_SUPPLIER_NAMES = new Set([
   'tedarikçi firma adı',
   'tedarikçi firma',
   'belgedeki gerçek satıcı / tedarikçi şirket adı',
+  'belgedeki gerçek satıcı şirket adı',
+  'belgedeki tedarikçi şirket adı',
   'undefined',
   'null',
   '-',
@@ -314,7 +257,6 @@ export function extractSupplierName(obj: any): string {
   if (!obj) return '';
   if (typeof obj === 'string') {
     let trimmed = obj.trim();
-    // Clean leading/trailing quotes or colon
     trimmed = trimmed.replace(/^[:\s"'«»“”]+|[:\s"'«»“”]+$/g, '').trim();
     if (trimmed && !INVALID_SUPPLIER_NAMES.has(trimmed.toLowerCase())) {
       return trimmed;
@@ -322,37 +264,11 @@ export function extractSupplierName(obj: any): string {
     return '';
   }
   if (typeof obj === 'object') {
-    if (obj.value !== undefined) {
-      const res = extractSupplierName(obj.value);
-      if (res) return res;
-    }
-    if (obj.name !== undefined) {
-      const res = extractSupplierName(obj.name);
-      if (res) return res;
-    }
-    if (obj.supplier !== undefined) {
-      const res = extractSupplierName(obj.supplier);
-      if (res) return res;
-    }
-    if (obj.vendor !== undefined) {
-      const res = extractSupplierName(obj.vendor);
-      if (res) return res;
-    }
-    if (obj.vendorName !== undefined) {
-      const res = extractSupplierName(obj.vendorName);
-      if (res) return res;
-    }
-    if (obj.company !== undefined) {
-      const res = extractSupplierName(obj.company);
-      if (res) return res;
-    }
-    if (obj.companyName !== undefined) {
-      const res = extractSupplierName(obj.companyName);
-      if (res) return res;
-    }
-    if (obj.seller !== undefined) {
-      const res = extractSupplierName(obj.seller);
-      if (res) return res;
+    for (const key of ['value', 'name', 'supplier', 'vendor', 'vendorName', 'company', 'companyName', 'seller']) {
+      if (obj[key] !== undefined) {
+        const res = extractSupplierName(obj[key]);
+        if (res) return res;
+      }
     }
   }
   return '';
@@ -366,15 +282,14 @@ export function fallbackExtractSupplierFromText(textContext?: string, fileName?:
   if (!fullText.trim()) return '';
 
   // 1. Regex for Russian invoice seller labels
-  // "Поставщик (исполнитель): ООО "ТСК ДИПЛОМАТ"" or "Поставщик: ООО «СтройСнаб»"
-  const postMatch = fullText.match(/(?:Поставщик\s*(?:\(исполнитель\))?|Продавец|Исполнитель|Организация)\s*[:：\t]\s*([^\r\n,;]+)/i);
+  const postMatch = fullText.match(/(?:Поставщик\s*(?:\(исполнитель\))?|Продавец|Исполнитель|Грузоотправитель|Организация)\s*[:：\t,-]\s*([^\r\n;]+)/i);
   if (postMatch && postMatch[1]) {
-    const candidate = extractSupplierName(postMatch[1]);
+    const rawSup = postMatch[1].split(/\s+(?:ИНН|КПП|Адрес|р\/с|тел\.?)\b/i)[0].trim();
+    const candidate = extractSupplierName(rawSup);
     if (candidate && candidate.length > 2) return candidate;
   }
 
   // 2. Regex for Turkish seller labels
-  // "Satıcı: ABC İnşaat San. ve Tic. Ltd. Şti." or "Tedarikçi: Kardemir A.Ş."
   const satMatch = fullText.match(/(?:Satıcı|Tedarikçi|Firma Ünvanı|Düzenleyen)\s*[:：\t]\s*([^\r\n,;]+)/i);
   if (satMatch && satMatch[1]) {
     const candidate = extractSupplierName(satMatch[1]);
@@ -382,9 +297,9 @@ export function fallbackExtractSupplierFromText(textContext?: string, fileName?:
   }
 
   // 3. Regex for common corporate entities with quotes (e.g. ООО "Строй-Комплект", АО «Северсталь», ИП Иванов)
-  const corpMatch = fullText.match(/(?:ООО|АО|ПАО|ЗАО|НАО)\s*["«“]([^"»”\r\n]{2,60})["»”]|(?:ООО|АО|ПАО|ЗАО|НАО)\s+([А-Яа-яA-Za-z0-9\-_]{3,40})|ИП\s+([А-Яа-яA-Za-z0-9\-_]+(?:\s+[А-Яа-яA-Za-z0-9\-_]+)?)/);
+  const corpMatch = fullText.match(/(?:ООО|АО|ПАО|ЗАО|НАО)\s*["«“]([^"»”\r\n]{2,60})["»”]|(?:ООО|АО|ПАО|ЗАО|НАО)\s+([А-Яа-яЁёA-Za-z0-9\-_ ]{3,45})|ИП\s+([А-Яа-яЁёA-Za-z\-_]+(?:\s+[А-Яа-яЁёA-Za-z.\-_]+){1,2})/);
   if (corpMatch) {
-    const found = corpMatch[0].trim();
+    const found = corpMatch[0].split(/\s+(?:ИНН|КПП|Адрес|Покупатель)\b/i)[0].trim();
     const candidate = extractSupplierName(found);
     if (candidate && candidate.length > 2) return candidate;
   }
@@ -398,7 +313,7 @@ export function fallbackExtractSupplierFromText(textContext?: string, fileName?:
 
   // 5. Filename keyword hints
   if (fileName) {
-    const cleanFn = fileName.replace(/\.[^.]+$/, '').replace(/[_.\-+]/g, ' ');
+    const cleanFn = fileName.replace(/\.[^.]+$/, '').replace(/[_.\-+]/g, ' ').trim();
     if (/diplomat|дипломат/i.test(cleanFn)) return 'ООО "ТСК ДИПЛОМАТ"';
     if (/diler|дилер/i.test(cleanFn)) return 'Diler Demir Çelik A.Ş.';
     if (/kardemir/i.test(cleanFn)) return 'Kardemir Demir Çelik A.Ş.';
@@ -407,22 +322,223 @@ export function fallbackExtractSupplierFromText(textContext?: string, fileName?:
     if (/stroysnab|стройснаб/i.test(cleanFn)) return 'ООО "СтройСнаб"';
     if (/metallservice|металлсервис|металл-сервис/i.test(cleanFn)) return 'ООО "МЕТАЛЛ-СЕРВИС"';
     if (/stroykomplekt|стройкомплект/i.test(cleanFn)) return 'ООО "СтройКомплект"';
+    if (cleanFn.length >= 3 && !/^(fatura|teklif|belge|invoice|scan|image|img|doc|document|pdf|\d+)$/i.test(cleanFn)) {
+      return cleanFn;
+    }
   }
 
   return '';
 }
 
-// Full Two-Stage Processing Pipeline with Retry Logic (Max 2 Attempts)
+const RU_MONTHS: Record<string, string> = {
+  'январ': '01', 'феврал': '02', 'март': '03', 'апрел': '04',
+  'ма': '05', 'июн': '06', 'июл': '07', 'август': '08',
+  'сентябр': '09', 'октябр': '10', 'ноябр': '11', 'декабр': '12'
+};
+
+/**
+ * Checks whether extracted PDF text is readable digital text (not garbled CMap glyphs)
+ */
+function isReadableDigitalText(text: string): boolean {
+  if (!text || text.trim().length < 40) return false;
+  const validChars = (text.match(/[A-Za-zА-Яа-яЁёÇĞİÖŞÜçğıöşü0-9]/g) || []).length;
+  const ratio = validChars / text.length;
+  return ratio > 0.35;
+}
+
+/**
+ * Local Resilient Parser: Extracts supplier, invoiceNumber, date, currency, totalAmount, and line items
+ * from PDF digital text or Excel/CSV content whenever AI models are unavailable or return empty results.
+ */
+export function fallbackExtractInvoiceFromTextOrCsv(
+  textOrCsv?: string,
+  fileName?: string,
+  isSummaryOnly?: boolean
+): any {
+  const fullText = (textOrCsv || '').trim();
+  const supplier = fallbackExtractSupplierFromText(fullText, fileName) || 'Tedarikçi Firma';
+
+  // 1. Extract Invoice / Offer Number
+  let invoiceNumber = '';
+  const invMatch =
+    fullText.match(/(?:Счет(?:\s+на\s+оплату)?|Счёт(?:\s+на\s+оплату)?|УПД|Fatura\s*No|Teklif\s*No|Belge\s*No|Invoice\s*(?:No|#)?)\s*(?:№|#|:)?\s*([A-Za-zА-Яа-я0-9\-_/]{1,25})/i) ||
+    fullText.match(/№\s*([A-Za-zА-Яа-я0-9\-_/]{2,20})\s+от/i);
+  if (invMatch && invMatch[1]) {
+    invoiceNumber = invMatch[1].trim();
+  } else if (fileName) {
+    const fnNum = fileName.match(/(?:№|No|FT|TKF|INV)[_\-\s]*([A-Za-z0-9\-]{2,15})/i);
+    if (fnNum && fnNum[1]) invoiceNumber = fnNum[1];
+  }
+  if (!invoiceNumber) {
+    invoiceNumber = `BLG-${Date.now().toString().slice(-6)}`;
+  }
+
+  // 2. Extract Date (YYYY-MM-DD)
+  let date = new Date().toISOString().split('T')[0];
+  const isoMatch = fullText.match(/\b(202\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b/);
+  const dotMatch = fullText.match(/\b(0[1-9]|[12]\d|3[01])[./](0[1-9]|1[0-2])[./](202\d)\b/);
+  const ruDateMatch = fullText.match(/\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+(202\d)\b/i);
+  if (isoMatch) {
+    date = isoMatch[1];
+  } else if (dotMatch) {
+    date = `${dotMatch[3]}-${dotMatch[2]}-${dotMatch[1]}`;
+  } else if (ruDateMatch) {
+    const day = ruDateMatch[1].padStart(2, '0');
+    const mRaw = ruDateMatch[2].toLowerCase();
+    let month = '01';
+    for (const [prefix, mCode] of Object.entries(RU_MONTHS)) {
+      if (mRaw.startsWith(prefix)) {
+        month = mCode;
+        break;
+      }
+    }
+    date = `${ruDateMatch[3]}-${month}-${day}`;
+  }
+
+  // 3. Detect Currency
+  let currency = 'RUB';
+  if (/\b(?:TRY|TL|₺|Türk Lirası)\b/i.test(fullText)) currency = 'TRY';
+  else if (/\b(?:USD|\$)\b/i.test(fullText)) currency = 'USD';
+  else if (/\b(?:EUR|€)\b/i.test(fullText)) currency = 'EUR';
+
+  // 4. Extract Grand Total from Explicit Total Labels (ИТОГО / ВСЕГО К ОПЛАТЕ / Genel Toplam)
+  let explicitTotal = 0;
+  const totalRegexes = [
+    /(?:Всего\s+к\s+оплате|Итого\s+с\s+НДС|Всего\s+наименований[^\r\n]*?на\s+сумму|ИТОГО|ВСЕГО|Genel\s+Toplam|Ödenecek\s+Tutar|Toplam\s+Tutar)\s*[:：;,\t ]*\s*([\d\s\u00A0.,]{3,22})/gi
+  ];
+  for (const rgx of totalRegexes) {
+    let m: RegExpExecArray | null;
+    while ((m = rgx.exec(fullText)) !== null) {
+      const candidateVal = parseNumberSafe(m[1]);
+      if (candidateVal > explicitTotal && candidateVal < 1e11) {
+        explicitTotal = candidateVal;
+      }
+    }
+  }
+
+  // 5. Parse CSV / Table Lines for Items & Sum
+  const fallbackItems: any[] = [];
+  let sumLineTotals = 0;
+  const lines = fullText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+  const summaryKeywordRegex = /^(?:итого|всего|в\s*т\.?\s*ч\.?\s*ндс|ндс|без\s*ндс|toplam|genel\s*toplam|ara\s*toplam|kdv|iskonto|indirim|total|subtotal|сумма)/i;
+  const headerKeywordRegex = /(?:наименование|товары\s*\(работы|malzeme\s*adı|ürün\s*adı|birim\s*fiyat|количество|кол-во|ед\.\s*изм|цена)/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('---')) continue;
+    if (headerKeywordRegex.test(line)) continue;
+
+    const parts = (line.includes(';') ? line.split(';') : line.split(',')).map(p => p.replace(/^["']|["']$/g, '').trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      const joinedLower = parts.join(' ').toLowerCase();
+      if (summaryKeywordRegex.test(parts[0]) || summaryKeywordRegex.test(joinedLower)) {
+        // Check if this summary row has the grand total
+        if (/(?:итого|всего|genel\s*toplam|toplam)/i.test(joinedLower) && !/(?:ндс|kdv|iskonto)/i.test(parts[0])) {
+          const numsInSummary = parts.map(p => parseNumberSafe(p)).filter(n => n > 0 && n < 1e11);
+          if (numsInSummary.length > 0) {
+            const maxSummaryNum = Math.max(...numsInSummary);
+            if (maxSummaryNum > explicitTotal) explicitTotal = maxSummaryNum;
+          }
+        }
+        continue;
+      }
+
+      // Find first non-numeric text column as material description
+      let nameColIdx = -1;
+      for (let c = 0; c < parts.length; c++) {
+        const cell = parts[c];
+        if (cell.length >= 3 && /[A-Za-zА-Яа-яЁёÇĞİÖŞÜçğıöşü]/.test(cell) && !/^\d+$/.test(cell)) {
+          nameColIdx = c;
+          break;
+        }
+      }
+      if (nameColIdx === -1) continue;
+
+      const rawOriginalName = parts[nameColIdx];
+      if (summaryKeywordRegex.test(rawOriginalName)) continue;
+
+      const afterCols = parts.slice(nameColIdx + 1);
+      let unit = 'Adet';
+      const numericValues: number[] = [];
+
+      for (const col of afterCols) {
+        if (/^(?:шт\.?|т|тн|тонн[аы]?|м3|м³|м2|м²|п\.?\s*м\.?|м|кг|л|упак\.?|компл\.?|рул\.?|меш\.?|adet|ton|kg|m3|m2|m|lt|paket|torba|koli)$/i.test(col)) {
+          unit = col;
+        } else {
+          const num = parseNumberSafe(col);
+          if (num > 0 && num < 1e10) {
+            numericValues.push(num);
+          }
+        }
+      }
+
+      if (numericValues.length > 0) {
+        let qty = 1;
+        let unitPrice = numericValues[0];
+        let totalPrice = numericValues[numericValues.length - 1];
+
+        if (numericValues.length >= 3) {
+          qty = numericValues[0];
+          unitPrice = numericValues[1];
+          totalPrice = numericValues[numericValues.length - 1];
+        } else if (numericValues.length === 2) {
+          qty = numericValues[0];
+          totalPrice = numericValues[1];
+          unitPrice = qty > 0 ? Number((totalPrice / qty).toFixed(2)) : totalPrice;
+        }
+
+        if (totalPrice > 0) {
+          sumLineTotals += totalPrice;
+          const trName = translateRussianMaterialToTurkish(rawOriginalName) || rawOriginalName;
+          const cat = normalizeCategoryName('', `${trName} ${rawOriginalName}`);
+          fallbackItems.push({
+            materialName: trName,
+            originalName: rawOriginalName,
+            category: cat,
+            quantity: qty,
+            unit,
+            unitPrice,
+            totalPrice,
+            confidence: 0.85
+          });
+        }
+      }
+    }
+  }
+
+  const finalTotal = explicitTotal > 0 ? explicitTotal : sumLineTotals;
+
+  return {
+    documentType: isSummaryOnly ? 'offer' : 'invoice',
+    supplier: { value: supplier, confidence: 0.85 },
+    vendorName: { value: supplier, confidence: 0.85 },
+    invoiceNumber: { value: invoiceNumber, confidence: 0.85 },
+    date: { value: date, confidence: 0.85 },
+    currency: { value: currency, confidence: 0.90 },
+    totalAmount: { value: finalTotal, confidence: 0.85 },
+    subtotal: { value: finalTotal, confidence: 0.85 },
+    tax: { value: 0, confidence: 0.80 },
+    itemCount: fallbackItems.length || 1,
+    items: isSummaryOnly ? [] : fallbackItems,
+    overallConfidence: 0.85,
+    rawWarnings: []
+  };
+}
+
+// Full Two-Stage Processing Pipeline with Multi-Model Fallback & Argon Escalation
 export async function processInvoiceTwoStages(params: {
   base64Input?: string;
   mimeType?: string;
   excelCsv?: string;
+  fileTextContext?: string;
   fileName?: string;
   additionalPrompt?: string;
   existingInvoices?: any[];
   scanMode?: 'full' | 'summary-only';
   offerType?: 'first' | 'final' | 'round';
   firstOfferBase64?: string;
+  firstOfferFileName?: string;
 }): Promise<{
   success: boolean;
   extracted: any;
@@ -432,124 +548,181 @@ export async function processInvoiceTwoStages(params: {
   retryCount: number;
   stagesCompleted: number;
 }> {
-  const isSummaryOnly = params.scanMode === 'summary-only' || params.offerType === 'first' || params.offerType === 'round';
+  const isSummaryOnly = params.scanMode === 'full'
+    ? false
+    : (params.scanMode === 'summary-only' || params.offerType === 'first' || params.offerType === 'round');
   const ai = getGenAI();
-  let usedModel = 'gemini-3.7-flash';
+  let usedModel = 'gemini-3.8-flash';
   let retryCount = 0;
   let rawExtracted: any = null;
   let standardized: any = null;
 
-  const cleanBase64 = params.base64Input
-    ? (params.base64Input.includes(',') ? params.base64Input.split(',')[1] : params.base64Input)
+  // 1. Inspect & Normalize Main Document Input (Magic Bytes + Extension + Server-side Excel Parser)
+  const normDoc = inspectAndNormalizeDocumentInput(params.base64Input, params.mimeType, params.fileName);
+  const cleanBase64 = normDoc.cleanBase64;
+
+  // Combine all Excel / CSV / client text contexts cleanly
+  const combinedExcelParts: string[] = [];
+  if (params.excelCsv && params.excelCsv.trim()) combinedExcelParts.push(params.excelCsv.trim());
+  if (params.fileTextContext && params.fileTextContext.trim() && !combinedExcelParts.includes(params.fileTextContext.trim())) {
+    combinedExcelParts.push(params.fileTextContext.trim());
+  }
+  if (normDoc.extractedExcelCsv && normDoc.extractedExcelCsv.trim() && !combinedExcelParts.includes(normDoc.extractedExcelCsv.trim())) {
+    combinedExcelParts.push(normDoc.extractedExcelCsv.trim());
+  }
+  const effectiveExcelCsv = combinedExcelParts.length > 0 ? combinedExcelParts.join('\n\n') : undefined;
+
+  // 2. Inspect & Normalize First Offer Document (if provided for scope deduction comparison)
+  const normFirstOffer = params.firstOfferBase64
+    ? inspectAndNormalizeDocumentInput(params.firstOfferBase64, undefined, params.firstOfferFileName)
     : undefined;
 
-  const fileHash = cleanBase64 ? calculateFileHash(cleanBase64) : (params.excelCsv ? calculateFileHash(Buffer.from(params.excelCsv)) : undefined);
-  const fileSizeBytes = cleanBase64 ? Buffer.from(cleanBase64, 'base64').length : (params.excelCsv ? Buffer.from(params.excelCsv).length : 0);
+  const fileHash = cleanBase64
+    ? calculateFileHash(cleanBase64)
+    : (effectiveExcelCsv ? calculateFileHash(Buffer.from(effectiveExcelCsv)) : undefined);
+  const fileSizeBytes = cleanBase64
+    ? Buffer.from(cleanBase64, 'base64').length
+    : (effectiveExcelCsv ? Buffer.from(effectiveExcelCsv).length : 0);
 
-  // Extract embedded digital text from PDF if available for ultra-fast instant OCR (<300ms)
+  // 3. Hybrid PDF Reading: Extract embedded digital text AND keep visual PDF inlineData
   let extractedPdfText = '';
-  if (cleanBase64 && (params.mimeType === 'application/pdf' || params.fileName?.toLowerCase().endsWith('.pdf'))) {
+  if (cleanBase64 && normDoc.isPdf) {
     try {
       const pdfBuf = Buffer.from(cleanBase64, 'base64');
       const parser = new PDFParse({ data: pdfBuf });
       const parsedPdf = await parser.getText();
       const numPages = parsedPdf?.total || 1;
       await parser.destroy().catch(() => {});
-      if (parsedPdf && parsedPdf.text && parsedPdf.text.trim().length > 20) {
-        extractedPdfText = parsedPdf.text.trim();
-        console.log(`[PDF Fast Parser] PDF dijital metin katmanı başarıyla okundu (${extractedPdfText.length} karakter, ${numPages} sayfa)`);
+      if (parsedPdf && parsedPdf.text && isReadableDigitalText(parsedPdf.text)) {
+        extractedPdfText = parsedPdf.text.trim().slice(0, 45000);
+        console.log(`[PDF Hybrid Parser] PDF dijital metin katmanı okundu (${extractedPdfText.length} karakter, ${numPages} sayfa) + Görsel OCR aktif`);
       }
     } catch (pdfErr: any) {
-      console.warn('[PDF Fast Parser Warning] PDF metin katmanı okunamadı, doğrudan görsel OCR uygulanacak:', pdfErr?.message);
+      console.warn('[PDF Hybrid Parser] PDF metin katmanı okunamadı, doğrudan görsel OCR uygulanacak:', pdfErr?.message);
     }
   }
 
-  // IF SUMMARY ONLY (INITIAL OFFER / INTERMEDIATE ROUNDS): Fast single pass with light prompt
-  if (isSummaryOnly) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const lightPrompt = buildStage1SummaryOnlyPrompt(params.excelCsv, params.additionalPrompt, extractedPdfText);
-        const contents: any[] = [];
-      if (params.firstOfferBase64) {
-        const cleanFirst = params.firstOfferBase64.includes(",") ? params.firstOfferBase64.split(",")[1] : params.firstOfferBase64;
+  let firstOfferPdfText = '';
+  if (normFirstOffer?.cleanBase64 && normFirstOffer.isPdf) {
+    try {
+      const firstPdfBuf = Buffer.from(normFirstOffer.cleanBase64, 'base64');
+      const firstParser = new PDFParse({ data: firstPdfBuf });
+      const firstParsed = await firstParser.getText();
+      await firstParser.destroy().catch(() => {});
+      if (firstParsed && firstParsed.text && isReadableDigitalText(firstParsed.text)) {
+        firstOfferPdfText = firstParsed.text.trim().slice(0, 30000);
+      }
+    } catch (_) {}
+  }
+
+  const combinedFirstOfferText = [
+    normFirstOffer?.extractedExcelCsv || '',
+    firstOfferPdfText
+  ].filter(Boolean).join('\n\n') || undefined;
+
+  // Helper to build multimodal contents safely (NEVER sending Excel or octet-stream to inlineData)
+  const buildMultimodalContents = (promptText: string): any[] => {
+    const contents: any[] = [];
+    if (normFirstOffer && normFirstOffer.isSupportedVision && normFirstOffer.cleanBase64) {
+      const firstBytes = Buffer.from(normFirstOffer.cleanBase64, 'base64').length;
+      if (firstBytes < 18 * 1024 * 1024) {
         contents.push({ text: "İLK TEKLİF BELGESİ (Kapsam kontrolü için):" });
         contents.push({
           inlineData: {
-            data: cleanFirst,
-            mimeType: "application/pdf"
+            data: normFirstOffer.cleanBase64,
+            mimeType: normFirstOffer.mimeType
           }
         });
         contents.push({ text: "SON ANLAŞILAN FATURA (Asıl çıkarım buradan yapılacak):" });
       }
-        if (cleanBase64 && (!extractedPdfText || extractedPdfText.length < 150)) {
-          contents.push({
-            inlineData: {
-              data: cleanBase64,
-              mimeType: params.mimeType || 'application/pdf'
-            }
-          });
+    }
+    if (normDoc.isSupportedVision && cleanBase64 && fileSizeBytes < 18 * 1024 * 1024) {
+      contents.push({
+        inlineData: {
+          data: cleanBase64,
+          mimeType: normDoc.mimeType
         }
-        contents.push({ text: lightPrompt });
+      });
+    }
+    contents.push({ text: promptText });
+    return contents;
+  };
 
-        const genResult = await generateContentWithResilience(ai, {
+  // ============================================================================
+  // BRANCH A: SUMMARY-ONLY (INITIAL OFFER / NEGOTIATION ROUNDS)
+  // ============================================================================
+  if (isSummaryOnly) {
+    const lightPrompt = buildStage1SummaryOnlyPrompt(effectiveExcelCsv, params.additionalPrompt, extractedPdfText);
+    const contents = buildMultimodalContents(lightPrompt);
+
+    try {
+      // Pass 1: Fast Flash chain starting with gemini-3.8-flash
+      const genResult = await generateContentWithResilience(ai, {
+        contents,
+        config: { responseMimeType: "application/json" },
+        primaryModel: 'gemini-3.8-flash',
+        validateText: (txt) => {
+          const parsed = robustParseJSON(txt);
+          return Boolean(parsed && typeof parsed === 'object');
+        }
+      });
+      usedModel = genResult.usedModel;
+      rawExtracted = robustParseJSON(genResult.text || '{}');
+
+      const extractedTotal = parseNumberSafe(rawExtracted?.totalAmount?.value ?? rawExtracted?.totalAmount ?? 0);
+      // Escalate to gemini-4-argon if Flash couldn't read totalAmount on a complex document
+      if (extractedTotal <= 0 && !usedModel.includes('argon')) {
+        console.log('[Gemini AI OCR] Zorlu ilk teklif belgesi tespit edildi, gemini-4-argon devreye alınıyor...');
+        retryCount++;
+        const argonRes = await generateContentWithResilience(ai, {
           contents,
           config: { responseMimeType: "application/json" },
-          primaryModel: 'gemini-flash-latest'
+          primaryModel: 'gemini-4-argon'
         });
-        usedModel = genResult.usedModel;
-
-        rawExtracted = robustParseJSON(genResult.text || '{}');
-        if (rawExtracted && (rawExtracted.totalAmount?.value || rawExtracted.totalAmount)) {
-          break;
-        }
-        retryCount++;
-      } catch (err: any) {
-        retryCount++;
-        if (attempt === 2) {
-          if (params.excelCsv) {
-            const localExtractedSupplier = fallbackExtractSupplierFromText(params.excelCsv, params.fileName) || 'Tedarikçi Firma';
-            const lines = params.excelCsv.split('\n').map(l => l.trim()).filter(Boolean);
-            let sumTotal = 0;
-            lines.slice(1).forEach(line => {
-              const parts = line.split(',').map(p => p.trim());
-              if (parts.length >= 2) {
-                const qty = parseFloat(parts[1]) || 1;
-                const price = parseFloat(parts[3]) || 0;
-                const lineTotal = parseFloat(parts[4]) || (qty * price);
-                sumTotal += lineTotal;
-              }
-            });
-
-            rawExtracted = {
-              documentType: 'offer',
-              supplier: { value: localExtractedSupplier, confidence: 0.8 },
-              invoiceNumber: { value: `TKF-${Date.now().toString().slice(-6)}`, confidence: 0.7 },
-              date: { value: new Date().toISOString().split('T')[0], confidence: 0.8 },
-              currency: { value: 'RUB', confidence: 0.8 },
-              totalAmount: { value: sumTotal, confidence: 0.8 },
-              category: 'İnşaat Malzemesi',
-              summary: 'İlk teklif listesi toplam tutarı.',
-              items: []
-            };
-            usedModel = 'local-resilient-parser';
-            break;
-          }
-          throw new Error('İlk teklif üst bilgileri okunurken yapay zeka servisine ulaşılamadı.');
+        const argonParsed = robustParseJSON(argonRes.text || '{}');
+        if (argonParsed && parseNumberSafe(argonParsed?.totalAmount?.value ?? argonParsed?.totalAmount ?? 0) > 0) {
+          rawExtracted = argonParsed;
+          usedModel = argonRes.usedModel;
         }
       }
+    } catch (err: any) {
+      retryCount++;
+      console.warn('[AI Summary OCR] AI modelleri yanıt veremedi, yerel kurtarma ayrıştırıcısı devreye alınıyor:', err?.message);
+      rawExtracted = fallbackExtractInvoiceFromTextOrCsv(
+        [effectiveExcelCsv, extractedPdfText].filter(Boolean).join('\n\n'),
+        params.fileName,
+        true
+      );
+      usedModel = 'local-resilient-parser';
     }
 
-    if (!rawExtracted) {
-      throw new Error('İlk teklif özeti çıkarılamadı. Lütfen tekrar deneyin.');
+    if (!rawExtracted || typeof rawExtracted !== 'object') {
+      rawExtracted = fallbackExtractInvoiceFromTextOrCsv(
+        [effectiveExcelCsv, extractedPdfText].filter(Boolean).join('\n\n'),
+        params.fileName,
+        true
+      );
+      usedModel = 'local-resilient-parser';
     }
+
+    // Supplement missing fields from local parser if AI left totalAmount or supplier empty
+    const localSupplement = fallbackExtractInvoiceFromTextOrCsv(
+      [effectiveExcelCsv, extractedPdfText].filter(Boolean).join('\n\n'),
+      params.fileName,
+      true
+    );
 
     const resolvedSupplier = 
       extractSupplierName(rawExtracted.supplier) ||
       extractSupplierName(rawExtracted.vendorName) ||
       extractSupplierName(rawExtracted.company) ||
       extractSupplierName(rawExtracted.seller) ||
-      fallbackExtractSupplierFromText(params.excelCsv, params.fileName) ||
+      extractSupplierName(localSupplement.supplier) ||
       'Tedarikçi Firma';
+
+    const resolvedTotal =
+      parseNumberSafe(rawExtracted.totalAmount?.value ?? rawExtracted.totalAmount ?? 0) ||
+      parseNumberSafe(localSupplement.totalAmount?.value ?? 0);
 
     const finalSummaryExtracted: any = {
       documentType: rawExtracted.documentType || 'offer',
@@ -558,17 +731,17 @@ export async function processInvoiceTwoStages(params: {
       company: resolvedSupplier,
       seller: resolvedSupplier,
       taxId: extractStringSafe(rawExtracted.taxId),
-      invoiceNumber: extractStringSafe(rawExtracted.invoiceNumber),
-      date: extractStringSafe(rawExtracted.date, new Date().toISOString().split('T')[0]),
+      invoiceNumber: extractStringSafe(rawExtracted.invoiceNumber) || extractStringSafe(localSupplement.invoiceNumber),
+      date: extractStringSafe(rawExtracted.date) || extractStringSafe(localSupplement.date, new Date().toISOString().split('T')[0]),
       currency: extractStringSafe(rawExtracted.currency, 'RUB'),
-      subtotal: parseNumberSafe(rawExtracted.subtotal?.value ?? rawExtracted.subtotal ?? rawExtracted.totalAmount?.value ?? rawExtracted.totalAmount ?? 0),
+      subtotal: parseNumberSafe(rawExtracted.subtotal?.value ?? rawExtracted.subtotal ?? resolvedTotal),
       discount: 0,
       tax: 0,
-      totalAmount: parseNumberSafe(rawExtracted.totalAmount?.value ?? rawExtracted.totalAmount ?? 0),
-      itemCount: parseNumberSafe(rawExtracted.itemCount?.value ?? rawExtracted.itemCount ?? rawExtracted.itemsCount ?? (Array.isArray(rawExtracted.items) ? rawExtracted.items.length : 0)),
+      totalAmount: resolvedTotal,
+      itemCount: parseNumberSafe(rawExtracted.itemCount?.value ?? rawExtracted.itemCount ?? rawExtracted.itemsCount ?? (Array.isArray(rawExtracted.items) && rawExtracted.items.length > 0 ? rawExtracted.items.length : localSupplement.itemCount)),
       category: rawExtracted.category || 'İnşaat Demiri & Çelik',
       summary: rawExtracted.summary || 'İlk teklif özeti (hızlı okuma)',
-      items: [], // INTENTIONALLY EMPTY: Saves memory, speed, token and CPU!
+      items: [],
       overallConfidence: parseNumberSafe(rawExtracted.overallConfidence ?? 0.95),
       rawConfidenceScores: {
         supplier: rawExtracted.supplier?.confidence ?? 0.95,
@@ -600,108 +773,89 @@ export async function processInvoiceTwoStages(params: {
     };
   }
 
-  // AŞAMA 1: HAM VERİ ÇIKARMA (Resilient generator with fallback and backoff for FULL ITEM EXTRACTION)
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const stage1Prompt = buildStage1ExtractionPrompt(params.excelCsv, params.additionalPrompt, extractedPdfText, !!params.firstOfferBase64);
-      const contents: any[] = [];
-      if (params.firstOfferBase64) {
-        const cleanFirst = params.firstOfferBase64.includes(",") ? params.firstOfferBase64.split(",")[1] : params.firstOfferBase64;
-        contents.push({ text: "İLK TEKLİF BELGESİ (Kapsam kontrolü için):" });
-        contents.push({
-          inlineData: {
-            data: cleanFirst,
-            mimeType: "application/pdf"
-          }
-        });
-        contents.push({ text: "SON ANLAŞILAN FATURA (Asıl çıkarım buradan yapılacak):" });
-      }
-      if (cleanBase64 && (!extractedPdfText || extractedPdfText.length < 150)) {
-        contents.push({
-          inlineData: {
-            data: cleanBase64,
-            mimeType: params.mimeType || 'application/pdf'
-          }
-        });
-      }
-      contents.push({ text: stage1Prompt });
+  // ============================================================================
+  // BRANCH B: FULL ITEM EXTRACTION (FINAL INVOICE / SCANNER / COMPARATIVE / AUDIT)
+  // ============================================================================
+  const hasFirstOffer = Boolean(params.firstOfferBase64 || combinedFirstOfferText);
+  const stage1Prompt = buildStage1ExtractionPrompt(
+    effectiveExcelCsv,
+    params.additionalPrompt,
+    extractedPdfText,
+    hasFirstOffer,
+    combinedFirstOfferText
+  );
+  const contents = buildMultimodalContents(stage1Prompt);
 
-      const genResult = await generateContentWithResilience(ai, {
-        contents,
-        config: { responseMimeType: "application/json" },
-        primaryModel: 'gemini-flash-latest'
-      });
-      usedModel = genResult.usedModel;
-
-      rawExtracted = robustParseJSON(genResult.text || '{}');
-      if (rawExtracted && (rawExtracted.totalAmount?.value || rawExtracted.items?.length)) {
-        break; // Successfully extracted
+  try {
+    // Pass 1: Fast & accurate gemini-3.8-flash with multi-model resilience
+    const genResult = await generateContentWithResilience(ai, {
+      contents,
+      config: { responseMimeType: "application/json" },
+      primaryModel: 'gemini-3.8-flash',
+      validateText: (txt) => {
+        const parsed = robustParseJSON(txt);
+        return Boolean(parsed && typeof parsed === 'object');
       }
+    });
+    usedModel = genResult.usedModel;
+    rawExtracted = robustParseJSON(genResult.text || '{}');
+
+    const extractedTotal = parseNumberSafe(rawExtracted?.totalAmount?.value ?? rawExtracted?.totalAmount ?? 0);
+    const extractedItemsCount = Array.isArray(rawExtracted?.items) ? rawExtracted.items.length : 0;
+
+    // Smart Escalation to gemini-4-argon if Flash struggled (missing items or totalAmount on a full scan)
+    if ((extractedItemsCount === 0 || extractedTotal <= 0) && !usedModel.includes('argon')) {
+      console.log(`[Gemini AI OCR] Zorlu fatura/tablo tespit edildi (kalem: ${extractedItemsCount}, tutar: ${extractedTotal}), gemini-4-argon devreye alınıyor...`);
       retryCount++;
-    } catch (err: any) {
-      retryCount++;
-      if (attempt === 2) {
-        // If Excel CSV is available, provide local rule-based structured extraction as resilient fallback
-        if (params.excelCsv) {
-          console.log('[AI OCR Fallback] AI geçici olarak yanıt vermedi, yerel CSV ayrıştırıcı devreye alındı.');
-          const lines = params.excelCsv.split('\n').map(l => l.trim()).filter(Boolean);
-          const fallbackItems: any[] = [];
-          let sumTotal = 0;
-
-          lines.slice(1).forEach((line, idx) => {
-            const parts = line.split(',').map(p => p.trim());
-            if (parts.length >= 2) {
-              const name = parts[0] || `Kalem ${idx + 1}`;
-              const qty = parseFloat(parts[1]) || 1;
-              const unit = parts[2] || 'Adet';
-              const price = parseFloat(parts[3]) || 0;
-              const lineTotal = parseFloat(parts[4]) || (qty * price);
-              sumTotal += lineTotal;
-              fallbackItems.push({
-                materialName: name,
-                originalName: name,
-                category: 'Diğer Malzeme',
-                quantity: qty,
-                unit: unit,
-                unitPrice: price,
-                totalPrice: lineTotal,
-                confidence: 0.8
-              });
-            }
-          });
-
-          const localExtractedSupplier = fallbackExtractSupplierFromText(params.excelCsv, params.fileName) || 'Tedarikçi Firma';
-
-          rawExtracted = {
-            documentType: 'invoice',
-            supplier: { value: localExtractedSupplier, confidence: 0.8 },
-            vendorName: { value: localExtractedSupplier, confidence: 0.8 },
-            invoiceNumber: { value: `EXC-${Date.now().toString().slice(-6)}`, confidence: 0.7 },
-            date: { value: new Date().toISOString().split('T')[0], confidence: 0.8 },
-            currency: { value: 'TL', confidence: 0.8 },
-            totalAmount: { value: sumTotal, confidence: 0.8 },
-            subtotal: { value: sumTotal, confidence: 0.8 },
-            tax: { value: 0, confidence: 0.8 },
-            items: fallbackItems,
-            overallConfidence: 0.8
-          };
-          usedModel = 'local-resilient-parser';
-          break;
+      try {
+        const argonRes = await generateContentWithResilience(ai, {
+          contents,
+          config: { responseMimeType: "application/json" },
+          primaryModel: 'gemini-4-argon'
+        });
+        const argonParsed = robustParseJSON(argonRes.text || '{}');
+        const argonItems = Array.isArray(argonParsed?.items) ? argonParsed.items.length : 0;
+        const argonTotal = parseNumberSafe(argonParsed?.totalAmount?.value ?? argonParsed?.totalAmount ?? 0);
+        if (argonItems > extractedItemsCount || (extractedTotal <= 0 && argonTotal > 0)) {
+          rawExtracted = argonParsed;
+          usedModel = argonRes.usedModel;
         }
-
-        throw new Error('Yapay zeka servisleri şu anda yoğun talep altında. Lütfen birkaç saniye sonra tekrar deneyin veya Excel formatında yükleyin.');
+      } catch (argonErr: any) {
+        console.warn('[Gemini AI OCR] Argon ek analizi tamamlanamadı, mevcut veri korunuyor:', argonErr?.message);
       }
+    }
+  } catch (err: any) {
+    retryCount++;
+    console.warn('[AI Full OCR] AI servisleri yanıt veremedi, yerel akıllı ayrıştırıcı devreye alınıyor:', err?.message);
+    rawExtracted = fallbackExtractInvoiceFromTextOrCsv(
+      [effectiveExcelCsv, extractedPdfText].filter(Boolean).join('\n\n'),
+      params.fileName,
+      false
+    );
+    usedModel = 'local-resilient-parser';
+  }
+
+  // Local Resilient Supplement if AI returned empty object or missed items/totals when text/CSV is available
+  const localFallback = fallbackExtractInvoiceFromTextOrCsv(
+    [effectiveExcelCsv, extractedPdfText].filter(Boolean).join('\n\n'),
+    params.fileName,
+    false
+  );
+
+  if (!rawExtracted || typeof rawExtracted !== 'object') {
+    rawExtracted = localFallback;
+    usedModel = 'local-resilient-parser';
+  } else {
+    if ((!Array.isArray(rawExtracted.items) || rawExtracted.items.length === 0) && localFallback.items.length > 0) {
+      rawExtracted.items = localFallback.items;
+    }
+    if (parseNumberSafe(rawExtracted.totalAmount?.value ?? rawExtracted.totalAmount ?? 0) <= 0 && localFallback.totalAmount.value > 0) {
+      rawExtracted.totalAmount = localFallback.totalAmount;
     }
   }
 
-  if (!rawExtracted) {
-    throw new Error('Ham Veri Çıkarma ve Standartlaştırma tamamlanamadı. Lütfen tekrar deneyin.');
-  }
-
-  // AŞAMA 2 (İptal Edildi - Tek adımda gemini-3.7-flash ile çözüldü)
-  // Hızlandırma amacıyla Stage 1'de hem çıkarma hem çeviri birleştirildi
   standardized = rawExtracted;
-  if (!standardized.items) {
+  if (!Array.isArray(standardized.items)) {
     standardized.items = [];
   }
 
@@ -715,28 +869,21 @@ export async function processInvoiceTwoStages(params: {
     extractSupplierName(rawExtracted.company) ||
     extractSupplierName(standardized.seller) ||
     extractSupplierName(rawExtracted.seller) ||
-    fallbackExtractSupplierFromText(params.excelCsv, params.fileName) ||
+    extractSupplierName(localFallback.supplier) ||
     'Tedarikçi Firma';
 
-  const finalExtracted: any = {
-    documentType: standardized.documentType || rawExtracted.documentType || 'invoice',
-    supplier: resolvedSupplier,
-    vendorName: resolvedSupplier,
-    company: resolvedSupplier,
-    seller: resolvedSupplier,
-    taxId: extractStringSafe(standardized.taxId) || extractStringSafe(rawExtracted.taxId),
-    invoiceNumber: extractStringSafe(standardized.invoiceNumber) || extractStringSafe(rawExtracted.invoiceNumber),
-    date: extractStringSafe(standardized.date) || extractStringSafe(rawExtracted.date, new Date().toISOString().split('T')[0]),
-    currency: extractStringSafe(standardized.currency) || extractStringSafe(rawExtracted.currency, 'RUB'),
-    subtotal: parseNumberSafe(standardized.subtotal?.value ?? standardized.subtotal ?? rawExtracted.subtotal?.value ?? 0),
-    discount: parseNumberSafe(standardized.discount?.value ?? standardized.discount ?? rawExtracted.discount?.value ?? 0),
-    tax: parseNumberSafe(standardized.tax?.value ?? standardized.tax ?? rawExtracted.tax?.value ?? 0),
-    totalAmount: parseNumberSafe(standardized.totalAmount?.value ?? standardized.totalAmount ?? rawExtracted.totalAmount?.value ?? 0),
-    scopeDeductionAmount: parseNumberSafe(standardized.scopeDeductionAmount?.value ?? standardized.scopeDeductionAmount ?? rawExtracted.scopeDeductionAmount?.value ?? rawExtracted.scopeDeductionAmount ?? 0),
-    scopeDeductionReason: standardized.scopeDeductionReason?.value ?? standardized.scopeDeductionReason ?? rawExtracted.scopeDeductionReason?.value ?? rawExtracted.scopeDeductionReason ?? '',
-    items: (standardized.items || rawExtracted.items || []).map((it: any) => {
+  const resolvedDateStr = extractStringSafe(standardized.date) || extractStringSafe(rawExtracted.date) || extractStringSafe(localFallback.date, new Date().toISOString().split('T')[0]);
+  const defaultVatPct = resolvedDateStr.startsWith('2025') ? 20 : 22;
+  let excludedFreightNetSum = 0;
+  let excludedFreightGrossSum = 0;
+
+  const mappedItems = (standardized.items || [])
+    .map((it: any) => {
       let rawName = it.materialName || it.originalName || 'Malzeme Kalemi';
       let origName = it.originalName || it.materialName || '';
+      if (/[А-Яа-яЁё]/.test(rawName)) {
+        rawName = translateRussianMaterialToTurkish(rawName) || rawName;
+      }
       let cat = normalizeCategoryName(it.category, `${rawName} ${origName}`);
       const combined = `${rawName} ${origName}`.toLowerCase();
 
@@ -757,14 +904,36 @@ export async function processInvoiceTwoStages(params: {
         cat = 'Sarf Malzeme & Hırdavat';
       }
 
+      const qty = parseNumberSafe(it.quantity) || 1;
+      const vatPct = it.vatPercentage !== undefined && it.vatPercentage !== null ? parseNumberSafe(it.vatPercentage) : defaultVatPct;
+      let uPriceNet = parseNumberSafe(it.unitPriceNet ?? it.unitPrice) || 0;
+      let uPriceGross = parseNumberSafe(it.grossUnitPrice) || 0;
+      let tPriceNet = parseNumberSafe(it.totalPrice) || Number((qty * uPriceNet).toFixed(2));
+      let tPriceGross = parseNumberSafe(it.grossTotalPrice) || 0;
+
+      if (uPriceNet <= 0 && qty > 0 && tPriceNet > 0) {
+        uPriceNet = Number((tPriceNet / qty).toFixed(2));
+      }
+      if (uPriceGross <= 0 && uPriceNet > 0) {
+        uPriceGross = vatPct > 0 ? Number((uPriceNet * (1 + vatPct / 100)).toFixed(2)) : uPriceNet;
+      }
+      if (tPriceGross <= 0) {
+        tPriceGross = Number((qty * uPriceGross).toFixed(2));
+      }
+
       return {
         materialName: rawName,
         originalName: origName,
         category: normalizeCategoryName(cat, `${rawName} ${origName}`),
-        quantity: parseNumberSafe(it.quantity) || 1,
+        quantity: qty,
         unit: it.unit || 'Adet',
-        unitPrice: parseNumberSafe(it.unitPrice) || 0,
-        totalPrice: parseNumberSafe(it.totalPrice) || (parseNumberSafe(it.quantity || 1) * parseNumberSafe(it.unitPrice || 0)),
+        unitPrice: uPriceNet,
+        unitPriceNet: uPriceNet,
+        grossUnitPrice: uPriceGross,
+        totalPrice: tPriceNet,
+        grossTotalPrice: tPriceGross,
+        vatPercentage: vatPct,
+        isNetNormalized: true,
         discountAmount: parseNumberSafe(it.discountAmount) || 0,
         brand: it.brand || '',
         model: it.model || '',
@@ -775,7 +944,45 @@ export async function processInvoiceTwoStages(params: {
         color: it.color || '',
         confidence: typeof it.confidence === 'number' ? it.confidence : 0.95
       };
-    }),
+    })
+    .filter((it: any) => {
+      const m = `${it.materialName || ''} ${it.originalName || ''}`.toLowerCase();
+      const isFreightOrService =
+        (/доставк|организация\s*доставк|грузоперевоз|перевозк|транспортн|автоуслуг|манипулятор|логистик|погруз|разгруз|услуг[аи]\s+по|\bnakliye\b|teslimat\s*hizmet|kargo/i.test(m) &&
+         !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел|швеллер|угол|труба|арматур|лист|балка|сетка|кабель|провод|доска|брус|фанер/i.test(m));
+      if (isFreightOrService) {
+        excludedFreightNetSum += Number(it.totalPrice) || 0;
+        excludedFreightGrossSum += Number(it.grossTotalPrice) || Number(it.totalPrice) || 0;
+        return false;
+      }
+      return true;
+    });
+
+  const computedItemsSum = mappedItems.reduce((acc: number, item: any) => acc + (Number(item.grossTotalPrice || item.totalPrice) || 0), 0);
+  const rawTotalAmount = parseNumberSafe(standardized.totalAmount?.value ?? standardized.totalAmount ?? rawExtracted.totalAmount?.value ?? 0);
+  const finalTotalAmount = rawTotalAmount > 0 ? rawTotalAmount : computedItemsSum;
+
+  const finalExtracted: any = {
+    documentType: standardized.documentType || rawExtracted.documentType || 'invoice',
+    supplier: resolvedSupplier,
+    vendorName: resolvedSupplier,
+    company: resolvedSupplier,
+    seller: resolvedSupplier,
+    taxId: extractStringSafe(standardized.taxId) || extractStringSafe(rawExtracted.taxId),
+    invoiceNumber: extractStringSafe(standardized.invoiceNumber) || extractStringSafe(rawExtracted.invoiceNumber) || extractStringSafe(localFallback.invoiceNumber),
+    date: resolvedDateStr,
+    currency: extractStringSafe(standardized.currency) || extractStringSafe(rawExtracted.currency, 'RUB'),
+    subtotal: parseNumberSafe(standardized.subtotal?.value ?? standardized.subtotal ?? rawExtracted.subtotal?.value ?? finalTotalAmount),
+    discount: parseNumberSafe(standardized.discount?.value ?? standardized.discount ?? rawExtracted.discount?.value ?? 0),
+    tax: parseNumberSafe(standardized.tax?.value ?? standardized.tax ?? rawExtracted.tax?.value ?? 0),
+    totalAmount: finalTotalAmount,
+    ...(excludedFreightNetSum > 0 ? {
+      excludedFreightAmount: Number(excludedFreightNetSum.toFixed(2)),
+      excludedFreightGrossAmount: Number(excludedFreightGrossSum.toFixed(2))
+    } : {}),
+    scopeDeductionAmount: parseNumberSafe(standardized.scopeDeductionAmount?.value ?? standardized.scopeDeductionAmount ?? rawExtracted.scopeDeductionAmount?.value ?? rawExtracted.scopeDeductionAmount ?? 0),
+    scopeDeductionReason: standardized.scopeDeductionReason?.value ?? standardized.scopeDeductionReason ?? rawExtracted.scopeDeductionReason?.value ?? rawExtracted.scopeDeductionReason ?? '',
+    items: mappedItems,
     overallConfidence: parseNumberSafe(standardized.overallConfidence ?? rawExtracted.overallConfidence ?? 0.95),
     rawConfidenceScores: {
       supplier: standardized.supplier?.confidence ?? 0.95,

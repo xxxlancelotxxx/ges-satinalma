@@ -11,6 +11,11 @@ import { ensureRussianOriginalName } from '../utils/categoryClassifier';
 import { isLowPriorityConsumable } from '../utils/lowPriorityConsumables';
 import { analyzeMaterialSegment, areMaterialSegmentsCompatible } from '../utils/materialSegmentIntelligence';
 import {
+  DualComparisonLens,
+  buildMode1AppleToAppleComparisons,
+  buildMode2CrossBrandFamilies
+} from '../utils/dualMaterialComparisonEngine';
+import {
   AlertTriangle,
   TrendingUp,
   TrendingDown,
@@ -49,8 +54,9 @@ interface Props {
   discounts: DiscountRecord[];
   comparisons: MaterialComparison[];
   jobsites: Jobsite[];
-  supervisors: PurchasingSupervisor[];
   onNavigateToMaterial?: (materialName: string) => void;
+  onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => void | Promise<void>;
+  onDeleteInvoice?: (id: string) => void | Promise<void>;
 }
 
 export interface AnomalyAlert {
@@ -117,13 +123,16 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
   comparisons,
   jobsites,
   supervisors,
-  onNavigateToMaterial
+  onNavigateToMaterial,
+  onUpdateInvoice,
+  onDeleteInvoice
 }) => {
   const { t, language } = useLanguage();
   const { user } = useAuth();
 
   // Active view tab: 'ACTIVE' (unacknowledged) vs 'ARCHIVED' (acknowledged by manager)
   const [activeViewTab, setActiveViewTab] = useState<'ACTIVE' | 'ARCHIVED'>('ACTIVE');
+  const [anomalyLens, setAnomalyLens] = useState<DualComparisonLens>('MODE_1_APPLE_TO_APPLE');
   const [selectedType, setSelectedType] = useState<string>('ALL');
   const [selectedSeverity, setSelectedSeverity] = useState<string>('ALL');
   const [selectedJobsite, setSelectedJobsite] = useState<string>('ALL');
@@ -131,6 +140,9 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
   const [sortBy, setSortBy] = useState<'IMPACT' | 'PERCENTAGE' | 'DATE'>('PERCENTAGE');
   // Ofis/kartuş/deterjan/ikram gibi düşük öncelikli, çok değişken sarflar varsayılan olarak gizli
   const [showLowPriority, setShowLowPriority] = useState<boolean>(false);
+
+  const mode1Comparisons = useMemo(() => buildMode1AppleToAppleComparisons(comparisons), [comparisons]);
+  const mode2Families = useMemo(() => buildMode2CrossBrandFamilies(comparisons), [comparisons]);
 
   // Manager acknowledgements map: { [anomalyId]: AnomalyAcknowledgement }
   const [acknowledgedMap, setAcknowledgedMap] = useState<Record<string, AnomalyAcknowledgement>>(() => {
@@ -442,8 +454,46 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
       return true;
     };
 
+    // If Mode 2 (Muadil Marka Ekonomi Fırsatları) is selected, generate Cross-Brand Economy Alerts
+    if (anomalyLens === 'MODE_2_BRAND_EQUIVALENT') {
+      mode2Families.forEach((fam, fIdx) => {
+        if (fam.totalPotentialEconomyRub <= 0 || fam.brands.length < 2) return;
+        const cheapest = fam.cheapestBrand;
+        fam.brands.forEach(b => {
+          if (b.brandKey === cheapest.brandKey || b.potentialSavingsIfSwitchedToCheapest < 300) return;
+          list.push({
+            id: `mode2_brand_eco_${fam.familyId}_${b.brandKey}_${fIdx}`,
+            type: 'JOBSITE_PRICE_GAP',
+            severity: b.diffVsCheapestPct >= 20 ? 'CRITICAL' : 'WARNING',
+            title: `Muadil Marka Ekonomi Fırsatı: ${b.brandDisplay} yerine ${cheapest.brandDisplay} (-%${b.diffVsCheapestPct})`,
+            materialName: `${fam.canonicalFamilyTitleTr} [${fam.canonicalSpecLabel}]`,
+            russianSubtitle: `${b.originalWritings[0] || fam.canonicalFamilyTitleRu} ⟷ ${cheapest.originalWritings[0] || fam.canonicalFamilyTitleRu}`,
+            category: fam.category,
+            vendorName: `${b.brandDisplay} (${formatRuble(b.avgUnitPrice)}) → Muadil: ${cheapest.brandDisplay} (${formatRuble(cheapest.avgUnitPrice)})`,
+            jobsiteName: b.jobsites.join(', ') || 'Şantiye Alımı',
+            previousPrice: cheapest.avgUnitPrice,
+            currentPrice: b.avgUnitPrice,
+            minUnitPrice: cheapest.avgUnitPrice,
+            maxUnitPrice: b.avgUnitPrice,
+            avgUnitPrice: b.avgUnitPrice,
+            percentageChange: b.diffVsCheapestPct,
+            financialImpact: b.potentialSavingsIfSwitchedToCheapest,
+            dateStr: b.history?.[0]?.date || new Date().toISOString().split('T')[0],
+            invoiceNo: b.history?.[0]?.invoiceNumber,
+            quantity: b.totalQuantity,
+            unit: fam.unit,
+            marketCluster: 'GENERAL',
+            description: `Faturadaki orijinal teknik özellikleri birebir aynı olan (${fam.originalSpecSummary}) grupta "${b.brandDisplay}" markası ortalama ${formatRuble(b.avgUnitPrice)}/${fam.unit} fiyattan alınmıştır. Aynı teknik özellikteki muadil "${cheapest.brandDisplay}" markası ise ${formatRuble(cheapest.avgUnitPrice)}/${fam.unit} fiyatla temin edilmektedir.`,
+            recommendation: `Teknik şartnameye uygun olması halinde sonraki siparişlerde "${b.brandDisplay}" yerine "${cheapest.brandDisplay}" muadil markası tercih edilerek ${b.totalQuantity} ${fam.unit} alımda net ${formatRuble(b.potentialSavingsIfSwitchedToCheapest)} ekonomi sağlanabilir.`
+          });
+        });
+      });
+
+      return list.sort((a, b) => b.financialImpact - a.financialImpact);
+    }
+
     // 1. Same Supplier Price Hike Detection (Canonical Elma-Elma Normalized Comparisons)
-    comparisons.forEach((comp) => {
+    mode1Comparisons.forEach((comp) => {
       if (!comp || !comp.materialName || !Array.isArray(comp.history) || comp.history.length < 2) return;
       if (isServiceItem(comp.materialName, comp.category)) return;
       if (isExemptFromBenchmarkAudit(comp.materialName, comp.category).isExempt) return;
@@ -457,17 +507,24 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
         byVendor[vKey].push(h);
       });
 
-      const mappedHistoryRows = comp.history.map((h: any) => ({
-        date: (h.date || '').split('T')[0],
-        invoiceNo: h.invoiceNumber || 'Fatura',
-        supplier: h.supplier || 'Tedarikçi',
-        jobsiteName: h.jobsiteName || 'Genel Şantiye',
-        quantity: Number(h.normalizedQuantity || h.quantity || 1),
-        unit: comp.standardUnit || comp.unit || h.unit || 'Adet',
-        unitPrice: Number(h.normalizedUnitPrice || h.unitPrice || 0),
-        originalName: ensureRussianOriginalName(comp.materialName, h.originalName),
-        conversionFormula: h.conversionFormula
-      }));
+      const mappedHistoryRows = comp.history.map((h: any) => {
+        const netUp = Number(h.normalizedUnitPrice || h.unitPrice || 0);
+        const vatPct = Number(h.vatPercentage) || 22;
+        const grossUp = Number(h.grossUnitPrice) || Number((netUp * (1 + vatPct / 100)).toFixed(2));
+        return {
+          date: (h.date || '').split('T')[0],
+          invoiceNo: h.invoiceNumber || 'Fatura',
+          supplier: h.supplier || 'Tedarikçi',
+          jobsiteName: h.jobsiteName || 'Genel Şantiye',
+          quantity: Number(h.normalizedQuantity || h.quantity || 1),
+          unit: comp.standardUnit || comp.unit || h.unit || 'Adet',
+          unitPrice: netUp,
+          grossUnitPrice: grossUp,
+          vatPercentage: vatPct,
+          originalName: ensureRussianOriginalName(comp.materialName, h.originalName),
+          conversionFormula: h.conversionFormula
+        };
+      });
 
       Object.values(byVendor).forEach((vHist) => {
         if (vHist.length < 2) return;
@@ -475,9 +532,19 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
         const first = sorted[0];
         const latest = sorted[sorted.length - 1];
         if (!areHistoryEntriesStrictlyEquivalent(first, latest, comp.materialName, comp.category)) return;
-        const prevPrice = Number(first.normalizedUnitPrice || first.unitPrice || 0);
-        const currPrice = Number(latest.normalizedUnitPrice || latest.unitPrice || 0);
+        let prevPrice = Number(first.normalizedUnitPrice || first.unitPrice || 0);
+        let currPrice = Number(latest.normalizedUnitPrice || latest.unitPrice || 0);
         const currQty = Number(latest.normalizedQuantity || latest.quantity || 1);
+
+        // Smart VAT Ratio Detector: if ratio is 1.20x or 1.22x (±0.6%), normalize to Net
+        if (prevPrice > 0 && currPrice > 0) {
+          const ratio = currPrice / prevPrice;
+          if (Math.abs(ratio - 1.22) <= 0.006 || Math.abs(ratio - 1.20) <= 0.006) {
+            currPrice = prevPrice;
+          } else if (Math.abs(1 / ratio - 1.22) <= 0.006 || Math.abs(1 / ratio - 1.20) <= 0.006) {
+            prevPrice = currPrice;
+          }
+        }
 
         if (prevPrice > 0 && currPrice > prevPrice) {
           const priceDiff = currPrice - prevPrice;
@@ -525,12 +592,15 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
     });
 
     // 2. Elma-Elma Malzeme Fiyat Farkı & Şantiyeler / Tedarikçiler Arası Sapma Tespiti
-    comparisons.forEach((comp, idx) => {
+    mode1Comparisons.forEach((comp, idx) => {
       if (!comp || !comp.materialName || !Array.isArray(comp.history) || comp.history.length < 2) return;
       if (isServiceItem(comp.materialName, comp.category)) return;
       if (isExemptFromBenchmarkAudit(comp.materialName, comp.category).isExempt) return;
 
       if (comp.priceDifferencePercentage >= 5 && comp.minUnitPrice > 0) {
+        const ratio = comp.maxUnitPrice / comp.minUnitPrice;
+        if (Math.abs(ratio - 1.22) <= 0.006 || Math.abs(ratio - 1.20) <= 0.006) return;
+
         const stdUnit = comp.standardUnit || comp.unit || 'Adet';
         const sortedByPrice = [...comp.history].sort((a, b) => Number(a.unitPrice) - Number(b.unitPrice));
         const cheapestRec = sortedByPrice[0];
@@ -555,17 +625,24 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
           ? `jobsite_gap_${comp.id}_${idx}`
           : `jobsite_gap_${cleanMatName}_${stdUnit.replace(/\s+/g, '_')}_${idx}`;
 
-        const mappedHistoryRows = comp.history.map((h: any) => ({
-          date: (h.date || '').split('T')[0],
-          invoiceNo: h.invoiceNumber || 'Fatura',
-          supplier: h.supplier || 'Tedarikçi',
-          jobsiteName: h.jobsiteName || 'Genel Şantiye',
-          quantity: Number(h.normalizedQuantity || h.quantity || 1),
-          unit: stdUnit,
-          unitPrice: Number(h.normalizedUnitPrice || h.unitPrice || 0),
-          originalName: ensureRussianOriginalName(comp.materialName, h.originalName),
-          conversionFormula: h.conversionFormula
-        }));
+        const mappedHistoryRows = comp.history.map((h: any) => {
+          const netUp = Number(h.normalizedUnitPrice || h.unitPrice || 0);
+          const vatPct = Number(h.vatPercentage) || 22;
+          const grossUp = Number(h.grossUnitPrice) || Number((netUp * (1 + vatPct / 100)).toFixed(2));
+          return {
+            date: (h.date || '').split('T')[0],
+            invoiceNo: h.invoiceNumber || 'Fatura',
+            supplier: h.supplier || 'Tedarikçi',
+            jobsiteName: h.jobsiteName || 'Genel Şantiye',
+            quantity: Number(h.normalizedQuantity || h.quantity || 1),
+            unit: stdUnit,
+            unitPrice: netUp,
+            grossUnitPrice: grossUp,
+            vatPercentage: vatPct,
+            originalName: ensureRussianOriginalName(comp.materialName, h.originalName),
+            conversionFormula: h.conversionFormula
+          };
+        });
 
         list.push({
           id: alertId,
@@ -663,7 +740,7 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
       }
       return b.financialImpact - a.financialImpact;
     });
-  }, [invoices, discounts, comparisons, language]);
+  }, [invoices, discounts, comparisons, mode1Comparisons, mode2Families, anomalyLens, language]);
 
   // Handle Manager Acknowledge (Dismiss from active view)
   const handleAcknowledgeAlert = async (alert: AnomalyAlert, reasonParam?: string, noteParam?: string) => {
@@ -991,6 +1068,38 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
               </p>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* Dual Comparison Mode Switcher inside Anomaly Radar */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="text-xs font-extrabold text-slate-700 flex items-center space-x-2">
+          <Layers className="w-4 h-4 text-indigo-600" />
+          <span>Anomali Kıyaslama Merceği (Faturadaki Orijinal Metin Bazlı):</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setAnomalyLens('MODE_1_APPLE_TO_APPLE')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+              anomalyLens === 'MODE_1_APPLE_TO_APPLE'
+                ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs'
+                : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+            }`}
+          >
+            1. Seçenek: Elma-Elma Şantiye & Firma Sapmaları (Varsayılan)
+          </button>
+          <button
+            type="button"
+            onClick={() => setAnomalyLens('MODE_2_BRAND_EQUIVALENT')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+              anomalyLens === 'MODE_2_BRAND_EQUIVALENT'
+                ? 'bg-amber-600 text-white border-amber-700 shadow-xs'
+                : 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-200'
+            }`}
+          >
+            2. Seçenek: Muadil Marka Ekonomi Fırsatları (Knauf vs Volma / Icopal vs TechnoNICOL)
+          </button>
         </div>
       </div>
 
@@ -1416,8 +1525,11 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
                                     <td className="py-1.5 px-3 font-mono text-right text-slate-600">
                                       {hRow.quantity.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} {hRow.unit}
                                     </td>
-                                    <td className="py-1.5 px-3 font-mono font-bold text-right text-slate-900">
-                                      {formatRuble(hRow.unitPrice)} / {hRow.unit}
+                                    <td className="py-1.5 px-3 font-mono tabular-nums font-bold text-right text-slate-900">
+                                      <div>{formatRuble(hRow.unitPrice)} / {hRow.unit} (Net)</div>
+                                      <div className="text-[10px] font-normal text-slate-500">
+                                        KDV Dahil: {formatRuble((hRow as any).grossUnitPrice || Number((hRow.unitPrice * 1.22).toFixed(2)))}
+                                      </div>
                                     </td>
                                     <td className="py-1.5 px-3 font-mono font-bold text-right">
                                       {isCheapest ? (
@@ -1869,7 +1981,8 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
           supervisors={supervisors}
           jobsites={jobsites}
           onClose={() => setSelectedInvoiceForModal(null)}
-          onInvoiceUpdated={() => {}}
+          onUpdateInvoice={onUpdateInvoice}
+          onDeleteInvoice={onDeleteInvoice}
         />
       )}
     </div>

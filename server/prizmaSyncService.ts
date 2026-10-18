@@ -40,6 +40,8 @@ export interface PrizmaInvoiceRecord {
   prizmaBtfUrl: string;
   prizmaStfUrl?: string;
   invoiceFileId?: number;
+  excludedFreightAmount?: number;
+  excludedFreightGrossAmount?: number;
   items: Array<{
     id: string;
     materialName: string;
@@ -48,8 +50,12 @@ export interface PrizmaInvoiceRecord {
     quantity: number;
     unit: string;
     unitPrice: number;
+    unitPriceNet?: number;
+    grossUnitPrice?: number;
     totalPrice: number;
+    grossTotalPrice?: number;
     vatPercentage?: number;
+     isNetNormalized?: boolean;
     activityName?: string;
     category?: string;
   }>;
@@ -244,6 +250,26 @@ class PrizmaSyncService {
     }
   }
 
+  public markAsDeleted(idOrDemandId: string | number) {
+    if (!idOrDemandId) return;
+    const strId = String(idOrDemandId);
+    if (this.memoryCache) {
+      this.memoryCache = this.memoryCache.map(inv => {
+        if (
+          inv.id === strId ||
+          `prizma_${inv.prizmaDemandId}` === strId ||
+          `inv_prizma_${inv.prizmaDemandId}` === strId ||
+          String(inv.prizmaDemandId) === strId
+        ) {
+          return { ...inv, isDeleted: true };
+        }
+        return inv;
+      });
+      this.cleanListCache = null;
+      this.saveToDisk(this.memoryCache);
+    }
+  }
+
   public async getInvoicesCached(): Promise<PrizmaInvoiceRecord[]> {
     const now = Date.now();
     let rawList: PrizmaInvoiceRecord[] = [];
@@ -286,7 +312,19 @@ class PrizmaSyncService {
         : (inv.prizmaStfUrl ? inv.prizmaStfUrl.replace(/\/detail\/[^\/]+\//, '/detail/-1/') : undefined);
 
       const cachedOrderRows = inv.prizmaOrderDemandId ? this.orderRowsCache.get(inv.prizmaOrderDemandId) : undefined;
-      const mappedItems = (inv.items || [])
+      const rawItemsList = inv.items || [];
+      const docYear = String(inv.date || '').slice(0, 4);
+      const isIpMalyavin = /(^|[\s"«])ип\s*["«]?малявин/i.test(inv.supplier || inv.vendorName || '');
+      const hasVat20Or22OnInvoice = rawItemsList.some(x => Number(x.vatPercentage) === 20 || Number(x.vatPercentage) === 22);
+      const rawSumUnitQty = rawItemsList.reduce((s, x) => s + (Number(x.unitPrice) || 0) * (Number(x.quantity) || 1), 0);
+      const invTot = Number(inv.totalAmount) || 0;
+      const isInvoiceAlreadyNet = invTot > 0 && rawSumUnitQty > 0 && (invTot / rawSumUnitQty >= 1.12 && invTot / rawSumUnitQty <= 1.40);
+
+      let excludedFreightNetSum = Number(inv.excludedFreightAmount) || 0;
+      let excludedFreightGrossSum = Number(inv.excludedFreightGrossAmount) || 0;
+      let trackedFreightHere = false;
+
+      const mappedItems = rawItemsList
         .map((it, idx) => {
           const matchedRow = Array.isArray(cachedOrderRows)
             ? (cachedOrderRows.find((r: any) => `prizma_row_${r.id}` === it.id) || cachedOrderRows[idx])
@@ -347,17 +385,72 @@ class PrizmaSyncService {
             it.category && it.category !== 'MALZEME' && !isGenericStockCard && !isFullRussianRowDesc ? it.category : '',
             `${russianOrig} ${effectiveTrSource}`
           );
+
+          const rowQty = Number(it.quantity) || 1;
+          const combinedItemText = `${effectiveTrSource} ${russianOrig}`.toLowerCase();
+          const isMedicalExempt = /медицин|термометр|тонометр|носилки|жгут|бинт|аптечк|анализатор|кушетк|шины|шприц|параван|muayene/i.test(combinedItemText);
+          const rawVatVal = matchedRow?.vatPercentage !== undefined && matchedRow?.vatPercentage !== null
+            ? Number(matchedRow.vatPercentage)
+            : (it.vatPercentage !== undefined && it.vatPercentage !== null ? Number(it.vatPercentage) : 22);
+
+          let effectiveVatPct = 22;
+          if (isIpMalyavin) {
+            effectiveVatPct = 0;
+          } else if (rawVatVal === 10) {
+            effectiveVatPct = 10;
+          } else if (rawVatVal === 0) {
+            effectiveVatPct = (hasVat20Or22OnInvoice && !isMedicalExempt) ? (docYear === '2025' ? 20 : 22) : 0;
+          } else {
+            effectiveVatPct = docYear === '2025' ? 20 : 22;
+          }
+
+          let unitPriceNet = Number(it.unitPrice) || 0;
+          let grossUnitPrice = Number(it.grossUnitPrice) || 0;
+
+          if (it.isNetNormalized && it.unitPriceNet && it.grossUnitPrice && !isIpMalyavin) {
+            unitPriceNet = Number(Number(it.unitPriceNet).toFixed(2));
+            grossUnitPrice = Number(Number(it.grossUnitPrice).toFixed(2));
+          } else if (isInvoiceAlreadyNet) {
+            unitPriceNet = Number((Number(it.unitPrice) || 0).toFixed(2));
+            grossUnitPrice = effectiveVatPct > 0
+              ? Number((unitPriceNet * (1 + effectiveVatPct / 100)).toFixed(2))
+              : unitPriceNet;
+          } else {
+            const rawGross = Number(it.grossUnitPrice || matchedRow?.price || it.unitPrice) || 0;
+            grossUnitPrice = Number(rawGross.toFixed(2));
+            unitPriceNet = effectiveVatPct > 0
+              ? Number((rawGross / (1 + effectiveVatPct / 100)).toFixed(2))
+              : grossUnitPrice;
+          }
+
+          const netTotalPrice = Number((unitPriceNet * rowQty).toFixed(2));
+          const grossTotalPrice = Number((grossUnitPrice * rowQty).toFixed(2));
+
           return {
             ...it,
             materialName: effectiveTrSource || origRaw || 'Malzeme',
             originalName: russianOrig || origRaw || matRaw,
-            category: itemCat
+            category: itemCat,
+            unitPrice: unitPriceNet,
+            unitPriceNet,
+            grossUnitPrice,
+            totalPrice: netTotalPrice,
+            grossTotalPrice,
+            vatPercentage: effectiveVatPct,
+            isNetNormalized: true
           };
         })
         .filter(it => {
           const m = `${it.materialName || ''} ${it.originalName || ''}`.toLowerCase();
           if (isReadyMixConcreteText(m)) return false;
-          if (/шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставка|перевозк|\bnakliye\b|услуги|лаборатор|оплата\s*гу\b|_факт_расходные\s*материалы|korpus.*reviziyon\s*projesi/i.test(m) && !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел/i.test(m)) return false;
+          if (/шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставк|организация\s*доставк|грузоперевоз|перевозк|транспортн|автоуслуг|манипулятор|логистик|погруз|разгруз|услуг[аи]\s+по|\bnakliye\b|teslimat\s*hizmet|kargo|услуги|лаборатор|оплата\s*гу\b|_факт_расходные\s*материалы|korpus.*reviziyon\s*projesi/i.test(m) && !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел|швеллер|угол|труба|арматур|лист|балка|сетка|кабель|провод|доска|брус|фанер/i.test(m)) {
+            if (!inv.excludedFreightAmount) {
+              trackedFreightHere = true;
+              excludedFreightNetSum += Number(it.totalPrice) || 0;
+              excludedFreightGrossSum += Number(it.grossTotalPrice) || Number(it.totalPrice) || 0;
+            }
+            return false;
+          }
           return true;
         });
 
@@ -369,6 +462,10 @@ class PrizmaSyncService {
         prizmaUrl: fixedBtf,
         prizmaBtfUrl: fixedBtf,
         prizmaStfUrl: fixedStf,
+        ...(trackedFreightHere || excludedFreightNetSum > 0 ? {
+          excludedFreightAmount: Number(excludedFreightNetSum.toFixed(2)),
+          excludedFreightGrossAmount: Number(excludedFreightGrossSum.toFixed(2))
+        } : {}),
         items: mappedItems
       };
     }).filter(inv => inv.items && inv.items.length > 0);
@@ -557,6 +654,32 @@ class PrizmaSyncService {
         }
       });
 
+      // GES Arşiv / Portal Önceliği: Satınalma personeli ve şeflerinin daha önce portala yüklediği faturaları tespit et
+      const existingPortalByVendorAndNo = new Set<string>();
+      const existingPortalByDemandId = new Set<number>();
+      try {
+        if (this.dbInstance) {
+          const invSnap = await getDocs(collection(this.dbInstance, 'invoices'));
+          invSnap.docs.forEach(docSnap => {
+            const data = docSnap.data() as any;
+            const docId = String(docSnap.id || '');
+            const isPrizma = Boolean(docId.startsWith('inv_prizma_') || docId.startsWith('prizma_') || (data.prizmaSource && !docId.startsWith('inv_cmp_') && !docId.startsWith('inv_sync_')));
+            if (!data.isDeleted && !isPrizma) {
+              const cleanNo = String(data.invoiceNumber || data.invoiceNo || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+              const cleanVen = normalizeVendorName(data.supplier || data.vendorName || '');
+              if (cleanNo && cleanVen) {
+                existingPortalByVendorAndNo.add(`${cleanVen}___${cleanNo}`);
+              }
+              if (data.prizmaDemandId) {
+                existingPortalByDemandId.add(Number(data.prizmaDemandId));
+              }
+            }
+          });
+        }
+      } catch (err: any) {
+        console.warn('[PRIZMA SYNC] Portal faturaları okunurken uyarı:', err.message);
+      }
+
       const invoiceDemands = allRawDemands.filter(d => isDefinitiveMaterialInvoice(d));
 
       this.syncProgress = { 
@@ -615,7 +738,22 @@ class PrizmaSyncService {
       const syncedInvoices: PrizmaInvoiceRecord[] = [];
 
       for (const d of invoiceDemands) {
+        const dCleanNo = String(d.documentNo || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+        const dCleanVendor = normalizeVendorName(d.accountingPlanName || '');
+        const dDemandId = Number(d.id);
+
+        // Satınalma personeli daha önce yüklediyse Prizma'dan mükerrer çekilmesini engelle (Portal Önceliği)
+        if (
+          existingPortalByDemandId.has(dDemandId) ||
+          (dCleanNo && dCleanVendor && existingPortalByVendorAndNo.has(`${dCleanVendor}___${dCleanNo}`))
+        ) {
+          console.log(`[PRIZMA SYNC SKIP] Fatura No: ${d.documentNo}, Tedarikçi: ${d.accountingPlanName} (BTF #${d.id}) zaten satınalma personeli tarafından portal arşivine yüklendiği için Prizma kopyası engellendi.`);
+          continue;
+        }
+
         let items: PrizmaInvoiceRecord['items'] = [];
+        let excludedFreightNetSum = 0;
+        let excludedFreightGrossSum = 0;
 
         // If it has orderDemandId, fetch material rows
         if (d.orderDemandId) {
@@ -630,13 +768,23 @@ class PrizmaSyncService {
               const rawDesc = cleanRawMaterialName(r.description || '');
               const shortSpec = extractShortSpecNote(rawDesc);
               const cleaned = cleanRawMaterialName(rawName);
+              const combinedRowText = `${cleaned} ${rawDesc} ${rawMat1} ${rawMat2}`;
 
               // Beton kalemlerini filtrele (Yalnızca hazır beton / grobeton)
-              if (isReadyMixConcreteText(`${cleaned} ${rawDesc}`)) {
+              if (isReadyMixConcreteText(combinedRowText)) {
                 continue;
               }
-              // Hizmet ve işçilik kalemlerini filtrele (Taşlama makinesi, disk ve montaj malzemeleri hariç)
-              if (/шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставка|перевозк|nakliye/i.test(`${cleaned} ${rawDesc}`) && !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел/i.test(`${cleaned} ${rawDesc}`)) {
+              // Nakliye, lojistik, kesim, yükleme/boşaltma ve hizmet kalemlerini sıfır toleransla ayrıştır
+              const isFreightOrServiceRow =
+                (/шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставк|организация\s*доставк|грузоперевоз|перевозк|транспортн|автоуслуг|манипулятор|логистик|погруз|разгруз|услуг[аи]\s+по|nakliye|teslimat\s*hizmet|kargo/i.test(combinedRowText) &&
+                 !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел|швеллер|угол|труба|арматур|лист|балка|сетка|кабель|провод|доска|брус|фанер/i.test(combinedRowText));
+              if (isFreightOrServiceRow) {
+                const fQty = Number(r.quantity) || 1;
+                const fGross = Number(r.totalWithVat) || Number(r.amount) || (Number(r.price || 0) * fQty);
+                const fVat = r.vatPercentage !== undefined && r.vatPercentage !== null ? Number(r.vatPercentage) : 22;
+                const fNet = fVat > 0 ? fGross / (1 + fVat / 100) : fGross;
+                excludedFreightNetSum += fNet;
+                excludedFreightGrossSum += fGross;
                 continue;
               }
 
@@ -676,17 +824,32 @@ class PrizmaSyncService {
                     : translateRussianMaterialToTurkish(cleaned || effectiveDesc || rawName);
 
               const itemCategory = normalizeCategoryName('', `${russianOrig} ${cleaned} ${translatedTr}`);
+              const rowQty = Number(r.quantity) || 1;
+              const rawPrice = Number(r.price) || 0;
+              const rawVatPct = r.vatPercentage !== undefined && r.vatPercentage !== null ? Number(r.vatPercentage) : 22;
+              const docYear = String(d.documentDate || d.createdOn || '').slice(0, 4);
+              const effectiveVatPct = rawVatPct === 0 ? 0 : (docYear === '2025' ? 20 : 22);
+              const grossUnitPrice = Number(rawPrice.toFixed(2));
+              const unitPriceNet = effectiveVatPct > 0
+                ? Number((rawPrice / (1 + effectiveVatPct / 100)).toFixed(2))
+                : grossUnitPrice;
+              const netTotalPrice = Number((unitPriceNet * rowQty).toFixed(2));
+              const grossTotalPrice = Number(r.totalWithVat) || Number(r.amount) || Number((grossUnitPrice * rowQty).toFixed(2));
 
               items.push({
                 id: `prizma_row_${r.id || idx + 1}`,
                 materialName: translatedTr || cleaned || 'Prizma Malzemesi',
                 originalName: russianOrig || cleaned || rawName || 'Prizma Malzemesi',
                 materialCode: r.materialCode || undefined,
-                quantity: Number(r.quantity) || 1,
+                quantity: rowQty,
                 unit: r.unitNameTR || r.unitNameRU || 'Adet',
-                unitPrice: Number(r.price) || 0,
-                totalPrice: Number(r.amount) || Number(r.totalWithVat) || 0,
-                vatPercentage: r.vatPercentage !== undefined ? Number(r.vatPercentage) : undefined,
+                unitPrice: unitPriceNet,
+                unitPriceNet,
+                grossUnitPrice,
+                totalPrice: netTotalPrice,
+                grossTotalPrice: Number(grossTotalPrice.toFixed(2)),
+                vatPercentage: effectiveVatPct,
+                isNetNormalized: true,
                 activityName: r.activityName || undefined,
                 category: itemCategory
               });
@@ -718,6 +881,8 @@ class PrizmaSyncService {
           vendorName: cleanSupplier,
           supplierInn: d.accountingPlanInn || undefined,
           totalAmount: Number(d.invoiceAmount) || 0,
+          excludedFreightAmount: excludedFreightNetSum > 0 ? Number(excludedFreightNetSum.toFixed(2)) : undefined,
+          excludedFreightGrossAmount: excludedFreightGrossSum > 0 ? Number(excludedFreightGrossSum.toFixed(2)) : undefined,
           currency: d.currencySign || '₽',
           jobsiteName: d.workPlaceNameTR || d.workPlaceNameRU || 'Genel Şantiye',
           category: items[0]?.category || normalizeCategoryName(d.paymentTypeNameTR, d.description || ''),

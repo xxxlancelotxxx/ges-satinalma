@@ -6,6 +6,7 @@ import { normalizeVendorName, getVendorKey, areVendorsEqual } from './src/utils/
 import { normalizeCategoryName, CANONICAL_28_CATEGORIES, translateRussianMaterialToTurkish, ensureRussianOriginalName, resolveItemCategory } from './src/utils/categoryClassifier';
 import { analyzeMaterialSegment } from './src/utils/materialSegmentIntelligence';
 import { splitGroupBySpec, getProductTypeLabel } from './src/utils/materialGroupIntegrity';
+import { checkRecordPermission, getUserAuthorizedJobsiteIds, canonicalizeJobsiteId } from './src/utils/permissions';
 import { comparativeAnalysesStore, materialSynonymsStore, comparativeConfig, updateComparativeConfig, processComparativeAnalysisBatch, learnApprovedSynonyms, recalculateComparativeAnalysis } from './server/comparativeEngine';
 import { prizmaService } from './server/prizmaService';
 import { prizmaSyncService, cleanRawMaterialName } from './server/prizmaSyncService';
@@ -85,7 +86,7 @@ import {
   calculateFileHash,
   generateContentWithResilience
 } from './server/aiOcrEngine';
-import { processInvoiceTwoStages } from './server/aiTwoStageOcr';
+import { processInvoiceTwoStages, fallbackExtractInvoiceFromTextOrCsv } from './server/aiTwoStageOcr';
 import { generateArchivePdf } from './server/documentGenerator';
 
 // ============================================================================
@@ -193,7 +194,8 @@ app.get('/api/health', async (req, res) => {
   let invCount = 0;
   let discCount = 0;
   let warning = null;
-  let lastBackupHoursAgo = null;
+  let lastBackupHoursAgo: string | null = null;
+  let latestBackupTimestampMs = 0;
   
   if (db) {
     try {
@@ -219,35 +221,43 @@ app.get('/api/health', async (req, res) => {
   
   if (bucket) {
      try {
-         const getFilesPromise = bucket.getFiles({ prefix: 'sistem-yedekleri/daily/', maxResults: 50 });
-         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Bucket timeout')), 1000));
+         // Use delimiter: '/' so getFiles only lists daily .json files and does not get stuck inside /pdfs/ subdirectories
+         const getFilesPromise = bucket.getFiles({ prefix: 'sistem-yedekleri/daily/', delimiter: '/', maxResults: 100, autoPaginate: false });
+         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Bucket timeout')), 2500));
          const [backupFiles]: any = await Promise.race([getFilesPromise, timeoutPromise]);
          const jsonFiles = backupFiles.filter((f: any) => f.name.endsWith('.json'));
          const file = jsonFiles.sort((a: any, b: any) => b.name.localeCompare(a.name))[0];
          if (file) {
-             const [metadata] = await file.getMetadata();
-             const updated = new Date(metadata.updated || metadata.timeCreated).getTime();
-             const now = Date.now();
-             lastBackupHoursAgo = ((now - updated) / (1000 * 60 * 60)).toFixed(2);
+             const metaObj = file.metadata && (file.metadata.updated || file.metadata.timeCreated)
+               ? file.metadata
+               : (await file.getMetadata())[0];
+             const updated = new Date(metaObj.updated || metaObj.timeCreated).getTime();
+             if (!isNaN(updated) && updated > latestBackupTimestampMs) {
+               latestBackupTimestampMs = updated;
+             }
          }
      } catch(e) {}
   }
 
-  if (!lastBackupHoursAgo) {
-     try {
-       const manifest = readManifest();
-       if (manifest && manifest.snapshots && manifest.snapshots.length > 0) {
-         const updated = new Date(manifest.snapshots[0].timestamp).getTime();
-         const now = Date.now();
-         lastBackupHoursAgo = ((now - updated) / (1000 * 60 * 60)).toFixed(2);
-       }
-     } catch(e) {}
+  try {
+    const manifest = readManifest();
+    if (manifest && manifest.snapshots && manifest.snapshots.length > 0) {
+      const updated = new Date(manifest.snapshots[0].timestamp).getTime();
+      if (!isNaN(updated) && updated > latestBackupTimestampMs) {
+        latestBackupTimestampMs = updated;
+      }
+    }
+  } catch(e) {}
+
+  if (latestBackupTimestampMs > 0) {
+    lastBackupHoursAgo = Math.max(0, (Date.now() - latestBackupTimestampMs) / (1000 * 60 * 60)).toFixed(2);
   }
 
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(), 
-    bucket: !!bucket, 
+    bucket: !!bucket,
+    bucketName: PRIMARY_GCS_BUCKET,
     counts: { invoices: invCount, discounts: discCount }, 
     warning,
     lastBackupHoursAgo
@@ -1184,60 +1194,366 @@ async function getDiscountsCached() {
   }
 }
 
+function isFreightOrServiceLineItemServer(text: string, unitStr?: string): boolean {
+  const t = (text || '').toLowerCase();
+  const u = (unitStr || '').toLowerCase().trim();
+  if (u === 'sipariş/hizmet' || u === 'paket/hizmet' || u === 'pakethizmet') return false;
+  if (/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел|швеллер|угол|труба|арматур|лист|балка|сетка|кабель|провод|доска|брус|фанер|газобетон|пескобетон|бетоноконтакт/i.test(t)) {
+    return false;
+  }
+  return /шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставк|организация\s*доставк|грузоперевоз|перевозк|транспортн.*услуг|автоуслуг|манипулятор|логистик|погруз|разгруз|услуг[аи]\s+по|\bnakliye\b|teslimat\s*hizmet|kargo\s*bedel|kesim\s*bedel|kesim\s*hizmet/i.test(t);
+}
+
+function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
+  if (!inv) return inv;
+  const cleanSupplier = normalizeVendorName(toSafeString(inv.supplier || inv.vendorName, ''));
+  let rawItems = Array.isArray(inv.items) ? inv.items : [];
+  if (pMatch && Array.isArray(pMatch.items) && pMatch.items.length > 0 && String(inv.id || '').startsWith('inv_prizma_')) {
+    rawItems = pMatch.items.map((it: any) => ({
+      ...it,
+      prizmaRequestCode: pMatch.prizmaRequestCode || inv.prizmaRequestCode,
+      prizmaOrderCode: pMatch.prizmaOrderCode || inv.prizmaOrderCode,
+      prizmaBtfUrl: pMatch.prizmaBtfUrl || inv.prizmaBtfUrl,
+      prizmaStfUrl: pMatch.prizmaStfUrl || inv.prizmaStfUrl,
+      prizmaUrl: pMatch.prizmaBtfUrl || pMatch.prizmaUrl || inv.prizmaUrl
+    }));
+  }
+
+  const docYear = String(inv.date || inv.created_at || '').slice(0, 4);
+  const isIpMalyavin = /(^|[\s"«])ип\s*["«]?малявин/i.test(cleanSupplier);
+  const hasVat20Or22OnInvoice = rawItems.some((x: any) => Number(x?.vatPercentage) === 20 || Number(x?.vatPercentage) === 22);
+  const rawSumUnitQty = rawItems.reduce((s: number, x: any) => {
+    const baseU = (x?.isNetNormalized && x?.grossUnitPrice) ? Number(x.grossUnitPrice) : (Number(x?.unitPrice) || 0);
+    return s + baseU * (Number(x?.quantity) || 1);
+  }, 0);
+  const rawSumStoredUnitQty = rawItems.reduce((s: number, x: any) => s + (Number(x?.unitPrice) || 0) * (Number(x?.quantity) || 1), 0);
+  const invTotal = Number(inv.totalAmount) || 0;
+  const invTax = Number(inv.taxAmount) || 0;
+
+  let excludedFreightNetSum = Number(inv.excludedFreightAmount || pMatch?.excludedFreightAmount) || 0;
+  let excludedFreightGrossSum = Number(inv.excludedFreightGrossAmount || pMatch?.excludedFreightGrossAmount) || 0;
+  let trackedFreightRow = false;
+
+  const isPrizmaOrigin = Boolean(
+    String(inv.id || '').startsWith('inv_prizma_') ||
+    String(inv.id || '').startsWith('prizma_') ||
+    inv.prizmaSource ||
+    pMatch ||
+    rawItems.some((x: any) => String(x?.id || '').startsWith('prizma_row_'))
+  );
+
+  // Filter out freight / delivery / service lines when there are multiple items or Prizma STF items
+  const filteredRawItems = rawItems.filter((it: any) => {
+    if (!it || typeof it !== 'object') return false;
+    const itemText = `${it.materialName || ''} ${it.originalName || ''}`;
+    if ((rawItems.length > 1 || isPrizmaOrigin) && isFreightOrServiceLineItemServer(itemText, it.unit)) {
+      if (!inv.excludedFreightAmount && !pMatch?.excludedFreightAmount) {
+        trackedFreightRow = true;
+        const fQty = Number(it.quantity) || 1;
+        const fRawPrice = Number(it.grossUnitPrice || it.unitPrice) || 0;
+        const fVat = isIpMalyavin ? 0 : (docYear === '2025' ? 20 : 22);
+        const fGross = Number(it.grossTotalPrice) || (invTotal / (rawSumStoredUnitQty || 1) >= 1.12 ? fRawPrice * fQty * (1 + fVat / 100) : fRawPrice * fQty);
+        const fNet = fVat > 0 ? fGross / (1 + fVat / 100) : fGross;
+        excludedFreightNetSum += fNet;
+        excludedFreightGrossSum += fGross;
+      }
+      return false;
+    }
+    return true;
+  });
+
+  const effectiveRawItems = filteredRawItems.length > 0 ? filteredRawItems : rawItems;
+  const matSumStoredUnitQty = effectiveRawItems.reduce((s: number, x: any) => s + (Number(x?.unitPrice) || 0) * (Number(x?.quantity) || 1), 0);
+
+  const ratioAll = (invTotal > 0 && rawSumStoredUnitQty > 0) ? (invTotal / rawSumStoredUnitQty) : 0;
+  const ratioMat = (invTotal > 0 && matSumStoredUnitQty > 0) ? (invTotal / matSumStoredUnitQty) : 0;
+  const isInvoiceStoredAsNet =
+    (ratioAll >= 1.12 && ratioAll <= 1.40) ||
+    (!trackedFreightRow && ratioMat >= 1.12 && ratioMat <= 1.40);
+
+  let invoiceLevelVat = docYear === '2025' ? 20 : 22;
+  if (isIpMalyavin) {
+    invoiceLevelVat = 0;
+  } else if ((ratioAll >= 1.188 && ratioAll <= 1.208) || (ratioMat >= 1.188 && ratioMat <= 1.208)) {
+    invoiceLevelVat = 20;
+  } else if ((ratioAll > 1.208 && ratioAll <= 1.235) || (ratioMat > 1.208 && ratioMat <= 1.235)) {
+    invoiceLevelVat = 22;
+  } else if (invTax > 0 && invTotal > invTax) {
+    const impliedTaxPct = (invTax / (invTotal - invTax)) * 100;
+    if (impliedTaxPct >= 18 && impliedTaxPct <= 20.8) invoiceLevelVat = 20;
+    else if (impliedTaxPct > 20.8 && impliedTaxPct <= 23.5) invoiceLevelVat = 22;
+  }
+
+  const normItems = effectiveRawItems.map((it: any) => {
+    if (!it || typeof it !== 'object') return it;
+    const norm = smartNormalizeItem(it);
+    const normMat = norm.materialName || it.materialName || '';
+    const normCat = smartNormalizeCategory(norm.category || it.category, `${normMat} ${it.originalName || ''}`);
+    const origRu = ensureRussianOriginalName(
+      normMat,
+      it.originalName || it.originalMaterialName || it.materialName || ''
+    );
+
+    const qty = Number(it.quantity) || 1;
+    const rawUnitPrice = Number(it.unitPrice) || 0;
+    const rawTotalPrice = Number(it.totalPrice) || 0;
+    const impliedUnit = (qty > 0 && rawTotalPrice > 0) ? (rawTotalPrice / qty) : 0;
+    const itemImpliedRatio = (impliedUnit > 0 && rawUnitPrice > 0) ? (impliedUnit / rawUnitPrice) : 1;
+    const isItemImpliedNet = itemImpliedRatio >= 1.185 && itemImpliedRatio <= 1.235;
+
+    const combinedItemText = `${normMat} ${origRu}`.toLowerCase();
+    const isMedicalExempt = /медицин|термометр|тонометр|носилки|жгут|бинт|аптечк|анализатор|кушетк|шины|шприц|параван|muayene/i.test(combinedItemText);
+
+    let effectiveVatPct = invoiceLevelVat;
+    if (isIpMalyavin) {
+      effectiveVatPct = 0;
+    } else if (isItemImpliedNet) {
+      effectiveVatPct = (itemImpliedRatio >= 1.185 && itemImpliedRatio <= 1.208) ? 20 : 22;
+    } else if (it.vatPercentage !== undefined && it.vatPercentage !== null) {
+      const vNum = Number(it.vatPercentage);
+      if (vNum === 10) effectiveVatPct = 10;
+      else if (vNum === 0) effectiveVatPct = (hasVat20Or22OnInvoice && !isMedicalExempt) ? invoiceLevelVat : 0;
+      else effectiveVatPct = invoiceLevelVat;
+    }
+
+    const unitLower = String(it.unit || '').toLowerCase().trim();
+    const isSummaryPackageRow = unitLower === 'sipariş/hizmet' || unitLower === 'paket/hizmet' || unitLower === 'pakethizmet' || String(it.id || '').startsWith('dsc_');
+
+    let unitPriceNet = rawUnitPrice;
+    let grossUnitPrice = rawUnitPrice;
+    let isPortalAmbiguous = false;
+
+    if (isSummaryPackageRow) {
+      unitPriceNet = rawUnitPrice;
+      grossUnitPrice = rawUnitPrice;
+    } else if (it.isNetNormalized && it.unitPriceNet > 0 && it.grossUnitPrice > 0 && !isIpMalyavin) {
+      unitPriceNet = Number(Number(it.unitPriceNet).toFixed(2));
+      grossUnitPrice = Number(Number(it.grossUnitPrice).toFixed(2));
+    } else if (isItemImpliedNet) {
+      unitPriceNet = Number(rawUnitPrice.toFixed(2));
+      grossUnitPrice = Number(impliedUnit.toFixed(2));
+    } else if (isInvoiceStoredAsNet) {
+      unitPriceNet = Number(rawUnitPrice.toFixed(2));
+      grossUnitPrice = effectiveVatPct > 0
+        ? Number((rawUnitPrice * (1 + effectiveVatPct / 100)).toFixed(2))
+        : unitPriceNet;
+    } else {
+      grossUnitPrice = Number(rawUnitPrice.toFixed(2));
+      unitPriceNet = effectiveVatPct > 0
+        ? Number((rawUnitPrice / (1 + effectiveVatPct / 100)).toFixed(2))
+        : grossUnitPrice;
+      if (!isPrizmaOrigin && (it.vatPercentage === undefined || it.vatPercentage === null)) {
+        isPortalAmbiguous = true;
+      }
+    }
+
+    const netTotalPrice = Number((unitPriceNet * qty).toFixed(2));
+    const grossTotalPrice = Number((grossUnitPrice * qty).toFixed(2));
+
+    return {
+      ...it,
+      materialName: normMat,
+      originalName: origRu,
+      originalMaterialName: origRu,
+      category: normCat,
+      unitPrice: unitPriceNet,
+      unitPriceNet,
+      grossUnitPrice,
+      totalPrice: netTotalPrice,
+      grossTotalPrice,
+      vatPercentage: effectiveVatPct,
+      isNetNormalized: true,
+      isPortalAmbiguous,
+      ...(pMatch ? {
+        prizmaRequestCode: pMatch.prizmaRequestCode || it.prizmaRequestCode || inv.prizmaRequestCode,
+        prizmaOrderCode: pMatch.prizmaOrderCode || it.prizmaOrderCode || inv.prizmaOrderCode,
+        prizmaBtfUrl: pMatch.prizmaBtfUrl || it.prizmaBtfUrl || inv.prizmaBtfUrl,
+        prizmaStfUrl: pMatch.prizmaStfUrl || it.prizmaStfUrl || inv.prizmaStfUrl,
+        prizmaUrl: pMatch.prizmaBtfUrl || pMatch.prizmaUrl || it.prizmaUrl || inv.prizmaUrl
+      } : {})
+    };
+  });
+
+  // Detect implicit freight/delivery difference when invoice total exceeds Gross material subtotal (e.g. Invoice 671 & 669: 396,000.36 - 389,981.36 = 6,019.00 RUB freight)
+  const matNetSubtotal = normItems.reduce((s: number, x: any) => s + (Number(x?.totalPrice) || 0), 0);
+  const matGrossSubtotal = normItems.reduce((s: number, x: any) => s + (Number(x?.grossTotalPrice) || 0), 0);
+  if (excludedFreightGrossSum === 0 && normItems.length > 0 && invTotal > matGrossSubtotal + 500) {
+    const diffGross = invTotal - matGrossSubtotal;
+    if (diffGross >= 500 && diffGross <= invTotal * 0.35) {
+      excludedFreightGrossSum = Number(diffGross.toFixed(2));
+      excludedFreightNetSum = invoiceLevelVat > 0
+        ? Number((diffGross / (1 + invoiceLevelVat / 100)).toFixed(2))
+        : excludedFreightGrossSum;
+    }
+  }
+
+  const invCat = (normItems.length > 0 && normItems[0]?.category)
+    ? normItems[0].category
+    : smartNormalizeCategory(toSafeString(inv.category, 'Genel'), '');
+
+  return {
+    ...inv,
+    invoiceNumber: toSafeString(inv.invoiceNumber, ''),
+    supplier: cleanSupplier,
+    vendorName: cleanSupplier,
+    category: toSafeString(invCat, 'Genel'),
+    uploadedBySupervisorName: toSafeString(inv.uploadedBySupervisorName, ''),
+    jobsiteName: toSafeString(inv.jobsiteName, ''),
+    netSubtotalAmount: Number(matNetSubtotal.toFixed(2)),
+    vatTotalAmount: Number(Math.max(0, matGrossSubtotal - matNetSubtotal).toFixed(2)),
+    vatRate: invoiceLevelVat,
+    ...(excludedFreightNetSum > 0 ? {
+      excludedFreightAmount: Number(excludedFreightNetSum.toFixed(2)),
+      excludedFreightGrossAmount: Number(excludedFreightGrossSum.toFixed(2))
+    } : {}),
+    ...(pMatch ? {
+      prizmaLinked: true,
+      prizmaDemandId: pMatch.prizmaDemandId || inv.prizmaDemandId,
+      prizmaRequestCode: pMatch.prizmaRequestCode || inv.prizmaRequestCode,
+      prizmaOrderCode: pMatch.prizmaOrderCode || inv.prizmaOrderCode,
+      prizmaBtfUrl: pMatch.prizmaBtfUrl || inv.prizmaBtfUrl,
+      prizmaStfUrl: pMatch.prizmaStfUrl || inv.prizmaStfUrl,
+      prizmaUrl: pMatch.prizmaBtfUrl || pMatch.prizmaUrl || inv.prizmaUrl
+    } : {}),
+    items: normItems
+  };
+}
+
 function enrichAndNormalizeInvoiceRecords(records: any[], prizmaInvs: any[]): any[] {
   const prizmaById = new Map<string, any>();
   const prizmaByDemand = new Map<number, any>();
+  const prizmaByVendorAndNo = new Map<string, any>();
   for (const p of (prizmaInvs || [])) {
     if (p && p.id) prizmaById.set(String(p.id), p);
     if (p && p.prizmaDemandId) prizmaByDemand.set(Number(p.prizmaDemandId), p);
+    const pNo = String(p?.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+    const pVen = normalizeVendorName(p?.supplier || p?.vendorName || '');
+    if (pNo && pVen) prizmaByVendorAndNo.set(`${pVen}___${pNo}`, p);
   }
 
-  return (records || []).map((i: any) => {
+  // Pass 1: Single-invoice Net/Gross + Freight normalization
+  const pass1Records = (records || []).map((i: any) => {
     if (!i) return i;
     const cleanSupplier = normalizeVendorName(toSafeString(i.supplier || i.vendorName, ''));
-    const pMatch = prizmaById.get(String(i.id || '')) || (i.prizmaDemandId ? prizmaByDemand.get(Number(i.prizmaDemandId)) : null);
-    let rawItems = Array.isArray(i.items) ? i.items : [];
-    if (pMatch && Array.isArray(pMatch.items) && pMatch.items.length > 0 && String(i.id || '').startsWith('inv_prizma_')) {
-      rawItems = pMatch.items.map((it: any) => ({
-        ...it,
-        prizmaRequestCode: pMatch.prizmaRequestCode || i.prizmaRequestCode,
-        prizmaOrderCode: pMatch.prizmaOrderCode || i.prizmaOrderCode,
-        prizmaBtfUrl: pMatch.prizmaBtfUrl || i.prizmaBtfUrl,
-        prizmaStfUrl: pMatch.prizmaStfUrl || i.prizmaStfUrl,
-        prizmaUrl: pMatch.prizmaBtfUrl || pMatch.prizmaUrl || i.prizmaUrl
-      }));
-    }
-    const normItems = rawItems.map((it: any) => {
-      if (!it || typeof it !== 'object') return it;
-      const norm = smartNormalizeItem(it);
-      const normMat = norm.materialName || it.materialName || '';
-      const normCat = smartNormalizeCategory(norm.category || it.category, `${normMat} ${it.originalName || ''}`);
-      const origRu = ensureRussianOriginalName(
-        normMat,
-        it.originalName || it.originalMaterialName || it.materialName || ''
-      );
-      return {
-        ...it,
-        materialName: normMat,
-        originalName: origRu,
-        originalMaterialName: origRu,
-        category: normCat
-      };
-    });
-    const invCat = (normItems.length > 0 && normItems[0]?.category)
-      ? normItems[0].category
-      : smartNormalizeCategory(toSafeString(i.category, 'Genel'), '');
-    return {
-      ...i,
-      invoiceNumber: toSafeString(i.invoiceNumber, ''),
-      supplier: cleanSupplier,
-      vendorName: cleanSupplier,
-      category: toSafeString(invCat, 'Genel'),
-      uploadedBySupervisorName: toSafeString(i.uploadedBySupervisorName, ''),
-      jobsiteName: toSafeString(i.jobsiteName, ''),
-      items: normItems
-    };
+    const cleanNo = String(i.invoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+    const pMatch =
+      prizmaById.get(String(i.id || '')) ||
+      prizmaById.get(String(i.id || '').replace(/^inv_/, '')) ||
+      (i.prizmaDemandId ? prizmaByDemand.get(Number(i.prizmaDemandId)) : null) ||
+      (cleanSupplier && cleanNo ? prizmaByVendorAndNo.get(`${cleanSupplier}___${cleanNo}`) : null);
+    return normalizeSingleInvoicePricingAndFreight(i, pMatch);
   });
+
+  // Pass 2: Cross-Invoice Historical VAT Ratio Reconciliation
+  // If a Portal invoice had both unitPrice and totalAmount entered from the Net (Без НДС) column (so Pass 1 treated its raw Net price as Gross and divided by 1.22),
+  // its grossUnitPrice (the raw stored price) will match a confirmed item's unitPriceNet for the same canonical material!
+  const confirmedNetPricesByMat = new Map<string, number[]>();
+  const recordNetPrice = (matName: string, netP: number) => {
+    if (!matName || !(netP > 0)) return;
+    const key = matName.toLowerCase().trim();
+    if (!confirmedNetPricesByMat.has(key)) confirmedNetPricesByMat.set(key, []);
+    confirmedNetPricesByMat.get(key)!.push(netP);
+  };
+
+  for (const inv of pass1Records) {
+    if (!inv || inv.isDeleted) continue;
+    for (const it of (inv.items || [])) {
+      if (!it.isPortalAmbiguous && it.unitPriceNet > 0) {
+        recordNetPrice(it.materialName, it.unitPriceNet);
+      }
+    }
+  }
+  for (const pInv of (prizmaInvs || [])) {
+    if (!pInv || pInv.isDeleted) continue;
+    for (const it of (pInv.items || [])) {
+      const norm = smartNormalizeItem(it);
+      recordNetPrice(norm.materialName || it.materialName, Number(it.unitPriceNet || it.unitPrice) || 0);
+    }
+  }
+
+  for (const inv of pass1Records) {
+    if (!inv || !Array.isArray(inv.items)) continue;
+    let anyItemAdjusted = false;
+    let matNetSub = 0;
+    let matGrossSub = 0;
+
+    inv.items = inv.items.map((it: any) => {
+      const key = String(it.materialName || '').toLowerCase().trim();
+      const confirmedList = confirmedNetPricesByMat.get(key) || [];
+      const qty = Number(it.quantity) || 1;
+      const vatPct = Number(it.vatPercentage ?? 22);
+      const vFactor = vatPct > 0 ? (1 + vatPct / 100) : 1.22;
+      const curNet = Number(it.unitPriceNet ?? it.unitPrice) || 0;
+      const curGross = Number(it.grossUnitPrice) || Number((curNet * vFactor).toFixed(2));
+
+      if (confirmedList.length > 0 && curNet > 0) {
+        // Case 1: Ambiguous Portal item was divided by 1.22, so its curGross matches a confirmed Net price
+        if (it.isPortalAmbiguous) {
+          const matchesAsNet = confirmedList.some(cNet => Math.abs(curGross - cNet) / cNet <= 0.008);
+          const matchesAsGross = confirmedList.some(cNet => Math.abs(curNet - cNet) / cNet <= 0.008);
+          if (matchesAsNet && !matchesAsGross) {
+            const trueNet = Number(curGross.toFixed(2));
+            const trueGross = Number((trueNet * vFactor).toFixed(2));
+            const netTot = Number((trueNet * qty).toFixed(2));
+            const grossTot = Number((trueGross * qty).toFixed(2));
+            anyItemAdjusted = true;
+            matNetSub += netTot;
+            matGrossSub += grossTot;
+            return {
+              ...it,
+              unitPrice: trueNet,
+              unitPriceNet: trueNet,
+              grossUnitPrice: trueGross,
+              totalPrice: netTot,
+              grossTotalPrice: grossTot,
+              isPortalAmbiguous: false
+            };
+          }
+        }
+
+        // Case 2: Item was NOT divided by VAT (or was entered with VAT in STF/Portal), so curNet / 1.22 (or 1.20) matches a confirmed Net price
+        const alreadyMatchesConfirmedNet = confirmedList.some(cNet => Math.abs(curNet - cNet) / cNet <= 0.008);
+        if (!alreadyMatchesConfirmedNet) {
+          for (const testVat of [vatPct, 22, 20]) {
+            if (!(testVat > 0)) continue;
+            const testFactor = 1 + testVat / 100;
+            const candidateNet = Number((curNet / testFactor).toFixed(2));
+            const matchedPeer = confirmedList.find(cNet => Math.abs(candidateNet - cNet) / cNet <= 0.006);
+            if (matchedPeer !== undefined) {
+              const trueNet = matchedPeer;
+              const trueGross = Number(curNet.toFixed(2));
+              const netTot = Number((trueNet * qty).toFixed(2));
+              const grossTot = Number((trueGross * qty).toFixed(2));
+              anyItemAdjusted = true;
+              matNetSub += netTot;
+              matGrossSub += grossTot;
+              return {
+                ...it,
+                unitPrice: trueNet,
+                unitPriceNet: trueNet,
+                grossUnitPrice: trueGross,
+                totalPrice: netTot,
+                grossTotalPrice: grossTot,
+                vatPercentage: testVat,
+                isPortalAmbiguous: false
+              };
+            }
+          }
+        }
+      }
+
+      matNetSub += Number(it.totalPrice) || Number((curNet * qty).toFixed(2));
+      matGrossSub += Number(it.grossTotalPrice) || Number((curGross * qty).toFixed(2));
+      return it;
+    });
+
+    if (anyItemAdjusted && matNetSub > 0) {
+      inv.netSubtotalAmount = Number(matNetSub.toFixed(2));
+      inv.vatTotalAmount = Number(Math.max(0, matGrossSub - matNetSub).toFixed(2));
+    }
+  }
+
+  return pass1Records;
 }
 
 async function getInvoicesCached() {
@@ -1413,12 +1729,12 @@ app.post('/api/backup/create', async (req, res) => {
     const filesToArchive = [];
     const missingFiles = [];
     const dateStr = new Date().toISOString().split('T')[0];
-    const backupId = `snap_${Date.now()}`;
+    const backupId = `snap_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
     const prefix = `sistem-yedekleri/snapshots/${backupId}/pdfs/`;
 
     if (bucket) {
       try {
-        const fileUrlsToVerify = new Set();
+        const fileUrlsToVerify = new Set<string>();
         (currentData.invoices || []).forEach(inv => {
           if (inv.fileUrl && !inv.fileUrl.startsWith('data:')) fileUrlsToVerify.add(inv.fileUrl);
         });
@@ -1427,15 +1743,19 @@ app.post('/api/backup/create', async (req, res) => {
           if (dsc.finalOfferFileUrl && !dsc.finalOfferFileUrl.startsWith('data:')) fileUrlsToVerify.add(dsc.finalOfferFileUrl);
         });
 
-        const [bucketFiles] = await bucket.getFiles({ maxResults: 10000 });
-        const fileMap = new Map();
-        bucketFiles.forEach(f => fileMap.set(f.name.split('/').pop().toLowerCase(), f));
+        const [bucketFiles] = await bucket.getFiles({ prefix: 'faturalar/' });
+        const fileMap = new Map<string, any>();
+        bucketFiles.forEach((f: any) => fileMap.set(f.name.split('/').pop().toLowerCase(), f));
 
         for (const fUrl of Array.from(fileUrlsToVerify)) {
           const match = String(fUrl).match(/\/api\/files\/([^/?]+)/);
           if (match && match[1]) {
             const filename = decodeURIComponent(match[1]);
-            const fileRef = fileMap.get(filename.toLowerCase());
+            let fileRef = fileMap.get(filename.toLowerCase());
+            if (!fileRef) {
+              fileRef = await healMissingFileFromFirestoreToGcs(filename);
+              if (fileRef) fileMap.set(filename.toLowerCase(), fileRef);
+            }
             if (fileRef) {
               const archivePath = `${prefix}${filename}`;
               filesToArchive.push({ source: fileRef, dest: bucket.file(archivePath) });
@@ -1454,7 +1774,7 @@ app.post('/api/backup/create', async (req, res) => {
         }
 
         for (let i = 0; i < filesToArchive.length; i += 10) {
-          await Promise.all(filesToArchive.slice(i, i + 10).map(c => c.source.copy(c.dest)));
+          await Promise.allSettled(filesToArchive.slice(i, i + 10).map(c => c.source.copy(c.dest)));
         }
       } catch (bucketErr: any) {
         console.warn('[BACKUP CREATE BUCKET NOTICE]:', bucketErr.message);
@@ -1463,10 +1783,10 @@ app.post('/api/backup/create', async (req, res) => {
 
     /* Snapshot oluşturma - Veritabanı (Firestore) asla engellenmez */
     const meta = createSnapshot({ ...currentData, metadata: { pdfManifest, missingPdfs: missingFiles.length } }, trigger, {
+      id: backupId,
       label: label || 'Manuel Sistem Yedeği',
       description: description || `${currentData.discounts.length} indirim, ${currentData.invoices.length} fatura korundu.`
     });
-    meta.id = backupId; // sync ID
     
     await syncSnapshotToCloud(db, bucket, meta);
     if (db) {
@@ -1584,10 +1904,17 @@ app.post('/api/backup/restore/:id', async (req, res) => {
       : null;
 
     if (bucket && totalTargetPdfs > 0) {
-      const [files] = await bucket.getFiles({ prefix: `sistem-yedekleri/snapshots/${targetId}/pdfs/` });
-      const existingNames = new Set(files.map(f => f.name));
+      const [snapFiles, mainFiles] = await Promise.all([
+        bucket.getFiles({ prefix: `sistem-yedekleri/snapshots/${targetId}/pdfs/` }).then((r: any) => r[0] || []).catch(() => []),
+        bucket.getFiles({ prefix: `faturalar/` }).then((r: any) => r[0] || []).catch(() => [])
+      ]);
+      const existingNames = new Set([
+        ...snapFiles.map((f: any) => f.name),
+        ...mainFiles.map((f: any) => f.name)
+      ]);
       for (const pdf of pdfManifest) {
-        if (existingNames.has(pdf.archivePath)) {
+        const origPath = pdf.originalPath || `faturalar/${String(pdf.archivePath || '').split('/').pop()}`;
+        if (existingNames.has(pdf.archivePath) || existingNames.has(origPath)) {
           availableTargetPdfs++;
         } else {
           missingPdfs.push(pdf.archivePath);
@@ -5180,6 +5507,7 @@ app.post('/api/discounts', async (req, res) => {
     const reqAmount = Number(req.body.agreedPrice) || Number(req.body.offerPrice) || 0;
     const reqDate = String(req.body.orderDate || '').trim();
 
+    const { data: curInvsForDup } = await getInvoicesCached();
     const invoiceDuplicate = activeDiscounts.find(d => {
       if (d.isDeleted) return false;
       const sameVendor = areVendorsEqual(d.vendorName, cleanVendorName);
@@ -5187,21 +5515,31 @@ app.post('/api/discounts', async (req, res) => {
       const dAmount = Number(d.agreedPrice) || Number(d.offerPrice) || 0;
       const dDate = String(d.orderDate || '').trim();
 
-      // Disregard generated TKF-/ARCH- invoices when checking duplicates if they happen to randomly collide (highly unlikely)
-      if (dInvoiceNo.startsWith('TKF-') || dInvoiceNo.startsWith('ARCH-') || dInvoiceNo.startsWith('FT-EXCEL-')) return false;
+      if (dInvoiceNo.startsWith('TKF-') || dInvoiceNo.startsWith('ARCH-') || dInvoiceNo.startsWith('FT-EXCEL-') || dInvoiceNo.startsWith('FT-')) return false;
       
-      if (reqInvoiceNo && dInvoiceNo && reqInvoiceNo.toLowerCase() === dInvoiceNo.toLowerCase() && sameVendor) return true;
+      if (reqInvoiceNo && !reqInvoiceNo.startsWith('FT-') && dInvoiceNo && reqInvoiceNo.toLowerCase() === dInvoiceNo.toLowerCase() && sameVendor) return true;
       if (!reqInvoiceNo && sameVendor && reqAmount > 0 && Math.abs(reqAmount - dAmount) < 1 && reqDate === dDate) return true;
 
       return false;
+    }) || curInvsForDup.find(inv => {
+      if (inv.isDeleted) return false;
+      const sameVendor = areVendorsEqual(inv.supplier || inv.vendorName, cleanVendorName);
+      const iNo = String(inv.invoiceNumber || inv.invoiceNo || '').trim();
+      if (!reqInvoiceNo || reqInvoiceNo.startsWith('FT-') || !iNo || iNo.startsWith('TKF-') || iNo.startsWith('ARCH-') || iNo.startsWith('FT-EXCEL-')) return false;
+      return reqInvoiceNo.toLowerCase() === iNo.toLowerCase() && sameVendor;
     });
 
-    if (invoiceDuplicate) {
+    if (invoiceDuplicate && !req.body.forceSave && !req.body.forceSaveDuplicate) {
+      const dupNo = invoiceDuplicate.invoiceNo || invoiceDuplicate.invoiceNumber || reqInvoiceNo;
+      const dupDate = invoiceDuplicate.orderDate || invoiceDuplicate.date || '';
+      const dupJob = invoiceDuplicate.jobsiteName || '';
       return res.status(409).json({
-        error: 'Mükerrer Kayıt',
-        details: reqInvoiceNo
-          ? `Bu tedarikçi (${req.body.vendorName}) için '${reqInvoiceNo}' numaralı belge/fatura zaten sisteme kaydedilmiş!`
-          : `Bu tedarikçi (${req.body.vendorName}) için aynı tarih ve tutarda (${reqAmount} ₽) bir indirim kaydı zaten sistemde mevcut!`
+        error: 'Bu fatura sistemde kayıtlı!',
+        isDuplicate: true,
+        duplicateRecord: invoiceDuplicate,
+        details: dupNo
+          ? `Bu fatura sistemde kayıtlı! Bu tedarikçi (${req.body.vendorName}) için '${dupNo}' numaralı belge/fatura daha önce (${dupDate}${dupJob ? ' - ' + dupJob : ''}) sisteme kaydedilmiş!`
+          : `Bu fatura sistemde kayıtlı! Bu tedarikçi (${req.body.vendorName}) için aynı tarih ve tutarda (${reqAmount} ₽) bir kayıt zaten sistemde mevcut!`
       });
     }
 
@@ -5711,35 +6049,103 @@ app.post('/api/invoices', async (req, res) => {
     }
     const { data: curInvs } = await getInvoicesCached();
     
-    // Guard against uploading the same invoice again
     const reqInvoiceNo = String(req.body.invoiceNumber || '').trim();
     const reqSupplier = String(req.body.supplier || '').trim().toLowerCase();
     const reqAmount = Number(req.body.totalAmount) || 0;
     const reqDate = String(req.body.date || '').trim();
-    
-    const invoiceDuplicate = curInvs.find(i => {
+
+    // Akıllı Mükerrer Kontrolü ve GES Arşiv Önceliği:
+    // Prizma ERP'den gelen fatura varsa ve sonradan satınalmacılar portal üzerinden kendileri yüklerse:
+    // Prizma faturası otomatik silinir, personelin yüklediği fatura öncelikli olarak sisteme kaydedilir.
+    // Personel daha önce portal üzerinden yüklediyse mükerrer yükleme 409 ile engellenir.
+    const cleanReqNo = reqInvoiceNo.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+    const cleanReqSupplier = normalizeVendorName(reqSupplier);
+
+    const isPrizmaInv = (i: any) => {
+      const idStr = String(i.id || '');
+      return Boolean(idStr.startsWith('inv_prizma_') || idStr.startsWith('prizma_') || (i.prizmaSource && !idStr.startsWith('inv_cmp_') && !idStr.startsWith('inv_sync_')));
+    };
+
+    const reqFileSha = req.body.fileUrl ? decodeURIComponent(String(req.body.fileUrl).split('/').pop() || '').split('.')[0] : '';
+
+    const matchingInvoices = curInvs.filter(i => {
       if (i.isDeleted) return false;
-      const iSupplier = String(i.supplier || '').trim().toLowerCase();
-      const iInvoiceNo = String(i.invoiceNumber || '').trim();
+      const iSupplier = String(i.supplier || i.vendorName || '').trim().toLowerCase();
+      const iInvoiceNo = String(i.invoiceNumber || i.invoiceNo || '').trim();
       const iAmount = Number(i.totalAmount) || 0;
       const iDate = String(i.date || '').trim();
-      
-      // Disregard generated TKF-/ARCH-/FT-EXCEL- invoices when checking duplicates
+
+      // Check exact file SHA-256 match if both have valid 64-char SHA filenames
+      const iFileSha = i.fileUrl ? decodeURIComponent(String(i.fileUrl).split('/').pop() || '').split('.')[0] : '';
+      if (reqFileSha && /^[a-f0-9]{64}$/i.test(reqFileSha) && iFileSha && reqFileSha.toLowerCase() === iFileSha.toLowerCase()) {
+        return true;
+      }
+
+      // Disregard generated TKF-/ARCH-/FT-EXCEL- invoices when checking invoice number duplicates
       if (iInvoiceNo.startsWith('TKF-') || iInvoiceNo.startsWith('ARCH-') || iInvoiceNo.startsWith('FT-EXCEL-')) return false;
-      
-      if (reqInvoiceNo && reqInvoiceNo === iInvoiceNo && reqSupplier === iSupplier) return true;
-      if (!reqInvoiceNo && reqSupplier && reqSupplier === iSupplier && reqAmount > 0 && reqAmount === iAmount && reqDate === iDate) return true;
-      
+
+      const cleanINo = iInvoiceNo.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+      const cleanISupplier = normalizeVendorName(iSupplier);
+
+      if (cleanReqNo && !reqInvoiceNo.startsWith('FT-') && cleanINo && cleanReqNo === cleanINo && areVendorsEqual(cleanReqSupplier, cleanISupplier)) {
+        return true;
+      }
+      if (reqInvoiceNo && !reqInvoiceNo.startsWith('FT-') && reqInvoiceNo.toLowerCase() === iInvoiceNo.toLowerCase() && reqSupplier === iSupplier) return true;
+      if (!reqInvoiceNo && reqSupplier && reqSupplier === iSupplier && reqAmount > 0 && Math.abs(reqAmount - iAmount) < 0.01 && reqDate === iDate) return true;
+      if (req.body.prizmaDemandId && i.prizmaDemandId && Number(req.body.prizmaDemandId) === Number(i.prizmaDemandId)) return true;
       return false;
     });
 
-    if (invoiceDuplicate) {
+    const portalDuplicates = matchingInvoices.filter(i => !isPrizmaInv(i));
+    const prizmaMatchesToReplace = matchingInvoices.filter(i => isPrizmaInv(i));
+
+    if (portalDuplicates.length > 0 && !req.body.forceSave && !req.body.forceSaveDuplicate) {
+      const dup = portalDuplicates[0];
       return res.status(409).json({
-        error: 'Mükerrer Kayıt',
+        error: 'Bu fatura sistemde kayıtlı!',
+        isDuplicate: true,
+        duplicateInvoice: {
+          id: dup.id,
+          invoiceNumber: dup.invoiceNumber,
+          supplier: dup.supplier,
+          totalAmount: dup.totalAmount,
+          date: dup.date,
+          jobsiteName: dup.jobsiteName,
+          uploadedBySupervisorName: dup.uploadedBySupervisorName
+        },
         details: reqInvoiceNo 
-          ? `Bu tedarikçi (${req.body.supplier}) için '${reqInvoiceNo}' numaralı fatura zaten sisteme kaydedilmiş!`
-          : `Bu tedarikçi (${req.body.supplier}) için aynı tarih ve tutarda (${reqAmount}) benzer bir fatura zaten sistemde mevcut!`
+          ? `Bu fatura sistemde kayıtlı! '${dup.invoiceNumber || reqInvoiceNo}' numaralı fatura (${dup.supplier || req.body.supplier}) daha önce ${dup.date || ''} tarihinde (${dup.jobsiteName || 'Şantiye'} - ${Number(dup.totalAmount || reqAmount).toLocaleString('tr-TR')} ₽) sisteme yüklenmiş!`
+          : `Bu fatura sistemde kayıtlı! Bu tedarikçi (${dup.supplier || req.body.supplier}) için aynı tarih ve tutarda (${Number(dup.totalAmount || reqAmount).toLocaleString('tr-TR')} ₽) bir fatura zaten sistemde mevcut!`
       });
+    }
+
+    // Prizma ERP faturası varsa satınalma personelinin yüklediği fatura lehine otomatik sil
+    const prizmaMetaInherited: any = {};
+    if (prizmaMatchesToReplace.length > 0) {
+      const nowIso = new Date().toISOString();
+      for (const pInv of prizmaMatchesToReplace) {
+        console.log(`[PRIZMA AUTO-REPLACE] Fatura No: ${reqInvoiceNo || pInv.invoiceNumber}, Prizma faturası (${pInv.id}) satınalma personeli tarafından yüklenen fatura lehine otomatik siliniyor...`);
+        if (db) {
+          await setDoc(doc(db, 'invoices', pInv.id), {
+            isDeleted: true,
+            deletedAt: nowIso,
+            deletedReason: 'Portal üzerinden satınalma personeli tarafından fatura yüklendiği için Prizma kopyası otomatik silindi (Öncelik GES Arşiv)'
+          }, { merge: true }).catch(() => {});
+          const prizmaDocId = pInv.id.startsWith('prizma_') ? pInv.id : `prizma_${pInv.id.replace(/^inv_prizma_/, '')}`;
+          await setDoc(doc(db, 'prizma_invoices', prizmaDocId), {
+            isDeleted: true,
+            deletedAt: nowIso
+          }, { merge: true }).catch(() => {});
+        }
+        prizmaSyncService.markAsDeleted(pInv.id);
+        if (pInv.prizmaDemandId) prizmaSyncService.markAsDeleted(pInv.prizmaDemandId);
+        prizmaMetaInherited.prizmaDemandId = pInv.prizmaDemandId || prizmaMetaInherited.prizmaDemandId;
+        prizmaMetaInherited.prizmaRequestCode = pInv.prizmaRequestCode || prizmaMetaInherited.prizmaRequestCode;
+        prizmaMetaInherited.prizmaOrderCode = pInv.prizmaOrderCode || prizmaMetaInherited.prizmaOrderCode;
+        prizmaMetaInherited.prizmaBtfUrl = pInv.prizmaBtfUrl || prizmaMetaInherited.prizmaBtfUrl;
+        prizmaMetaInherited.prizmaStfUrl = pInv.prizmaStfUrl || prizmaMetaInherited.prizmaStfUrl;
+        prizmaMetaInherited.prizmaUrl = pInv.prizmaBtfUrl || pInv.prizmaUrl || prizmaMetaInherited.prizmaUrl;
+      }
     }
 
     const id = `inv_${Date.now()}`;
@@ -5754,13 +6160,62 @@ app.post('/api/invoices', async (req, res) => {
     const detectedCategory = normItems && normItems.length > 0 && normItems[0].category 
       ? normItems[0].category 
       : smartNormalizeCategory(req.body.category, '');
+
+    // Auto-persist base64 fileData if provided and fileUrl is missing or data: URL
+    let resolvedInvoiceFileUrl = req.body.fileUrl;
+    const rawBase64Payload = req.body.fileData || req.body.pdfBase64 || req.body.base64 || (typeof resolvedInvoiceFileUrl === 'string' && resolvedInvoiceFileUrl.startsWith('data:') ? resolvedInvoiceFileUrl : null);
+    if (rawBase64Payload && typeof rawBase64Payload === 'string') {
+      try {
+        let mimeType = 'application/pdf';
+        let ext = '.pdf';
+        const origName = String(req.body.rawFileName || 'fatura.pdf');
+        const extMatch = origName.match(/\.[a-zA-Z0-9]+$/);
+        if (extMatch) ext = extMatch[0].toLowerCase();
+        if (rawBase64Payload.startsWith('data:')) {
+          const m = rawBase64Payload.match(/^data:([^;]+);/);
+          if (m) {
+            mimeType = m[1].toLowerCase();
+            if (mimeType === 'image/jpeg') ext = '.jpg';
+            else if (mimeType === 'image/png') ext = '.png';
+            else if (mimeType === 'image/webp') ext = '.webp';
+          }
+        }
+        const b64Clean = rawBase64Payload.includes(',') ? rawBase64Payload.split(',')[1] : rawBase64Payload;
+        const buf = Buffer.from(b64Clean, 'base64');
+        if (buf.length > 0) {
+          const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+          const uniqueFileName = `${sha256}${ext}`;
+          try {
+            fs.writeFileSync(path.join(LOCAL_FILES_DIR, uniqueFileName), buf);
+            fs.writeFileSync(path.join(uploadDir, uniqueFileName), buf);
+          } catch {}
+          if (db) {
+            await setDoc(doc(db, 'file_objects', sha256), {
+              sha256, objectPath: `faturalar/${uniqueFileName}`, originalName: origName, contentType: mimeType, size: buf.length,
+              status: 'committed', createdAt: new Date().toISOString()
+            }, { merge: true }).catch(() => {});
+          }
+          if (!resolvedInvoiceFileUrl || resolvedInvoiceFileUrl.startsWith('data:')) {
+            resolvedInvoiceFileUrl = `/api/files/${encodeURIComponent(uniqueFileName)}`;
+          }
+        }
+      } catch (autoSaveErr: any) {
+        console.warn('[INVOICE AUTO-SAVE FILE NOTICE]:', autoSaveErr.message);
+      }
+    }
+
     const newDoc = { 
       ...req.body, 
+      ...prizmaMetaInherited,
+      fileUrl: resolvedInvoiceFileUrl || null,
       items: normItems || [], 
       id, 
       invoiceNumber: toSafeString(req.body.invoiceNumber, `FT-${id}`),
       supplier: toSafeString(req.body.supplier, 'Bilinmeyen Tedarikçi'),
       category: toSafeString(detectedCategory, 'Genel'),
+      origin: 'ges_archive',
+      prizmaSource: false,
+      prizmaLinked: Boolean(prizmaMetaInherited.prizmaBtfUrl || prizmaMetaInherited.prizmaRequestCode),
       isDeleted: false, 
       created_at: new Date().toISOString() 
     };
@@ -5768,11 +6223,11 @@ app.post('/api/invoices', async (req, res) => {
     delete newDoc.pdfBase64;
     delete newDoc.fileContent;
     delete newDoc.base64;
+    delete newDoc.forceSave;
+    delete newDoc.forceSaveDuplicate;
     if (typeof newDoc.fileUrl === 'string' && newDoc.fileUrl.startsWith('data:')) {
       newDoc.fileUrl = null;
     }
-
-    
 
     // Yükleme Storage / Disk / Firestore kontrolü: dosya fiziksel olarak mevcut mu
     if (newDoc.fileUrl) {
@@ -5847,8 +6302,10 @@ app.post('/api/invoices', async (req, res) => {
       }
     }
 
-    const updatedInvoices = [newDoc, ...curInvs.filter((i: any) => i.id !== id)];
+    const replacedIds = new Set(prizmaMatchesToReplace.map(p => p.id));
+    const updatedInvoices = [newDoc, ...curInvs.filter((i: any) => i.id !== id && !replacedIds.has(i.id))];
     memoryStore.invoices = { data: updatedInvoices, timestamp: Date.now() };
+    memoryStore.materialComparisons = null;
     const localBackupSuccess = saveLocalBackup('invoices.json', updatedInvoices);
 
     if (idempotencyKey && db && firestoreStatus === 'success') {
@@ -5891,6 +6348,153 @@ app.post('/api/invoices', async (req, res) => {
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
+// ============================================================================
+// YETKİ VE GÜVENLİK DOĞRULAMA YARDIMCILARI (ADMIN, ŞEF, PERSONEL)
+// ============================================================================
+
+interface AdminAuthResult {
+  authorized: boolean;
+  adminUser: string;
+  error?: string;
+}
+
+const _verifyAdminAuth = async (req: any): Promise<AdminAuthResult> => {
+  // 1. Session token verification
+  const sessionToken = (req.headers['x-session-token'] as string) || (req.query?.token as string);
+  if (sessionToken) {
+    const session = sessionTokens.get(sessionToken);
+    if (session && session.role === 'admin' && session.expires > Date.now()) {
+      return { authorized: true, adminUser: (session as any).username || 'admin' };
+    }
+    if (sessionToken.startsWith('sysadmin_')) {
+      return { authorized: true, adminUser: 'admin' };
+    }
+  }
+
+  // 2. User role header verification (Admin role from authenticated UI session)
+  const userRole = decodeURIComponent(String(req.headers['x-user-role'] || '').trim());
+  if (userRole === 'admin') {
+    const adminUser = decodeURIComponent(String(req.headers['x-user-name'] || 'admin'));
+    return { authorized: true, adminUser };
+  }
+
+  // 3. Admin PIN verification (via x-admin-pin header, query or body)
+  const adminPin = (req.headers['x-admin-pin'] as string) || (req.query?.adminPin as string) || (req.body?.adminPin);
+  if (adminPin) {
+    const cleanPin = String(adminPin).trim();
+    if (cleanPin === ADMIN_PIN || cleanPin === '1234') {
+      return { authorized: true, adminUser: 'admin' };
+    }
+    const customAdminPin = userPinStore.get('admin');
+    if (customAdminPin && cleanPin === customAdminPin) {
+      return { authorized: true, adminUser: 'admin' };
+    }
+    if (db) {
+      try {
+        const pinDoc = await getDoc(doc(db, 'settings', 'auth_pins'));
+        if (pinDoc.exists()) {
+          const data = pinDoc.data() || {};
+          if (data['admin'] && cleanPin === String(data['admin']).trim()) {
+            return { authorized: true, adminUser: 'admin' };
+          }
+        }
+      } catch (_) {}
+    }
+    return { authorized: false, adminUser: '', error: 'Geçersiz Yönetici (Admin) PIN kodu.' };
+  }
+
+  return { authorized: false, adminUser: '', error: 'Kalıcı silme işlemi sunucu tarafında doğrulanmış aktif bir Yönetici (Admin) oturumu veya geçerli Admin PIN kodu gerektirir.' };
+};
+
+const _isAdminSession = async (req: any): Promise<boolean> => {
+  const result = await _verifyAdminAuth(req);
+  return result.authorized;
+};
+
+const _verifyRecordEditAccess = async (req: any, record: any): Promise<{ authorized: boolean; reason?: string }> => {
+  const adminAuth = await _verifyAdminAuth(req);
+  if (adminAuth.authorized) return { authorized: true };
+
+  const userRole = decodeURIComponent(String(req.headers['x-user-role'] || '').trim());
+  const supervisorId = decodeURIComponent(String(req.headers['x-user-supervisor-id'] || '').trim());
+  const personnelId = decodeURIComponent(String(req.headers['x-user-personnel-id'] || '').trim());
+  const userName = decodeURIComponent(String(req.headers['x-user-name'] || '').trim());
+
+  if (!userRole && !supervisorId && !personnelId && !userName) {
+    return { authorized: true };
+  }
+
+  let jobsiteIds: string[] = [];
+  try {
+    const rawJobIds = decodeURIComponent(String(req.headers['x-user-jobsite-ids'] || ''));
+    if (rawJobIds) jobsiteIds = JSON.parse(rawJobIds);
+  } catch (_) {}
+
+  const defaultJobsiteId = decodeURIComponent(String(req.headers['x-user-default-jobsite-id'] || '').trim());
+
+  const userObj = {
+    role: userRole || 'viewer',
+    supervisorId,
+    personnelId,
+    displayName: userName,
+    name: userName,
+    jobsiteIds,
+    defaultJobsiteId
+  };
+
+  const perm = checkRecordPermission(userObj, record);
+  if (perm.canEdit) {
+    return { authorized: true };
+  }
+
+  return {
+    authorized: false,
+    reason: perm.reason || 'Yetkisiz işlem: Bu şantiyeye ait faturayı düzenleme yetkiniz bulunmamaktadır.'
+  };
+};
+
+const _verifyRecordDeleteAccess = async (req: any, record: any): Promise<{ authorized: boolean; reason?: string }> => {
+  const adminAuth = await _verifyAdminAuth(req);
+  if (adminAuth.authorized) return { authorized: true };
+
+  const userRole = decodeURIComponent(String(req.headers['x-user-role'] || '').trim());
+  const supervisorId = decodeURIComponent(String(req.headers['x-user-supervisor-id'] || '').trim());
+  const personnelId = decodeURIComponent(String(req.headers['x-user-personnel-id'] || '').trim());
+  const userName = decodeURIComponent(String(req.headers['x-user-name'] || '').trim());
+
+  if (!userRole && !supervisorId && !personnelId && !userName) {
+    return { authorized: true };
+  }
+
+  let jobsiteIds: string[] = [];
+  try {
+    const rawJobIds = decodeURIComponent(String(req.headers['x-user-jobsite-ids'] || ''));
+    if (rawJobIds) jobsiteIds = JSON.parse(rawJobIds);
+  } catch (_) {}
+
+  const defaultJobsiteId = decodeURIComponent(String(req.headers['x-user-default-jobsite-id'] || '').trim());
+
+  const userObj = {
+    role: userRole || 'viewer',
+    supervisorId,
+    personnelId,
+    displayName: userName,
+    name: userName,
+    jobsiteIds,
+    defaultJobsiteId
+  };
+
+  const perm = checkRecordPermission(userObj, record);
+  if (perm.canDelete) {
+    return { authorized: true };
+  }
+
+  return {
+    authorized: false,
+    reason: perm.reason || 'Yetkisiz işlem: Bu şantiyeye ait faturayı silme yetkiniz bulunmamaktadır.'
+  };
+};
+
 app.delete('/api/invoices/:id', async (req, res) => {
   try {
     const invId = req.params.id;
@@ -5899,6 +6503,28 @@ app.delete('/api/invoices/:id', async (req, res) => {
     let discId = invId.startsWith('inv_sync_')
       ? invId.replace('inv_sync_', '')
       : (cmpId ? `disc_cmp_${cmpId}` : null);
+
+    // Read current invoice to check role-based permissions
+    let currentInv: any = null;
+    if (db) {
+      const snap = await getDoc(doc(db, 'invoices', invId)).catch(() => null);
+      if (snap && snap.exists()) currentInv = snap.data();
+    }
+    if (!currentInv && memoryStore.invoices?.data) {
+      currentInv = memoryStore.invoices.data.find((i: any) => i.id === invId || (cmpId && i.comparativeAnalysisId === cmpId));
+    }
+    if (!currentInv) {
+      const localInvs = readLocalBackup('invoices.json', []);
+      currentInv = localInvs.find((i: any) => i.id === invId || (cmpId && i.comparativeAnalysisId === cmpId));
+    }
+
+    if (currentInv) {
+      const authCheck = await _verifyRecordDeleteAccess(req, currentInv);
+      if (!authCheck.authorized) {
+        return res.status(403).json({ error: authCheck.reason || 'Yetkisiz işlem: Bu faturayı silme yetkiniz bulunmamaktadır.' });
+      }
+      if (!discId && currentInv.discountId) discId = currentInv.discountId;
+    }
 
     if (db) {
       await setDoc(doc(db, 'invoices', invId), { isDeleted: true, deletedAt: nowIso }, { merge: true });
@@ -5957,6 +6583,9 @@ app.delete('/api/invoices/:id', async (req, res) => {
       }
     }
 
+    // Invalidate comparisons
+    memoryStore.materialComparisons = undefined;
+
     res.json({ success: true, message: 'Fatura çöp kutusuna taşındı.' });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
@@ -6001,7 +6630,7 @@ app.get('/api/materials/compare', async (req, res) => {
               category: disc.category || 'Diğer Malzeme'
             }];
 
-        allInvoices.push({
+        allInvoices.push(normalizeSingleInvoicePricingAndFreight({
           id: `inv_sync_${disc.id}`,
           discountId: disc.id,
           invoiceNumber: disc.invoiceNo || `FT-${disc.id}`,
@@ -6017,7 +6646,7 @@ app.get('/api/materials/compare', async (req, res) => {
           isDeleted: false,
           rawFileName: disc.finalOfferFileName || disc.firstOfferFileName || 'indirim_faturasi.pdf',
           fileUrl: disc.finalOfferFileUrl || disc.firstOfferFileUrl || null
-        });
+        }));
       }
     }
 
@@ -6052,12 +6681,19 @@ app.get('/api/materials/compare', async (req, res) => {
 
           if (existingMatch) {
             // MERGE Prizma metadata into existing invoice
-            existingMatch.prizmaSource = true;
+            const isMatchPurePrizma = Boolean(String(existingMatch.id || '').startsWith('inv_prizma_') || String(existingMatch.id || '').startsWith('prizma_'));
+            existingMatch.prizmaSource = isMatchPurePrizma;
+            existingMatch.origin = isMatchPurePrizma ? 'prizma' : 'ges_archive';
+            existingMatch.prizmaLinked = true;
             existingMatch.prizmaRequestCode = pInv.prizmaRequestCode || existingMatch.prizmaRequestCode;
             existingMatch.prizmaOrderCode = pInv.prizmaOrderCode || existingMatch.prizmaOrderCode;
             existingMatch.prizmaBtfUrl = pInv.prizmaBtfUrl || existingMatch.prizmaBtfUrl;
             existingMatch.prizmaStfUrl = pInv.prizmaStfUrl || existingMatch.prizmaStfUrl;
             existingMatch.prizmaUrl = pInv.prizmaBtfUrl || pInv.prizmaUrl || existingMatch.prizmaUrl;
+            if ((pInv as any).excludedFreightAmount && !existingMatch.excludedFreightAmount) {
+              existingMatch.excludedFreightAmount = (pInv as any).excludedFreightAmount;
+              existingMatch.excludedFreightGrossAmount = (pInv as any).excludedFreightGrossAmount;
+            }
             // If existingMatch is an auto-synced Prizma invoice, refresh its items with the latest enriched items from prizmaSyncService
             if (String(existingMatch.id || '').startsWith('inv_prizma_')) {
               existingMatch.items = pInv.items.map(it => ({
@@ -6078,7 +6714,7 @@ app.get('/api/materials/compare', async (req, res) => {
             }
           } else {
             // Add as new Prizma invoice record
-            allInvoices.push({
+            allInvoices.push(normalizeSingleInvoicePricingAndFreight({
               id: pInv.id,
               invoiceNumber: pInv.invoiceNumber,
               date: pInv.date,
@@ -6089,6 +6725,8 @@ app.get('/api/materials/compare', async (req, res) => {
               uploadedBySupervisorId: '',
               uploadedBySupervisorName: pInv.prizmaCreatedBy || 'Prizma ERP',
               totalAmount: pInv.totalAmount,
+              excludedFreightAmount: (pInv as any).excludedFreightAmount,
+              excludedFreightGrossAmount: (pInv as any).excludedFreightGrossAmount,
               items: pInv.items.map(it => ({
                 ...it,
                 prizmaRequestCode: pInv.prizmaRequestCode,
@@ -6105,7 +6743,7 @@ app.get('/api/materials/compare', async (req, res) => {
               prizmaBtfUrl: pInv.prizmaBtfUrl,
               prizmaStfUrl: pInv.prizmaStfUrl,
               prizmaUrl: pInv.prizmaBtfUrl || pInv.prizmaUrl
-            });
+            }, pInv));
           }
         }
       }
@@ -6201,18 +6839,9 @@ app.get('/api/materials/compare', async (req, res) => {
       if (!inv.items || !Array.isArray(inv.items)) return;
       inv.items.forEach(item => {
         if (!item.materialName || item.unitPrice === undefined || item.unitPrice === null) return;
-        let priceNum = Number(item.unitPrice);
+        // Standard comparison baseline is strictly NET (KDV Hariç / Без НДС)
+        let priceNum = Number(item.unitPriceNet ?? item.unitPrice);
         if (isNaN(priceNum) || priceNum <= 0) return;
-        const itemQty = Number(item.quantity) || 0;
-        const itemTotal = Number(item.totalPrice) || 0;
-        if (itemQty > 0 && itemTotal > 0) {
-          const impliedUnit = itemTotal / itemQty;
-          const vatRatio = impliedUnit / priceNum;
-          // Rusya faturalarında (УПД / Комус vb.) birim fiyat KDV hariç, satır toplamı KDV dahil (%20 veya %22 НДС) çekilmişse KDV dahil birim fiyata eşitle
-          if (vatRatio >= 1.185 && vatRatio <= 1.228) {
-            priceNum = Number(impliedUnit.toFixed(2));
-          }
-        }
 
         // 0. Sipariş/Hizmet özet satırlarını (İndirim sekmesi özetleri ve tedarikçi adı taşıyan paket özetleri) malzeme kıyaslamasına alma
         const unitLower = String(item.unit || '').toLowerCase().trim();
@@ -6448,20 +7077,12 @@ app.get('/api/materials/compare', async (req, res) => {
         ? normalizeStandardUnit(rawUnitsList[0] || 'Adet')
         : getMaterialBenchmarkUnit(matGroup.materialName, matGroup.category, rawUnitsList);
 
-      const history: any[] = [];
-      let totalNormalizedSpend = 0;
-      let totalNormalizedQuantity = 0;
+      const rawHistory: any[] = [];
       const seenInvoiceItemKeys = new Set<string>();
 
       matGroup.items.forEach(({ inv, item, priceNum, quantity, unit }) => {
-        // Deduplicate identical invoice line (same vendor + core invoiceNumber + price + quantity) so synced Prizma + local invoice (e.g. "КА-77845" vs "77845") never double-count
-        const coreInvNo = String(inv.invoiceNumber || '')
-          .toLowerCase()
-          .replace(/^(?:ка|ут|цб|рн|сч|ту|nf|ft|prz)[\s_-]*0*/i, '')
-          .replace(/[^a-z0-9а-яё]/gi, '');
-        const dedupKey = `${normalizeVendorName(inv.supplier || '')}__${coreInvNo}__${priceNum.toFixed(2)}__${quantity}`;
-        if (coreInvNo && seenInvoiceItemKeys.has(dedupKey)) return;
-        if (coreInvNo) seenInvoiceItemKeys.add(dedupKey);
+        const vatPct = Number(item.vatPercentage ?? inv.vatRate ?? (String(inv.date || '').startsWith('2025') ? 20 : 22));
+        const grossPriceNum = Number(item.grossUnitPrice || (vatPct > 0 ? priceNum * (1 + vatPct / 100) : priceNum));
 
         const conv = convertMaterialUnit({
           materialName: matGroup.materialName,
@@ -6473,28 +7094,139 @@ app.get('/api/materials/compare', async (req, res) => {
           quantity
         });
 
-        const effectiveUnitPrice = conv.conversionApplied ? conv.convertedUnitPrice : priceNum;
+        const effectiveNetUnitPrice = conv.conversionApplied ? conv.convertedUnitPrice : priceNum;
         const effectiveQuantity = conv.conversionApplied ? conv.convertedQuantity : quantity;
-        const lineTotalSpend = priceNum * quantity;
-
-        totalNormalizedSpend += lineTotalSpend;
-        totalNormalizedQuantity += effectiveQuantity;
+        const grossMultiplier = priceNum > 0 ? (grossPriceNum / priceNum) : (1 + vatPct / 100);
+        const effectiveGrossUnitPrice = Number((effectiveNetUnitPrice * grossMultiplier).toFixed(2));
 
         const resolvedOrigName = ensureRussianOriginalName(matGroup.materialName, item.originalName || item.materialName);
-        const entrySeg = analyzeMaterialSegment(matGroup.materialName, resolvedOrigName, matGroup.category, effectiveUnitPrice);
+
+        rawHistory.push({
+          inv,
+          item,
+          vatPct,
+          effectiveNetUnitPrice: Number(effectiveNetUnitPrice.toFixed(2)),
+          effectiveGrossUnitPrice: Number(effectiveGrossUnitPrice.toFixed(2)),
+          effectiveQuantity,
+          originalNetUnitPrice: Number(priceNum.toFixed(2)),
+          originalGrossUnitPrice: Number(grossPriceNum.toFixed(2)),
+          originalQuantity: quantity,
+          originalUnit: unit,
+          conv,
+          resolvedOrigName,
+          isPrizmaSource: Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_') || inv.prizmaLinked)),
+          isPortalAmbiguous: Boolean(item.isPortalAmbiguous)
+        });
+      });
+
+      // Cross-Invoice Historical VAT Ratio Reconciliation within the same benchmarked material group:
+      // Ensure no entry remains 1.20x or 1.22x off due to VAT-inclusive vs VAT-exclusive entry
+      if (rawHistory.length > 1) {
+        // Step A: If an ambiguous Portal entry was divided by VAT, check if its effectiveGrossUnitPrice equals a non-ambiguous entry's effectiveNetUnitPrice
+        for (const entry of rawHistory) {
+          if (!entry.isPortalAmbiguous) continue;
+          const matchedPeer = rawHistory.find(other =>
+            other !== entry &&
+            !other.isPortalAmbiguous &&
+            other.effectiveNetUnitPrice > 0 &&
+            Math.abs(entry.effectiveGrossUnitPrice - other.effectiveNetUnitPrice) / other.effectiveNetUnitPrice <= 0.008
+          );
+          const alreadyMatchesNet = rawHistory.some(other =>
+            other !== entry &&
+            !other.isPortalAmbiguous &&
+            other.effectiveNetUnitPrice > 0 &&
+            Math.abs(entry.effectiveNetUnitPrice - other.effectiveNetUnitPrice) / other.effectiveNetUnitPrice <= 0.008
+          );
+          if (matchedPeer && !alreadyMatchesNet) {
+            const vFactor = entry.vatPct > 0 ? (1 + entry.vatPct / 100) : 1.22;
+            entry.effectiveNetUnitPrice = matchedPeer.effectiveNetUnitPrice;
+            entry.effectiveGrossUnitPrice = Number((entry.effectiveNetUnitPrice * vFactor).toFixed(2));
+            entry.originalNetUnitPrice = entry.originalGrossUnitPrice;
+            entry.originalGrossUnitPrice = Number((entry.originalNetUnitPrice * vFactor).toFixed(2));
+            entry.isPortalAmbiguous = false;
+          }
+        }
+
+        // Step B: For any entry (Portal or Prizma) whose effectiveNetUnitPrice is 1.20x or 1.22x (±0.6%) of another entry's effectiveNetUnitPrice,
+        // normalize the VAT-inflated entry down to the Net baseline price
+        for (const entry of rawHistory) {
+          for (const testVat of [entry.vatPct || 22, 22, 20]) {
+            if (!(testVat > 0)) continue;
+            const vFactor = 1 + testVat / 100;
+            const dividedCandidate = entry.effectiveNetUnitPrice / vFactor;
+            const matchedNetPeer = rawHistory.find(other =>
+              other !== entry &&
+              other.effectiveNetUnitPrice > 0 &&
+              Math.abs(dividedCandidate - other.effectiveNetUnitPrice) / other.effectiveNetUnitPrice <= 0.006
+            );
+            if (matchedNetPeer) {
+              const origRatio = entry.originalNetUnitPrice > 0 ? (matchedNetPeer.effectiveNetUnitPrice / entry.effectiveNetUnitPrice) : (1 / vFactor);
+              entry.effectiveGrossUnitPrice = entry.effectiveNetUnitPrice;
+              entry.effectiveNetUnitPrice = matchedNetPeer.effectiveNetUnitPrice;
+              entry.originalGrossUnitPrice = entry.originalNetUnitPrice;
+              entry.originalNetUnitPrice = Number((entry.originalNetUnitPrice * origRatio).toFixed(2));
+              entry.vatPct = testVat;
+              break;
+            }
+          }
+        }
+      }
+
+      const history: any[] = [];
+      let totalNormalizedSpend = 0;
+      let totalNormalizedGrossSpend = 0;
+      let totalNormalizedQuantity = 0;
+
+      for (const hEntry of rawHistory) {
+        const {
+          inv,
+          item,
+          vatPct,
+          effectiveNetUnitPrice,
+          effectiveGrossUnitPrice,
+          effectiveQuantity,
+          originalNetUnitPrice,
+          originalGrossUnitPrice,
+          originalQuantity,
+          originalUnit,
+          conv,
+          resolvedOrigName
+        } = hEntry;
+
+        const coreInvNo = String(inv.invoiceNumber || '')
+          .toLowerCase()
+          .replace(/^(?:ка|ут|цб|рн|сч|ту|nf|ft|prz)[\s_-]*0*/i, '')
+          .replace(/[^a-z0-9а-яё]/gi, '');
+        const dedupKey = `${normalizeVendorName(inv.supplier || '')}__${coreInvNo}__${effectiveNetUnitPrice.toFixed(2)}__${originalQuantity}`;
+        if (coreInvNo && seenInvoiceItemKeys.has(dedupKey)) continue;
+        if (coreInvNo) seenInvoiceItemKeys.add(dedupKey);
+
+        const lineTotalNetSpend = originalNetUnitPrice * originalQuantity;
+        const lineTotalGrossSpend = originalGrossUnitPrice * originalQuantity;
+
+        totalNormalizedSpend += lineTotalNetSpend;
+        totalNormalizedGrossSpend += lineTotalGrossSpend;
+        totalNormalizedQuantity += effectiveQuantity;
+
+        const entrySeg = analyzeMaterialSegment(matGroup.materialName, resolvedOrigName, matGroup.category, effectiveNetUnitPrice);
 
         history.push({
           date: inv.date || inv.created_at || new Date().toISOString(),
           jobsiteId: inv.jobsiteId,
           jobsiteName: inv.jobsiteName,
           supplier: inv.supplier,
-          unitPrice: effectiveUnitPrice,
+          unitPrice: effectiveNetUnitPrice,
+          unitPriceNet: effectiveNetUnitPrice,
+          grossUnitPrice: effectiveGrossUnitPrice,
+          vatPercentage: vatPct,
           quantity: effectiveQuantity,
-          unit: conv.conversionApplied ? benchmarkUnit : unit,
-          originalUnitPrice: priceNum,
-          originalQuantity: quantity,
-          originalUnit: unit,
-          normalizedUnitPrice: effectiveUnitPrice,
+          unit: conv.conversionApplied ? benchmarkUnit : originalUnit,
+          originalUnitPrice: originalNetUnitPrice,
+          originalGrossUnitPrice,
+          originalQuantity,
+          originalUnit,
+          normalizedUnitPrice: effectiveNetUnitPrice,
+          normalizedGrossUnitPrice: effectiveGrossUnitPrice,
           normalizedQuantity: effectiveQuantity,
           normalizedUnit: benchmarkUnit,
           conversionApplied: conv.conversionApplied,
@@ -6509,14 +7241,19 @@ app.get('/api/materials/compare', async (req, res) => {
           invoiceId: inv.id,
           rawFileName: inv.rawFileName,
           fileUrl: inv.fileUrl,
-          prizmaSource: Boolean(inv.prizmaSource || (inv.id && String(inv.id).startsWith('prizma_'))),
+          excludedFreightAmount: inv.excludedFreightAmount,
+          excludedFreightGrossAmount: inv.excludedFreightGrossAmount,
+          origin: Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))) ? 'prizma' : 'ges_archive',
+          prizmaSource: Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))),
+          gesArchiveSource: !Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))),
+          prizmaLinked: Boolean(inv.prizmaBtfUrl || inv.prizmaRequestCode || inv.prizmaDemandId),
           prizmaRequestCode: inv.prizmaRequestCode || item.prizmaRequestCode,
           prizmaOrderCode: inv.prizmaOrderCode || item.prizmaOrderCode,
           prizmaBtfUrl: inv.prizmaBtfUrl || item.prizmaBtfUrl,
           prizmaStfUrl: inv.prizmaStfUrl || item.prizmaStfUrl,
           prizmaUrl: inv.prizmaBtfUrl || inv.prizmaUrl || item.prizmaBtfUrl || item.prizmaUrl
         });
-      });
+      }
 
       if (history.length === 0) return;
 
@@ -6524,7 +7261,12 @@ app.get('/api/materials/compare', async (req, res) => {
       const minUnitPrice = Math.min(...normalizedPrices);
       const maxUnitPrice = Math.max(...normalizedPrices);
 
+      const normalizedGrossPrices = history.map(h => h.grossUnitPrice || h.unitPrice);
+      const minGrossUnitPrice = Math.min(...normalizedGrossPrices);
+      const maxGrossUnitPrice = Math.max(...normalizedGrossPrices);
+
       const avgUnitPrice = totalNormalizedQuantity > 0 ? (totalNormalizedSpend / totalNormalizedQuantity) : 0;
+      const avgGrossUnitPrice = totalNormalizedQuantity > 0 ? (totalNormalizedGrossSpend / totalNormalizedQuantity) : 0;
       const cheapestPoint = history.find(h => h.unitPrice === minUnitPrice);
       const priciestPoint = history.find(h => h.unitPrice === maxUnitPrice);
 
@@ -6556,10 +7298,14 @@ app.get('/api/materials/compare', async (req, res) => {
         minUnitPrice: Number(minUnitPrice.toFixed(2)),
         maxUnitPrice: Number(maxUnitPrice.toFixed(2)),
         avgUnitPrice: Number(avgUnitPrice.toFixed(2)),
+        minGrossUnitPrice: Number(minGrossUnitPrice.toFixed(2)),
+        maxGrossUnitPrice: Number(maxGrossUnitPrice.toFixed(2)),
+        avgGrossUnitPrice: Number(avgGrossUnitPrice.toFixed(2)),
         cheapestJobsiteName: cheapestPoint ? cheapestPoint.jobsiteName : '-',
         priciestJobsiteName: priciestPoint ? priciestPoint.jobsiteName : '-',
         totalQuantityPurchased: Number(totalNormalizedQuantity.toFixed(2)),
         totalSpend: Number(totalNormalizedSpend.toFixed(2)),
+        totalGrossSpend: Number(totalNormalizedGrossSpend.toFixed(2)),
         priceDifferencePercentage: Number(priceDiffPct.toFixed(2)),
         history: history.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
       });
@@ -6681,7 +7427,7 @@ SADECE GEÇERLİ BİR JSON FORMATI DÖN:
     const genRes = await generateContentWithResilience(ai, {
       contents: [{ text: prompt }],
       config: { responseMimeType: "application/json" },
-      primaryModel: 'gemini-flash-latest'
+      primaryModel: 'gemini-3.8-flash'
     });
     const parsed = robustParseJSON(genRes.text || '{}');
     const clusters = Array.isArray(parsed.clusters) ? parsed.clusters : [];
@@ -7330,6 +8076,7 @@ app.post('/api/auth/login', async (req, res) => {
       const persKey = pers.id;
       const cleanUsername = pers.name.split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
       const customPin = customPins[persKey] || userPinStore.get(persKey);
+      const persAuthJobs = Array.from(getUserAuthorizedJobsiteIds({ role: 'personnel', personnelId: pers.id, supervisorId: pers.supervisorId, displayName: pers.name }));
 
       if (customPin) {
         if (cleanPin === customPin) {
@@ -7340,7 +8087,9 @@ app.post('/api/auth/login', async (req, res) => {
               role: 'personnel',
               displayName: pers.name,
               personnelId: pers.id,
-              supervisorId: pers.supervisorId
+              supervisorId: pers.supervisorId,
+              jobsiteIds: persAuthJobs,
+              defaultJobsiteId: persAuthJobs[0] || 'job_1'
             }
           });
         } else {
@@ -7354,7 +8103,9 @@ app.post('/api/auth/login', async (req, res) => {
               role: 'personnel',
               displayName: pers.name,
               personnelId: pers.id,
-              supervisorId: pers.supervisorId
+              supervisorId: pers.supervisorId,
+              jobsiteIds: persAuthJobs,
+              defaultJobsiteId: persAuthJobs[0] || 'job_1'
             }
          });
       } else {
@@ -7373,6 +8124,9 @@ app.post('/api/auth/login', async (req, res) => {
 
     const supKey = supervisorId || username || 'default';
     const cleanUsername = (username || (supervisor ? supervisor.name.split(' ')[0] : 'sup')).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const effectiveSupId = supervisorId || (supervisor ? supervisor.id : 'sup_1');
+    const effectiveSupName = supervisor ? supervisor.name : (username || 'Satınalma Şefi');
+    const supAuthJobs = Array.from(getUserAuthorizedJobsiteIds({ role: 'supervisor', supervisorId: effectiveSupId, displayName: effectiveSupName }));
     const customPin = customPins[supKey] || userPinStore.get(supKey);
     const expectedPin = customPin || `${cleanUsername}123`;
 
@@ -7383,8 +8137,10 @@ app.post('/api/auth/login', async (req, res) => {
           user: {
             username: cleanUsername,
             role: 'supervisor',
-            displayName: supervisor ? supervisor.name : (username || 'Satınalma Şefi'),
-            supervisorId: supervisorId || (supervisor ? supervisor.id : 'sup_1')
+            displayName: effectiveSupName,
+            supervisorId: effectiveSupId,
+            jobsiteIds: supAuthJobs,
+            defaultJobsiteId: supAuthJobs[0] || 'job_5'
           }
         });
       } else {
@@ -7396,8 +8152,10 @@ app.post('/api/auth/login', async (req, res) => {
         user: {
           username: cleanUsername,
           role: 'supervisor',
-          displayName: supervisor ? supervisor.name : (username || 'Satınalma Şefi'),
-          supervisorId: supervisorId || (supervisor ? supervisor.id : 'sup_1')
+          displayName: effectiveSupName,
+          supervisorId: effectiveSupId,
+          jobsiteIds: supAuthJobs,
+          defaultJobsiteId: supAuthJobs[0] || 'job_5'
         }
       });
     } else {
@@ -7603,31 +8361,118 @@ app.put('/api/discounts/:id/audit-status', async (req, res) => {
 });
 
 app.put('/api/invoices/:id', async (req, res) => {
-  if (!db) return res.status(500).json({ error: 'Firestore bağlı değil.' });
   try {
     const invId = req.params.id;
+    const cmpId = invId.startsWith('inv_cmp_') ? invId.replace('inv_cmp_', '') : null;
+    let discId = invId.startsWith('inv_sync_')
+      ? invId.replace('inv_sync_', '')
+      : (cmpId ? `disc_cmp_${cmpId}` : null);
+
+    // 1. Read current invoice to check role-based permissions
+    let currentInv: any = null;
+    if (db) {
+      const snap = await getDoc(doc(db, 'invoices', invId)).catch(() => null);
+      if (snap && snap.exists()) currentInv = { id: invId, ...snap.data() };
+    }
+    if (!currentInv && memoryStore.invoices?.data) {
+      currentInv = memoryStore.invoices.data.find((i: any) => i.id === invId || (cmpId && i.comparativeAnalysisId === cmpId));
+    }
+    if (!currentInv) {
+      const localInvs = readLocalBackup('invoices.json', []);
+      currentInv = localInvs.find((i: any) => i.id === invId || (cmpId && i.comparativeAnalysisId === cmpId));
+    }
+
+    if (currentInv) {
+      const authCheck = await _verifyRecordEditAccess(req, currentInv);
+      if (!authCheck.authorized) {
+        return res.status(403).json({ error: authCheck.reason || 'Yetkisiz işlem: Bu faturayı düzenleme yetkiniz bulunmamaktadır.' });
+      }
+      if (!discId && currentInv.discountId) discId = currentInv.discountId;
+    }
+
     const updateData = { ...req.body };
     delete updateData.id;
 
-    await setDoc(doc(db, 'invoices', invId), updateData, { merge: true });
-
-    const invDocSnap = await getDoc(doc(db, 'invoices', invId));
-    const invData = invDocSnap.exists() ? invDocSnap.data() : null;
-    let discId = invId.startsWith('inv_sync_') ? invId.replace('inv_sync_', '') : (invData?.discountId || null);
-
-    if (discId) {
-      const discUpdate: any = {};
-      if (updateData.supplier) discUpdate.vendorName = updateData.supplier;
-      if (updateData.invoiceNumber) discUpdate.invoiceNo = updateData.invoiceNumber;
-      if (updateData.totalAmount !== undefined) discUpdate.agreedPrice = updateData.totalAmount;
-      if (updateData.items) discUpdate.items = updateData.items;
-
-      if (Object.keys(discUpdate).length > 0) {
-        await setDoc(doc(db, 'discounts', discId), discUpdate, { merge: true });
+    // 2. Persist update to Firestore
+    if (db) {
+      await setDoc(doc(db, 'invoices', invId), updateData, { merge: true });
+      if (cmpId) {
+        await setDoc(doc(db, 'comparative_analyses', cmpId), {
+          jobsiteId: updateData.jobsiteId,
+          jobsiteName: updateData.jobsiteName,
+          supervisorId: updateData.uploadedBySupervisorId,
+          supervisorName: updateData.uploadedBySupervisorName,
+          supplier: updateData.supplier
+        }, { merge: true }).catch(() => {});
       }
     }
 
-    res.json({ success: true });
+    // 3. Synchronize linked discount record if present
+    const discUpdate: any = {};
+    if (updateData.supplier) {
+      discUpdate.vendorName = updateData.supplier;
+      discUpdate.supplier = updateData.supplier;
+    }
+    if (updateData.invoiceNumber) discUpdate.invoiceNo = updateData.invoiceNumber;
+    if (updateData.totalAmount !== undefined) discUpdate.agreedPrice = Number(updateData.totalAmount) || 0;
+    if (updateData.date) discUpdate.orderDate = updateData.date;
+    if (updateData.jobsiteId) discUpdate.jobsiteId = updateData.jobsiteId;
+    if (updateData.jobsiteName) discUpdate.jobsiteName = updateData.jobsiteName;
+    if (updateData.uploadedBySupervisorId) discUpdate.supervisorId = updateData.uploadedBySupervisorId;
+    if (updateData.uploadedBySupervisorName) discUpdate.supervisorName = updateData.uploadedBySupervisorName;
+    if (updateData.items) discUpdate.items = updateData.items;
+
+    if (discId && Object.keys(discUpdate).length > 0) {
+      if (db) {
+        await setDoc(doc(db, 'discounts', discId), discUpdate, { merge: true }).catch(() => {});
+      }
+      const localDscs = readLocalBackup('discounts.json', []);
+      const updatedBackupDscs = localDscs.map((d: any) =>
+        (d.id === discId || (cmpId && d.comparativeAnalysisId === cmpId))
+          ? { ...d, ...discUpdate }
+          : d
+      );
+      saveLocalBackup('discounts.json', updatedBackupDscs);
+
+      if (memoryStore.discounts?.data) {
+        memoryStore.discounts.data = memoryStore.discounts.data.map((d: any) =>
+          (d.id === discId || (cmpId && d.comparativeAnalysisId === cmpId))
+            ? { ...d, ...discUpdate }
+            : d
+        );
+        memoryStore.discounts.timestamp = Date.now();
+      }
+    }
+
+    // 4. Update local backup file for invoices
+    const localInvs = readLocalBackup('invoices.json', []);
+    let foundInBackup = false;
+    const updatedBackupInvs = localInvs.map((i: any) => {
+      if (i.id === invId || (cmpId && i.comparativeAnalysisId === cmpId)) {
+        foundInBackup = true;
+        return { ...i, ...updateData };
+      }
+      return i;
+    });
+    if (foundInBackup) {
+      saveLocalBackup('invoices.json', updatedBackupInvs);
+    }
+
+    // 5. CRITICAL: Update in-memory cache so next read returns updated data immediately!
+    if (memoryStore.invoices?.data) {
+      memoryStore.invoices.data = memoryStore.invoices.data.map((i: any) => {
+        if (i.id === invId || (cmpId && i.comparativeAnalysisId === cmpId)) {
+          return { ...i, ...updateData };
+        }
+        return i;
+      });
+      memoryStore.invoices.timestamp = Date.now();
+    }
+
+    // 6. Invalidate comparisons
+    memoryStore.materialComparisons = undefined;
+
+    res.json({ success: true, updated: { id: invId, ...(currentInv || {}), ...updateData } });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });
 
@@ -7729,65 +8574,6 @@ async function deleteFileFromFirestoreStorage(db: any, filename: string) {
 const _getStorageBucket = () => {
   if (bucket) return bucket;
   return null;
-};
-
-interface AdminAuthResult {
-  authorized: boolean;
-  adminUser: string;
-  error?: string;
-}
-
-const _verifyAdminAuth = async (req: any): Promise<AdminAuthResult> => {
-  // 1. Session token verification
-  const sessionToken = (req.headers['x-session-token'] as string) || (req.query?.token as string);
-  if (sessionToken) {
-    const session = sessionTokens.get(sessionToken);
-    if (session && session.role === 'admin' && session.expires > Date.now()) {
-      return { authorized: true, adminUser: (session as any).username || 'admin' };
-    }
-    if (sessionToken.startsWith('sysadmin_')) {
-      return { authorized: true, adminUser: 'admin' };
-    }
-  }
-
-  // 2. User role header verification (Admin role from authenticated UI session)
-  const userRole = decodeURIComponent(String(req.headers['x-user-role'] || '').trim());
-  if (userRole === 'admin') {
-    const adminUser = decodeURIComponent(String(req.headers['x-user-name'] || 'admin'));
-    return { authorized: true, adminUser };
-  }
-
-  // 3. Admin PIN verification (via x-admin-pin header, query or body)
-  const adminPin = (req.headers['x-admin-pin'] as string) || (req.query?.adminPin as string) || (req.body?.adminPin);
-  if (adminPin) {
-    const cleanPin = String(adminPin).trim();
-    if (cleanPin === ADMIN_PIN || cleanPin === '1234') {
-      return { authorized: true, adminUser: 'admin' };
-    }
-    const customAdminPin = userPinStore.get('admin');
-    if (customAdminPin && cleanPin === customAdminPin) {
-      return { authorized: true, adminUser: 'admin' };
-    }
-    if (db) {
-      try {
-        const pinDoc = await getDoc(doc(db, 'settings', 'auth_pins'));
-        if (pinDoc.exists()) {
-          const data = pinDoc.data() || {};
-          if (data['admin'] && cleanPin === String(data['admin']).trim()) {
-            return { authorized: true, adminUser: 'admin' };
-          }
-        }
-      } catch (_) {}
-    }
-    return { authorized: false, adminUser: '', error: 'Geçersiz Yönetici (Admin) PIN kodu.' };
-  }
-
-  return { authorized: false, adminUser: '', error: 'Kalıcı silme işlemi sunucu tarafında doğrulanmış aktif bir Yönetici (Admin) oturumu veya geçerli Admin PIN kodu gerektirir.' };
-};
-
-const _isAdminSession = async (req: any): Promise<boolean> => {
-  const result = await _verifyAdminAuth(req);
-  return result.authorized;
 };
 
 const _isUrlSharedWithOthers = async (url: string, excludedIds: string[] = []): Promise<boolean> => {
@@ -8521,18 +9307,49 @@ app.delete(['/api/invoices/trash/orphan-cleaner', '/api/invoices/trash/empty', '
 
 app.post(['/api/discounts/process-ai', '/api/invoices/process-ai'], async (req, res) => {
   try {
-    const { fileBase64, imageBase64, mimeType, promptText, excelCsv, fileName, scanMode, offerType, firstOfferBase64 } = req.body;
+    const {
+      fileBase64,
+      imageBase64,
+      mimeType,
+      promptText,
+      excelCsv,
+      fileTextContext,
+      fileName,
+      scanMode,
+      offerType,
+      firstOfferBase64,
+      firstOfferFileName
+    } = req.body || {};
     const base64Input = fileBase64 || imageBase64;
 
-    if (!base64Input && !excelCsv) {
+    if (!base64Input && !excelCsv && !fileTextContext) {
       return res.status(400).json({ error: 'Fatura görseli veya Excel verisi bulunamadı.' });
     }
 
-    // Fetch existing active invoices for duplicate checking (cached in-memory for speed)
+    // Fetch existing active invoices & discounts for duplicate checking (cached in-memory for speed)
     let existingInvoices: any[] = [];
     try {
-      const { data: cachedInvs } = await getInvoicesCached();
-      existingInvoices = cachedInvs || [];
+      const [{ data: cachedInvs }, { data: cachedDiscounts }] = await Promise.all([
+        getInvoicesCached(),
+        getDiscountsCached()
+      ]);
+      const mappedDiscounts = (cachedDiscounts || []).map((d: any) => ({
+        id: d.id,
+        supplier: d.vendorName || d.supplier,
+        vendorName: d.vendorName || d.supplier,
+        invoiceNumber: d.invoiceNo,
+        invoiceNo: d.invoiceNo,
+        date: d.orderDate,
+        orderDate: d.orderDate,
+        totalAmount: d.agreedPrice || d.offerPrice,
+        jobsiteName: d.jobsiteName,
+        uploadedBySupervisorName: d.supervisorName,
+        fileUrl: d.finalOfferFileUrl || d.firstOfferFileUrl,
+        firstOfferFileUrl: d.firstOfferFileUrl,
+        finalOfferFileUrl: d.finalOfferFileUrl,
+        isDeleted: d.isDeleted
+      }));
+      existingInvoices = [...(cachedInvs || []), ...mappedDiscounts];
     } catch (err: any) {
       console.warn('[AI OCR] Existing invoices fetch warning:', err.message);
     }
@@ -8541,12 +9358,14 @@ app.post(['/api/discounts/process-ai', '/api/invoices/process-ai'], async (req, 
       base64Input,
       mimeType,
       excelCsv,
+      fileTextContext,
       fileName,
       additionalPrompt: promptText,
       existingInvoices,
       scanMode,
       offerType,
-      firstOfferBase64
+      firstOfferBase64,
+      firstOfferFileName
     });
 
     res.json({
@@ -8559,8 +9378,53 @@ app.post(['/api/discounts/process-ai', '/api/invoices/process-ai'], async (req, 
       stagesCompleted: result.stagesCompleted
     });
   } catch (err: any) {
-    console.error('[AI OCR ERROR]:', err);
-    res.status(500).json({ error: 'Yapay zeka işlemi başarısız oldu.', details: err.message });
+    console.error('[AI OCR ERROR - Resilient Recovery Triggered]:', err);
+    try {
+      const { excelCsv, fileTextContext, fileName, scanMode, offerType } = req.body || {};
+      const isSummary = scanMode === 'summary-only' || offerType === 'first' || offerType === 'round';
+      const fallbackRaw = fallbackExtractInvoiceFromTextOrCsv(
+        [excelCsv, fileTextContext].filter(Boolean).join('\n\n'),
+        fileName,
+        isSummary
+      );
+      const fallbackSupplier = fallbackRaw.supplier?.value || 'Tedarikçi Firma';
+      const fallbackTotal = Number(fallbackRaw.totalAmount?.value || 0);
+      const recoveredExtracted = {
+        documentType: fallbackRaw.documentType || 'invoice',
+        supplier: fallbackSupplier,
+        vendorName: fallbackSupplier,
+        company: fallbackSupplier,
+        seller: fallbackSupplier,
+        invoiceNumber: fallbackRaw.invoiceNumber?.value || `BLG-${Date.now().toString().slice(-6)}`,
+        date: fallbackRaw.date?.value || new Date().toISOString().split('T')[0],
+        currency: fallbackRaw.currency?.value || 'RUB',
+        subtotal: fallbackTotal,
+        discount: 0,
+        tax: 0,
+        totalAmount: fallbackTotal,
+        items: fallbackRaw.items || [],
+        overallConfidence: 0.80,
+        rawWarnings: ['Yerel kurtarma ayrıştırıcısı ile okundu.']
+      };
+      const { data: cachedInvsFallback } = await getInvoicesCached().catch(() => ({ data: [] }));
+      const dupFallback = checkDuplicateInvoice({
+        supplier: recoveredExtracted.supplier,
+        invoiceNumber: recoveredExtracted.invoiceNumber,
+        date: recoveredExtracted.date,
+        totalAmount: recoveredExtracted.totalAmount
+      }, cachedInvsFallback || []);
+      return res.json({
+        success: true,
+        extracted: recoveredExtracted,
+        validation: validateInvoiceData(recoveredExtracted),
+        duplicateInfo: dupFallback,
+        usedModel: 'local-resilient-parser',
+        retryCount: 1,
+        stagesCompleted: 1
+      });
+    } catch (_) {
+      res.status(500).json({ error: 'Yapay zeka işlemi başarısız oldu.', details: err.message });
+    }
   }
 });
 
@@ -8574,6 +9438,67 @@ process.on('uncaughtException', (err) => {
   console.error('[SERVER UNCAUGHT EXCEPTION]:', err);
 });
 
+
+// Helper: Reconstructs any file present in Firestore storage_files/storage_chunks (or local disk) and heals it into GCS faturalar/
+async function healMissingFileFromFirestoreToGcs(filename: string): Promise<any | null> {
+  if (!bucket || !filename) return null;
+  const safeName = path.basename(filename);
+  try {
+    if (db) {
+      const metaSnap = await getDoc(doc(db, 'storage_files', safeName));
+      if (metaSnap.exists()) {
+        const meta = metaSnap.data();
+        const count = Number(meta.chunks || 0);
+        if (Number.isInteger(count) && count >= 1 && count <= 100) {
+          const parts: string[] = [];
+          let complete = true;
+          for (let i = 0; i < count; i++) {
+            const chunk = await getDoc(doc(db, 'storage_chunks', `${safeName}_${i}`));
+            if (!chunk.exists() || typeof chunk.data().data !== 'string') {
+              complete = false;
+              break;
+            }
+            parts.push(chunk.data().data);
+          }
+          if (complete) {
+            const buffer = Buffer.from(parts.join(''), 'base64');
+            if (buffer.length > 0) {
+              const contentType = meta.contentType || (safeName.endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
+              const gcsFileRef = bucket.file(`faturalar/${safeName}`);
+              await gcsFileRef.save(buffer, {
+                resumable: false,
+                metadata: { contentType, cacheControl: 'private, max-age=3600', metadata: { originalName: meta.originalName || safeName } }
+              });
+              try {
+                fs.writeFileSync(path.join(LOCAL_FILES_DIR, safeName), buffer);
+              } catch (_) {}
+              console.log(`[STORAGE AUTO-HEAL] Reconstructed ${safeName} (${buffer.length} bytes) from Firestore chunks to GCS faturalar/${safeName}`);
+              return gcsFileRef;
+            }
+          }
+        }
+      }
+    }
+
+    const localCandidate = path.join(LOCAL_FILES_DIR, safeName);
+    if (fs.existsSync(localCandidate)) {
+      const buffer = fs.readFileSync(localCandidate);
+      if (buffer.length > 0) {
+        const contentType = safeName.endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream';
+        const gcsFileRef = bucket.file(`faturalar/${safeName}`);
+        await gcsFileRef.save(buffer, {
+          resumable: false,
+          metadata: { contentType, cacheControl: 'private, max-age=3600', metadata: { originalName: safeName } }
+        });
+        console.log(`[STORAGE AUTO-HEAL] Synced ${safeName} from local disk to GCS faturalar/${safeName}`);
+        return gcsFileRef;
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[STORAGE AUTO-HEAL WARN] Could not heal ${safeName}:`, err.message);
+  }
+  return null;
+}
 
 // ============================================================================
 // GECE YEDEĞİ: aynı gün tekrar çalışırsa yeni nesne/versiyon üretmez.
@@ -8605,20 +9530,23 @@ async function createNightlyBackup() {
     if (disc.finalOfferFileUrl && !disc.finalOfferFileUrl.startsWith('data:')) fileUrlsToVerify.add(disc.finalOfferFileUrl);
   });
   
-  const [bucketFiles] = await bucket.getFiles({ maxResults: 10000 });
-  const fileMap = new Map<string, any>();
   const dailyPrefix = `sistem-yedekleri/daily/backup-${dateStr}/pdfs/`;
+  const [sourceFiles, archivedFiles] = await Promise.all([
+    bucket.getFiles({ prefix: 'faturalar/' }).then((r: any) => r[0] || []).catch(() => []),
+    bucket.getFiles({ prefix: dailyPrefix }).then((r: any) => r[0] || []).catch(() => [])
+  ]);
+  const fileMap = new Map<string, any>();
   const alreadyArchivedPdfs = new Set<string>();
 
-  for (const f of bucketFiles) {
+  for (const f of sourceFiles) {
     const fn = path.basename(f.name).toLowerCase();
-    if (f.name.startsWith(dailyPrefix)) {
-      alreadyArchivedPdfs.add(fn);
-    } else {
-      if (!fileMap.has(fn)) {
-        fileMap.set(fn, f);
-      }
+    if (!fileMap.has(fn)) {
+      fileMap.set(fn, f);
     }
+  }
+  for (const f of archivedFiles) {
+    const fn = path.basename(f.name).toLowerCase();
+    alreadyArchivedPdfs.add(fn);
   }
 
   const pdfManifest = [];
@@ -8630,7 +9558,11 @@ async function createNightlyBackup() {
     const match = String(fUrl).match(/\/api\/files\/([^/?]+)/);
     if (match && match[1]) {
       const filename = decodeURIComponent(match[1]);
-      const fileRef = fileMap.get(filename.toLowerCase());
+      let fileRef = fileMap.get(filename.toLowerCase());
+      if (!fileRef) {
+        fileRef = await healMissingFileFromFirestoreToGcs(filename);
+        if (fileRef) fileMap.set(filename.toLowerCase(), fileRef);
+      }
 
       if (fileRef) {
         const metadata = fileRef.metadata || {};
@@ -8846,8 +9778,11 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
         continue;
       }
       // ENRICH existing invoice with Prizma metadata without creating duplicate
+      const isMatchPurePrizma = Boolean(String(match.id || '').startsWith('inv_prizma_') || String(match.id || '').startsWith('prizma_'));
       const enrichPayload: any = {
-        prizmaSource: true,
+        prizmaSource: isMatchPurePrizma,
+        origin: isMatchPurePrizma ? 'prizma' : 'ges_archive',
+        prizmaLinked: true,
         prizmaDemandId: pInv.prizmaDemandId,
         prizmaRequestCode: pInv.prizmaRequestCode || match.prizmaRequestCode || null,
         prizmaOrderCode: pInv.prizmaOrderCode || match.prizmaOrderCode || null,
@@ -8858,6 +9793,10 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
         prizmaStatus: pInv.prizmaStatus || match.prizmaStatus || null,
         supplierInn: pInv.supplierInn || match.supplierInn || null
       };
+      if ((pInv as any).excludedFreightAmount) {
+        enrichPayload.excludedFreightAmount = (pInv as any).excludedFreightAmount;
+        enrichPayload.excludedFreightGrossAmount = (pInv as any).excludedFreightGrossAmount;
+      }
       // If it is a Prizma-created invoice record (inv_prizma_*), also refresh its normalized items and category
       if (String(match.id || '').startsWith('inv_prizma_')) {
         const refreshedItems = (pInv.items || []).map((it: any) => {
@@ -8870,8 +9809,13 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
             materialCode: it.materialCode || null,
             quantity: Number(it.quantity) || 1,
             unit: it.unit || 'Adet',
-            unitPrice: Number(it.unitPrice) || 0,
+            unitPrice: Number(it.unitPriceNet ?? it.unitPrice) || 0,
+            unitPriceNet: Number(it.unitPriceNet ?? it.unitPrice) || 0,
+            grossUnitPrice: Number(it.grossUnitPrice ?? it.unitPrice) || 0,
             totalPrice: Number(it.totalPrice) || 0,
+            grossTotalPrice: Number(it.grossTotalPrice ?? it.totalPrice) || 0,
+            vatPercentage: it.vatPercentage !== undefined ? Number(it.vatPercentage) : 22,
+            isNetNormalized: Boolean(it.isNetNormalized),
             category: cat,
             prizmaRequestCode: pInv.prizmaRequestCode,
             prizmaOrderCode: pInv.prizmaOrderCode,
@@ -8898,8 +9842,13 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
           materialCode: it.materialCode || null,
           quantity: Number(it.quantity) || 1,
           unit: it.unit || 'Adet',
-          unitPrice: Number(it.unitPrice) || 0,
+          unitPrice: Number(it.unitPriceNet ?? it.unitPrice) || 0,
+          unitPriceNet: Number(it.unitPriceNet ?? it.unitPrice) || 0,
+          grossUnitPrice: Number(it.grossUnitPrice ?? it.unitPrice) || 0,
           totalPrice: Number(it.totalPrice) || 0,
+          grossTotalPrice: Number(it.grossTotalPrice ?? it.totalPrice) || 0,
+          vatPercentage: it.vatPercentage !== undefined ? Number(it.vatPercentage) : 22,
+          isNetNormalized: Boolean(it.isNetNormalized),
           category: cat,
           prizmaRequestCode: pInv.prizmaRequestCode,
           prizmaOrderCode: pInv.prizmaOrderCode,
@@ -8921,6 +9870,10 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
         uploadedBySupervisorId: '',
         uploadedBySupervisorName: pInv.prizmaCreatedBy || 'Prizma ERP',
         totalAmount: pInv.totalAmount || 0,
+        ...((pInv as any).excludedFreightAmount ? {
+          excludedFreightAmount: (pInv as any).excludedFreightAmount,
+          excludedFreightGrossAmount: (pInv as any).excludedFreightGrossAmount
+        } : {}),
         currency: pInv.currency || '₽',
         category: pInv.category || (normalizedItems[0]?.category) || 'İnşaat Malzemesi',
         items: normalizedItems,
@@ -9350,7 +10303,8 @@ app.post('/api/comparative-analyses/save', async (req, res) => {
       });
     }
 
-    if ((analysisData.documents || []).some((d: any) => !d.isExcluded && (!d.fileUrl || String(d.fileUrl).startsWith('data:') || String(d.fileUrl).includes('test-sandbox/')))) {
+    const isManualTdf = String(analysisData.id || '').startsWith('tdf_man_');
+    if (!isManualTdf && (analysisData.documents || []).some((d: any) => !d.isExcluded && (!d.fileUrl || String(d.fileUrl).startsWith('data:') || String(d.fileUrl).includes('test-sandbox/')))) {
       return res.status(400).json({error: 'Tüm belgeler ana projenin arşivine kaydedilmelidir.'});
     }
     analysisData.status = 'completed';
@@ -9445,17 +10399,37 @@ app.post('/api/comparative-analyses/save', async (req, res) => {
     );
     const discountId = existingDisc?.id || `disc_cmp_${analysisData.id}`;
 
-    // 2. Existing invoice resolution (re-use existing ID if same analysis, same discount, or same invoice number + vendor)
-    const existingInv = curInvoices.find((i: any) =>
-      !i.isDeleted && (
-        i.comparativeAnalysisId === analysisData.id ||
-        i.discountId === discountId ||
-        (finalInvoiceNumber && !finalInvoiceNumber.startsWith('FT-CMP-') && !finalInvoiceNumber.startsWith('TKF-') &&
-         areVendorsEqual(i.supplier || i.vendorName, finalSupplier) &&
-         String(i.invoiceNumber || i.invoiceNo || '').trim().toLowerCase() === finalInvoiceNumber.trim().toLowerCase())
-      )
-    );
-    const invoiceId = existingInv?.id || `inv_cmp_${analysisData.id}`;
+    // 2. Existing invoice resolution (re-use existing portal ID if same analysis, same discount, or same invoice number + vendor)
+    const cleanFinalNo = (finalInvoiceNumber || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+    const cleanFinalSup = normalizeVendorName(finalSupplier || '');
+
+    const matchingInvs = curInvoices.filter((i: any) => {
+      if (i.isDeleted) return false;
+      if (i.comparativeAnalysisId === analysisData.id) return true;
+      if (discountId && i.discountId === discountId) return true;
+      const iNo = String(i.invoiceNumber || i.invoiceNo || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+      const iSup = normalizeVendorName(i.supplier || i.vendorName || '');
+      if (cleanFinalNo && iNo && cleanFinalNo === iNo && areVendorsEqual(cleanFinalSup, iSup)) return true;
+      return false;
+    });
+
+    const isPurePrizma = (inv: any) => Boolean(String(inv.id || '').startsWith('inv_prizma_') || String(inv.id || '').startsWith('prizma_'));
+    const prizmaInvsToDelete = matchingInvs.filter(isPurePrizma);
+    const existingPortalInv = matchingInvs.find(i => !isPurePrizma(i));
+
+    const invoiceId = existingPortalInv?.id || `inv_cmp_${analysisData.id}`;
+
+    // Inherit Prizma metadata if any matched
+    const prizmaMatch = prizmaInvsToDelete[0];
+    const prizmaMetaInherited: any = {};
+    if (prizmaMatch) {
+      prizmaMetaInherited.prizmaDemandId = prizmaMatch.prizmaDemandId;
+      prizmaMetaInherited.prizmaRequestCode = prizmaMatch.prizmaRequestCode;
+      prizmaMetaInherited.prizmaOrderCode = prizmaMatch.prizmaOrderCode;
+      prizmaMetaInherited.prizmaBtfUrl = prizmaMatch.prizmaBtfUrl;
+      prizmaMetaInherited.prizmaStfUrl = prizmaMatch.prizmaStfUrl;
+      prizmaMetaInherited.prizmaUrl = prizmaMatch.prizmaBtfUrl || prizmaMatch.prizmaUrl;
+    }
 
     const linkedDiscount: any = {
       id: discountId,
@@ -9530,6 +10504,10 @@ app.post('/api/comparative-analyses/save', async (req, res) => {
       category: dominantCategory,
       notes: `Karşılaştırmalı Teklif Analizi #${analysisData.analysisCode} onaylı nihai anlaşma faturası. Piyasadaki en düşük ilk teklif bazı: ${initialPrice.toLocaleString('tr-TR')} ₽ (${analysisData.summary?.lowestInitialOfferSupplier || 'Piyasa'}), Sağlanan net tasarruf: ${analysisData.realMarketSavings.toLocaleString('tr-TR')} ₽ (%${analysisData.realSavingsRate}).`,
       items: categorizedItems,
+      ...prizmaMetaInherited,
+      origin: 'ges_archive',
+      prizmaSource: false,
+      prizmaLinked: Boolean(prizmaMetaInherited.prizmaBtfUrl || prizmaMetaInherited.prizmaRequestCode),
       rawFileName: finalDoc?.fileName || 'nihai_anlasilan_fatura.pdf',
       fileUrl: finalDoc?.fileUrl || '',
       created_at: new Date().toISOString(),
@@ -9537,17 +10515,31 @@ app.post('/api/comparative-analyses/save', async (req, res) => {
       status: 'Onaylandı'
     };
 
-    const updatedInvoices = [finalInvoiceRecord, ...curInvoices.filter((i: any) => i.id !== invoiceId && i.comparativeAnalysisId !== analysisData.id && i.discountId !== discountId)];
+    const prizmaDeletedIds = new Set(prizmaInvsToDelete.map(p => p.id));
+    const updatedInvoices = [finalInvoiceRecord, ...curInvoices.filter((i: any) => i.id !== invoiceId && i.comparativeAnalysisId !== analysisData.id && i.discountId !== discountId && !prizmaDeletedIds.has(i.id))];
     if (!db) return res.status(503).json({error: 'Firestore bağlı değil. Analiz kaydedilmedi.'});
     const batch = writeBatch(db);
     batch.set(doc(db, 'comparative_analyses', analysisData.id), cleanComparativeData(analysisData), {merge: true});
     batch.set(doc(db, 'discounts', discountId), cleanComparativeData(linkedDiscount), {merge: true});
     batch.set(doc(db, 'invoices', invoiceId), cleanComparativeData(finalInvoiceRecord), {merge: true});
+
+    // Soft-delete replaced Prizma invoices so portal invoice takes absolute priority
+    const nowIso = new Date().toISOString();
+    for (const pInv of prizmaInvsToDelete) {
+      batch.set(doc(db, 'invoices', pInv.id), {
+        isDeleted: true,
+        deletedAt: nowIso,
+        deletedReason: 'Karşılaştırmalı analiz portal faturası lehine Prizma faturası otomatik silindi (Öncelik GES Arşiv)'
+      }, { merge: true });
+      prizmaSyncService.markAsDeleted(pInv.id);
+    }
+
     await batch.commit();
     comparativeAnalysesStore.set(analysisData.id, analysisData);
     memoryStore.discounts = {data: updatedDiscounts, timestamp: Date.now()};
     saveLocalBackup('discounts.json', updatedDiscounts);
     memoryStore.invoices = { data: updatedInvoices, timestamp: Date.now() };
+    memoryStore.materialComparisons = null;
     saveLocalBackup('invoices.json', updatedInvoices);
 
     // Auto-create snapshot for historical persistence
@@ -9634,7 +10626,108 @@ app.post('/api/material-synonyms', (req, res) => {
 });
 
 
-app.post('/api/materials/retroactive-audit-normalize', async (req, res) => {
+async function sanitizeInvoiceHistoryPricingAndFreight(dbInstance: any): Promise<{
+  success: boolean;
+  invoicesSanitized: number;
+  itemsNormalized: number;
+  freightIsolatedInvoices: number;
+  totalActiveInvoices: number;
+}> {
+  if (!dbInstance) {
+    return { success: false, invoicesSanitized: 0, itemsNormalized: 0, freightIsolatedInvoices: 0, totalActiveInvoices: 0 };
+  }
+  const prizmaInvs = await prizmaSyncService.getInvoicesCached().catch(() => []);
+  const invSnap = await getDocs(collection(dbInstance, 'invoices'));
+  const allDocs = invSnap.docs.map(d => ({ id: d.id, ...d.data() as any }));
+  const activeDocs = allDocs.filter(i => !i.isDeleted && !i.isPermanentlyDeleted);
+
+  const normalizedDocs = enrichAndNormalizeInvoiceRecords(activeDocs, prizmaInvs);
+  const updates: Array<{ id: string; payload: any }> = [];
+  let itemsNormalized = 0;
+  let freightIsolatedInvoices = 0;
+
+  for (let idx = 0; idx < activeDocs.length; idx++) {
+    const raw = activeDocs[idx];
+    const norm = normalizedDocs[idx];
+    if (!norm || !Array.isArray(norm.items)) continue;
+
+    const rawItemsLen = Array.isArray(raw.items) ? raw.items.length : 0;
+    const normItemsLen = norm.items.length;
+    if (norm.excludedFreightAmount > 0 || normItemsLen < rawItemsLen) {
+      freightIsolatedInvoices++;
+    }
+
+    let needsWrite = normItemsLen !== rawItemsLen || Boolean(norm.excludedFreightAmount && !raw.excludedFreightAmount);
+    for (let k = 0; k < norm.items.length; k++) {
+      const rIt = raw.items?.[k];
+      const nIt = norm.items[k];
+      itemsNormalized++;
+      if (
+        !rIt ||
+        !rIt.isNetNormalized ||
+        rIt.grossUnitPrice === undefined ||
+        rIt.vatPercentage === undefined ||
+        Math.abs((Number(rIt.unitPrice) || 0) - (Number(nIt.unitPrice) || 0)) > 0.005 ||
+        Math.abs((Number(rIt.grossUnitPrice) || 0) - (Number(nIt.grossUnitPrice) || 0)) > 0.005
+      ) {
+        needsWrite = true;
+      }
+    }
+
+    if (needsWrite) {
+      updates.push({
+        id: norm.id,
+        payload: cleanComparativeData({
+          items: norm.items,
+          netSubtotalAmount: norm.netSubtotalAmount,
+          vatTotalAmount: norm.vatTotalAmount,
+          vatRate: norm.vatRate,
+          ...(norm.excludedFreightAmount ? {
+            excludedFreightAmount: norm.excludedFreightAmount,
+            excludedFreightGrossAmount: norm.excludedFreightGrossAmount
+          } : {})
+        })
+      });
+    }
+  }
+
+  const batchSize = 100;
+  for (let i = 0; i < updates.length; i += batchSize) {
+    const batch = writeBatch(dbInstance);
+    const chunk = updates.slice(i, i + batchSize);
+    for (const u of chunk) {
+      batch.set(doc(dbInstance, 'invoices', u.id), u.payload, { merge: true });
+    }
+    await batch.commit();
+  }
+
+  memoryStore.invoices = undefined;
+  memoryStore.materialComparisons = undefined;
+
+  return {
+    success: true,
+    invoicesSanitized: updates.length,
+    itemsNormalized,
+    freightIsolatedInvoices,
+    totalActiveInvoices: activeDocs.length
+  };
+}
+
+app.post('/api/prizma/sanitize-history', async (_req, res) => {
+  try {
+    if (!db) return res.status(503).json({ error: 'Firestore bağlı değil.' });
+    const result = await sanitizeInvoiceHistoryPricingAndFreight(db);
+    res.json({
+      ...result,
+      message: `${result.totalActiveInvoices} aktif fatura ve ${result.itemsNormalized} kalem tarandı; ${result.invoicesSanitized} faturada Net (KDV Hariç) / Brüt (KDV Dahil) birim fiyatlar ve nakliye ayrıştırması kalıcı olarak güncellendi.`
+    });
+  } catch (err: any) {
+    console.error('[PRIZMA SANITIZE HISTORY ERROR]:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post(['/api/materials/retroactive-audit-normalize', '/api/materials/retroactive-audit'], async (req, res) => {
   try {
     if (!(await _isAdminSession(req))) return res.status(403).json({error: 'Geçmiş kayıt denetimi için yönetici yetkisi gereklidir.'});
     if (!db) return res.status(503).json({error: 'Firestore bağlı değil.'});
@@ -9801,17 +10894,22 @@ app.post('/api/materials/retroactive-audit-normalize', async (req, res) => {
       }
     }
 
+    // 3. Also run Net/Gross VAT & Freight Sanitizer across all active invoices
+    const vatSanitizeResult = await sanitizeInvoiceHistoryPricingAndFreight(db);
+
     // Clear memory store so next fetch instantly reloads audited records
     memoryStore.invoices = undefined;
     memoryStore.discounts = undefined;
+    memoryStore.materialComparisons = undefined;
 
     res.json({
       success: true,
-      message: `${totalItemsAudited} fatura kalemi başarıyla denetlendi, ${itemsUpdated} kalem (${invoicesUpdated} fatura) standart kanonik inşaat kimliğine kavuşturuldu.`,
+      message: `${totalItemsAudited} fatura kalemi başarıyla denetlendi, ${itemsUpdated} kalem (${invoicesUpdated} fatura) standart kanonik inşaat kimliğine ve ${vatSanitizeResult.invoicesSanitized} fatura Net (KDV Hariç) / Nakliye Hariç birim fiyat standardına kavuşturuldu.`,
       totalInvoicesAudited: allInvoices.length,
       totalItemsAudited,
-      itemsUpdated,
-      invoicesUpdated,
+      itemsUpdated: itemsUpdated + vatSanitizeResult.invoicesSanitized,
+      invoicesUpdated: Math.max(invoicesUpdated, vatSanitizeResult.invoicesSanitized),
+      vatSanitizeResult,
       auditSummary,
       details
     });

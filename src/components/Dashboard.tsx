@@ -112,6 +112,8 @@ interface DashboardProps {
   onOpenBackupModal?: () => void;
   onNavigateToTab: (tabId: string) => void;
   onRefreshData?: () => Promise<void>;
+  onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => void | Promise<void>;
+  onDeleteInvoice?: (id: string) => void | Promise<void>;
 }
 
 // Modern harmonious color palette for charts (Avoids clashing saturated slop)
@@ -211,7 +213,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onOpenNewDiscountModal,
   onOpenBackupModal,
   onNavigateToTab,
-  onRefreshData
+  onRefreshData,
+  onUpdateInvoice,
+  onDeleteInvoice
 }) => {
   const { t, language } = useLanguage();
   const { user } = useAuth();
@@ -2789,6 +2793,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 setSelectedTx(null);
                 onNavigateToTab('compare');
               }}
+              onUpdateInvoice={onUpdateInvoice}
+              onDeleteInvoice={onDeleteInvoice}
             />
           );
         }

@@ -62,7 +62,7 @@ export const EditDiscountModal: React.FC<Props> = ({
 
   const { t, language } = useLanguage();
   const { user } = useAuth();
-  const perm = checkRecordPermission(user, record.supervisorId, record.supervisorName);
+  const perm = checkRecordPermission(user, record);
 
   const [supervisorId, setSupervisorId] = useState<string>(record.supervisorId);
   const [performedByPersonnelId, setPerformedByPersonnelId] = useState<string>(record.performedByPersonnelId || '');

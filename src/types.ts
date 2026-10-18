@@ -54,7 +54,11 @@ export interface InvoiceItem {
   quantity: number;
   unit: string;
   unitPrice: number;
+  unitPriceNet?: number;
+  grossUnitPrice?: number;
   totalPrice: number;
+  grossTotalPrice?: number;
+  vatPercentage?: number;
   discountAmount?: number;
   brand?: string;
   model?: string;
@@ -76,6 +80,12 @@ export interface InvoiceRecord {
   date: string;
   supplier: string;
   totalAmount: number;
+  netSubtotalAmount?: number;
+  vatTotalAmount?: number;
+  vatRate?: number;
+  excludedFreightAmount?: number;
+  excludedFreightGrossAmount?: number;
+  excludedFreightItems?: InvoiceItem[];
   jobsiteId?: string;
   jobsiteName?: string;
   uploadedBySupervisorId?: string;
@@ -236,6 +246,9 @@ export interface MaterialComparisonHistoryItem {
   date: string;
   supplier: string;
   unitPrice: number;
+  unitPriceNet?: number;
+  grossUnitPrice?: number;
+  vatPercentage?: number;
   quantity: number;
   invoiceId?: string;
   invoiceNumber?: string;
@@ -265,6 +278,9 @@ export interface MaterialComparison {
   maxUnitPrice: number;
   avgPrice: number;
   avgUnitPrice?: number;
+  minGrossUnitPrice?: number;
+  maxGrossUnitPrice?: number;
+  avgGrossUnitPrice?: number;
   priceDifferencePercentage: number;
   cheapestJobsiteName?: string;
   priciestJobsiteName?: string;

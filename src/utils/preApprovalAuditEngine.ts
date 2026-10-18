@@ -14,6 +14,13 @@
 import { InvoiceRecord, InvoiceItem, DiscountRecord } from '../types';
 import { processItem, ProcessItemInput, ProcessedItemResult } from './aiDecisionEngine';
 import { normalizeUnit, normalizeQuantityAndPrice, extractTechnicalSpecs } from './comparativeCalculation';
+import { areSpecSignaturesCompatible } from './materialGroupIntegrity';
+import {
+  buildSmartOriginalSignature,
+  buildMode2CrossBrandFamilies,
+  findCheaperEquivalentBrandSuggestion,
+  SmartOriginalInvoiceSignature
+} from './dualMaterialComparisonEngine';
 
 export type PreApprovalStatus =
   | 'ONAYLANABİLİR'
@@ -108,6 +115,10 @@ export interface LineAuditResult {
     potentialDiscountAmount: number;
     negotiationScript: string;
   };
+
+  // Mode 1 Original Invoice Signature & Mode 2 Cross-Brand Equivalent Economy Suggestion
+  smartSignature?: SmartOriginalInvoiceSignature;
+  crossBrandEconomySuggestion?: ReturnType<typeof findCheaperEquivalentBrandSuggestion>;
 }
 
 export interface InvoiceAuditSummary {
@@ -264,7 +275,26 @@ export function auditSingleLineItem(
   const draftSupplier = (draftItem.supplier || '').trim().toLowerCase();
   const draftJobsiteId = draftItem.jobsiteId || '';
 
-  // 2. Scan historical invoices for matching records
+  const draftSig = buildSmartOriginalSignature({
+    originalName: draftItem.originalName,
+    materialName: draftItem.materialName,
+    category: draftItem.category,
+    unit: draftItem.unit,
+    unitPrice: draftItem.unitPrice
+  });
+
+  const referenceCrossBrandFamilies = buildMode2CrossBrandFamilies([]);
+  const crossBrandEconomySuggestion = findCheaperEquivalentBrandSuggestion({
+    originalName: draftItem.originalName,
+    materialName: draftItem.materialName,
+    category: draftItem.category,
+    unit: draftItem.unit,
+    currentUnitPrice: normalizedDraftUnitPrice || draftItem.unitPrice,
+    quantity: draftItem.quantity || 1,
+    families: referenceCrossBrandFamilies
+  });
+
+  // 2. Scan historical invoices for matching records (Mode 1: Apple-to-Apple)
   const candidateHistoricalMatches: HistoricalPricePoint[] = [];
 
   for (const inv of historicalInvoices) {
@@ -276,6 +306,38 @@ export function auditSingleLineItem(
 
     for (const pastIt of inv.items) {
       if (!pastIt.unitPrice || pastIt.unitPrice <= 0) continue;
+
+      const pastSig = buildSmartOriginalSignature({
+        originalName: pastIt.originalName,
+        materialName: pastIt.materialName,
+        category: pastIt.category,
+        unit: pastIt.unit,
+        unitPrice: pastIt.unitPrice
+      });
+
+      // Mode 1 (Apple-to-Apple) Brand & Product Series Protection Rule:
+      // For non-commodity branded materials (Drywall, Insulation, Waterproofing, Plaster, Paint, Tools),
+      // never mix different canonical brands or product series/density classes (e.g., Техновент Н vs Baswool Фасад 120) in Mode 1 historical benchmark!
+      if (!draftSig.isCommodity) {
+        if (draftSig.canonicalBrandKey !== pastSig.canonicalBrandKey) {
+          continue;
+        }
+        if ((draftSig.subBrandOrSeries || '') !== (pastSig.subBrandOrSeries || '')) {
+          continue;
+        }
+      }
+
+      // Check 3-layer original Russian specification signature compatibility (brand, series, density, pack weight, dimensions)
+      if (
+        (draftItem.originalName || draftItem.materialName) &&
+        (pastIt.originalName || pastIt.materialName) &&
+        !areSpecSignaturesCompatible(
+          draftItem.originalName || draftItem.materialName,
+          pastIt.originalName || pastIt.materialName
+        )
+      ) {
+        continue;
+      }
 
       // Extract past specs
       const pastSpecs = extractTechnicalSpecs(`${pastIt.materialName} ${pastIt.originalName || ''} ${(pastIt as any).dimensions || ''} ${(pastIt as any).diameter || ''}`);
@@ -301,13 +363,24 @@ export function auditSingleLineItem(
       });
 
       // Matching logic:
+      // 0: Smart Original Russian Invoice Signature Match (handles different vendor phrasings of same product & brand)
       // A: CPID Exact match
       // B: Canonical Name Exact match
       // C: Same Category & strong keyword overlap
       let isMatch = false;
       let matchScore = 0.5;
 
-      if (pastProcessed.canonicalProductId === processed.canonicalProductId) {
+      if (
+        !draftSig.canonicalFamilyKey.startsWith('FAM_') &&
+        draftSig.canonicalFamilyKey === pastSig.canonicalFamilyKey &&
+        draftSig.canonicalSpecKey === pastSig.canonicalSpecKey &&
+        (draftSig.isCommodity ||
+          (draftSig.canonicalBrandKey === pastSig.canonicalBrandKey &&
+           (draftSig.subBrandOrSeries || '') === (pastSig.subBrandOrSeries || '')))
+      ) {
+        isMatch = true;
+        matchScore = 0.96 * specCompatibility.specMatchScore;
+      } else if (pastProcessed.canonicalProductId === processed.canonicalProductId) {
         isMatch = true;
         matchScore = 0.95 * specCompatibility.specMatchScore;
       } else if (pastProcessed.canonicalName.toLowerCase() === processed.canonicalName.toLowerCase()) {
@@ -408,7 +481,9 @@ export function auditSingleLineItem(
       isUrgentPurchase: !!options?.isUrgentPurchase,
       isLowConfidence: false,
       isScopeChange: !!options?.isScopeChange,
-      isCheaperPastPurchaseAvailable: false
+      isCheaperPastPurchaseAvailable: false,
+      smartSignature: draftSig,
+      crossBrandEconomySuggestion
     };
   }
 
@@ -500,7 +575,9 @@ export function auditSingleLineItem(
     isLowConfidence,
     isScopeChange: !!options?.isScopeChange,
     isCheaperPastPurchaseAvailable,
-    suggestedAction
+    suggestedAction,
+    smartSignature: draftSig,
+    crossBrandEconomySuggestion
   };
 }
 

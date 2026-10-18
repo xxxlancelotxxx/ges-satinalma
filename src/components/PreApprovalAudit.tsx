@@ -91,6 +91,7 @@ export const PreApprovalAudit: React.FC<Props> = ({
   const [isTransferred, setIsTransferred] = useState<boolean>(false);
   const [isTransferring, setIsTransferring] = useState<boolean>(false);
   const [transferSuccessMsg, setTransferSuccessMsg] = useState<string | null>(null);
+  const [forceSaveDuplicate, setForceSaveDuplicate] = useState<boolean>(false);
 
   // Local Audit Trail for recent actions
   const [recentAuditLogs, setRecentAuditLogs] = useState<any[]>([]);
@@ -335,7 +336,27 @@ export const PreApprovalAudit: React.FC<Props> = ({
       const jobsiteObj = jobsites.find(j => j.id === transferJobsiteId);
       const supervisorObj = supervisors.find(s => s.id === transferSupervisorId);
 
-      const invoicePayload: Omit<InvoiceRecord, 'id' | 'createdAt'> = {
+      let uploadedUrl: string | undefined = undefined;
+      if (uploadedFile?.base64) {
+        try {
+          const upRes = await fetch('/api/upload-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileName: uploadedFile.name,
+              fileData: uploadedFile.base64
+            })
+          });
+          const upData = await upRes.json();
+          if (upData.success && (upData.fileUrl || upData.url)) {
+            uploadedUrl = upData.fileUrl || upData.url;
+          }
+        } catch (upErr) {
+          console.warn('PreApprovalAudit file upload fallback to inline fileData:', upErr);
+        }
+      }
+
+      const invoicePayload: any = {
         invoiceNumber: auditSummary.invoiceNumber || `FT-PRE-${Date.now().toString().slice(-6)}`,
         supplier: auditSummary.supplier || 'Tedarikçi Firma',
         date: auditSummary.date || new Date().toISOString().split('T')[0],
@@ -343,8 +364,15 @@ export const PreApprovalAudit: React.FC<Props> = ({
         currency: auditSummary.currency,
         jobsiteId: transferJobsiteId,
         jobsiteName: jobsiteObj?.name || 'Şantiye',
+        uploadedBySupervisorId: transferSupervisorId,
+        uploadedBySupervisorName: supervisorObj?.name || user?.displayName || 'Satınalma Şefi',
         supervisorId: transferSupervisorId,
         supervisorName: supervisorObj?.name || user?.displayName || 'Satınalma Şefi',
+        fileUrl: uploadedUrl,
+        fileData: !uploadedUrl && uploadedFile?.base64 ? uploadedFile.base64 : undefined,
+        rawFileName: uploadedFile?.name,
+        forceSave: forceSaveDuplicate,
+        forceSaveDuplicate: forceSaveDuplicate,
         items: auditSummary.lineResults.map(l => ({
           materialName: l.draftItem.materialName,
           originalName: l.draftItem.originalName,
@@ -376,6 +404,7 @@ export const PreApprovalAudit: React.FC<Props> = ({
 
       setIsTransferred(true);
       setShowTransferModal(false);
+      setForceSaveDuplicate(false);
       setTransferSuccessMsg(`✅ Fatura (${invoicePayload.invoiceNumber}) kalıcı fatura kayıtlarına başarıyla aktarıldı ve audit günlüğüne işlendi.`);
     } catch (err: any) {
       setErrorMsg(err.message || 'Fatura kalıcı kayda aktarılırken hata oluştu.');
@@ -671,11 +700,30 @@ export const PreApprovalAudit: React.FC<Props> = ({
                         <tr className={`hover:bg-slate-50/80 transition-colors ${line.statusColor === 'rose' ? 'bg-rose-50/30' : ''}`}>
                           <td className="p-3.5 font-bold text-slate-400">{line.lineIndex + 1}</td>
                           <td className="p-3.5 max-w-xs">
-                            <p className="font-bold text-slate-900 line-clamp-1">{line.processed.canonicalName}</p>
+                            <p className="font-bold text-slate-900 line-clamp-1">
+                              {line.draftItem.originalName || line.processed.canonicalName}
+                            </p>
                             <p className="text-[11px] text-slate-500 line-clamp-1 italic">{line.draftItem.materialName}</p>
-                            <span className="inline-block mt-1 text-[10px] font-semibold bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200">
-                              {line.processed.category}
-                            </span>
+                            <div className="flex flex-wrap items-center gap-1 mt-1">
+                              <span className="inline-block text-[10px] font-semibold bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200">
+                                {line.processed.category}
+                              </span>
+                              {line.smartSignature && (
+                                <span className={`inline-block text-[10px] font-bold px-1.5 py-0.5 rounded border ${
+                                  line.smartSignature.isCommodity
+                                    ? 'bg-slate-800 text-slate-100 border-slate-700'
+                                    : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                }`}>
+                                  {line.smartSignature.isCommodity ? 'Emtia (GOST)' : line.smartSignature.canonicalBrandDisplay}
+                                </span>
+                              )}
+                              {line.crossBrandEconomySuggestion?.hasCheaperEquivalent && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-black bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded border border-emerald-300">
+                                  <Sparkles className="w-2.5 h-2.5" />
+                                  Mod 2 Muadil: -{line.crossBrandEconomySuggestion.savingsPercentage}% ({line.crossBrandEconomySuggestion.suggestedBrandDisplay})
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="p-3.5 whitespace-nowrap">
                             <p className="font-black text-slate-900">{formatRuble(line.draftItem.unitPrice)} / {line.draftItem.unit}</p>
@@ -778,7 +826,7 @@ export const PreApprovalAudit: React.FC<Props> = ({
                                   <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
                                     <h4 className="font-bold text-slate-800 mb-1 flex items-center gap-1.5">
                                       <AlertTriangle className="w-4 h-4 text-indigo-600" />
-                                      Karar Gerekçesi & Özet
+                                      Karar Gerekçesi & Özet (Mod 1: Elma-Elma Birebir Kıyaslama)
                                     </h4>
                                     <p className="text-slate-600 leading-relaxed">{line.decisionReasoning}</p>
                                     {line.bestHistoricalMatch && (
@@ -813,6 +861,33 @@ export const PreApprovalAudit: React.FC<Props> = ({
                                     </div>
                                   )}
                                 </div>
+
+                                {/* Mode 2: Cross-Brand Equivalent Economy Suggestion Banner */}
+                                {line.crossBrandEconomySuggestion?.hasCheaperEquivalent && (
+                                  <div className="bg-emerald-50/90 p-4 rounded-xl border border-emerald-300 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                    <div className="space-y-1">
+                                      <div className="flex items-center gap-2 font-black text-emerald-900 text-xs">
+                                        <Sparkles className="w-4 h-4 text-emerald-600" />
+                                        <span>💡 Muadil Marka Ekonomi Önerisi (Mod 2 — Alternatif Marka Analizi)</span>
+                                        <span className="px-2 py-0.5 rounded bg-emerald-200/80 text-emerald-900 text-[10px] font-mono">
+                                          {line.crossBrandEconomySuggestion.specLabel}
+                                        </span>
+                                      </div>
+                                      <p className="text-emerald-800 leading-relaxed">
+                                        Faturadaki orijinal <strong>{line.crossBrandEconomySuggestion.currentBrandDisplay}</strong> markası yerine aynı teknik ölçü ve kullanım sınıfındaki (<em>{line.crossBrandEconomySuggestion.familyTitleRu}</em>) <strong>{line.crossBrandEconomySuggestion.suggestedBrandDisplay}</strong> muadili tercih edilirse birim fiyatta <strong>%{line.crossBrandEconomySuggestion.savingsPercentage} ({formatRuble(line.crossBrandEconomySuggestion.unitSavingsRub)})</strong>, bu kalemde toplam <strong>{formatRuble(line.crossBrandEconomySuggestion.totalSavingsRub)}</strong> ekonomi sağlanabilir.
+                                      </p>
+                                    </div>
+                                    <div className="bg-white px-3.5 py-2.5 rounded-xl border border-emerald-200 text-right shrink-0">
+                                      <span className="block text-[10px] font-bold text-slate-500 uppercase">Muadil Birim Fiyat</span>
+                                      <span className="font-mono font-black text-emerald-700 text-sm">
+                                        {formatRuble(line.crossBrandEconomySuggestion.suggestedUnitPrice)} / {line.draftItem.unit}
+                                      </span>
+                                      <span className="block text-[10px] font-black text-emerald-600 mt-0.5">
+                                        Toplam Ekonomi: +{formatRuble(line.crossBrandEconomySuggestion.totalSavingsRub)}
+                                      </span>
+                                    </div>
+                                  </div>
+                                )}
 
                                 {/* Historical Purchases Detail Table */}
                                 <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
@@ -1134,6 +1209,29 @@ export const PreApprovalAudit: React.FC<Props> = ({
                 </select>
               </div>
             </div>
+
+            {errorMsg && (
+              <div className="p-3.5 rounded-xl bg-rose-50 border-2 border-rose-300 text-rose-900 text-xs font-bold space-y-2">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>{errorMsg}</span>
+                </div>
+                {(errorMsg.toLowerCase().includes('kayıtlı') || errorMsg.toLowerCase().includes('mükerrer')) && (
+                  <label className="flex items-center space-x-2 pt-2 border-t border-rose-200 text-rose-950 font-extrabold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={forceSaveDuplicate}
+                      onChange={(e) => {
+                        setForceSaveDuplicate(e.target.checked);
+                        if (e.target.checked) setErrorMsg(null);
+                      }}
+                      className="rounded text-rose-600 focus:ring-rose-500 w-4 h-4 cursor-pointer"
+                    />
+                    <span>Bu faturanın sistemde kayıtlı olduğunu biliyorum, yine de yeni kayıt oluştur</span>
+                  </label>
+                )}
+              </div>
+            )}
 
             <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
               <button

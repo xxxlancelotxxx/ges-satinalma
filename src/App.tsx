@@ -52,7 +52,10 @@ function AppContent() {
       'x-session-token': user?.token || '',
       'x-user-role': encodeURIComponent(user?.role || ''),
       'x-user-supervisor-id': encodeURIComponent(user?.supervisorId || ''),
+      'x-user-personnel-id': encodeURIComponent(user?.personnelId || ''),
       'x-user-name': encodeURIComponent(user?.displayName || ''),
+      'x-user-jobsite-ids': encodeURIComponent(JSON.stringify(user?.jobsiteIds || [])),
+      'x-user-default-jobsite-id': encodeURIComponent(user?.defaultJobsiteId || ''),
       ...(adminPin ? { 'x-admin-pin': adminPin } : {})
     };
   };
@@ -80,6 +83,35 @@ function AppContent() {
   const [showQuickDiscountModal, setShowQuickDiscountModal] = useState<boolean>(false);
   const [showTrashModal, setShowTrashModal] = useState<boolean>(false);
   const [showBackupModal, setShowBackupModal] = useState<boolean>(false);
+
+  // Track visited scanning tabs so they remain mounted (preserving scanned OCR state across tab switches)
+  const [visitedTabs, setVisitedTabs] = useState<Record<string, boolean>>({
+    'invoice-ai': true,
+    'discount-entry': true,
+    'pre-approval-audit': false,
+    'comparative-offers': false
+  });
+  useEffect(() => {
+    if (activeTab === 'comparative-offers') {
+      setActiveTab('discount-entry');
+      return;
+    }
+    setVisitedTabs(prev => (prev[activeTab] ? prev : { ...prev, [activeTab]: true }));
+  }, [activeTab]);
+
+  // Pending scanned invoice/discount notification when user switches to other tabs to inspect prices
+  const [pendingInvoiceScan, setPendingInvoiceScan] = useState<{
+    supplier: string;
+    invoiceNumber: string;
+    totalAmount: number;
+    openModal: () => void;
+  } | null>(null);
+  const [pendingDiscountScan, setPendingDiscountScan] = useState<{
+    supplier: string;
+    invoiceNumber: string;
+    totalAmount: number;
+    openModal: () => void;
+  } | null>(null);
 
   useModalBackHandler(showQuickDiscountModal, () => setShowQuickDiscountModal(false));
 
@@ -308,20 +340,35 @@ function AppContent() {
 
   const handleUpdateInvoice = async (id: string, invoice: Partial<InvoiceRecord>) => {
     try {
+      // Optimistic update so UI reflects the edit immediately
+      setInvoices(prev => prev.map(inv => inv.id === id ? { ...inv, ...invoice } : inv));
       const res = await fetch(`/api/invoices/${id}`, {
         method: 'PUT',
         headers: getAuthHeaders(),
         body: JSON.stringify(invoice)
       });
-      if (res.ok) {
+      if (!res.ok) {
+        let errJson: any = {};
+        try { errJson = await res.json(); } catch (_) {}
         await loadData();
+        throw new Error(errJson.error || 'Fatura güncellenemedi');
       }
+      await loadData();
     } catch (err) {
       console.error('Error updating invoice:', err);
+      await loadData();
+      throw err;
     }
   };
 
   const handleDeleteInvoice = async (id: string) => {
+    // Optimistically update active and trash invoices
+    const targetInv = invoices.find(i => i.id === id);
+    setInvoices(prev => prev.filter(inv => inv.id !== id));
+    if (targetInv) {
+      setTrashInvoices(prev => [{ ...targetInv, isDeleted: true, deletedAt: new Date().toISOString() }, ...prev]);
+    }
+
     const res = await fetch(`/api/invoices/${id}`, {
       method: 'DELETE',
       headers: getAuthHeaders()
@@ -329,6 +376,7 @@ function AppContent() {
     if (!res.ok) {
       let errJson: any = {};
       try { errJson = await res.json(); } catch (_) {}
+      await loadData();
       throw new Error(errJson.error || errJson.details || 'Fatura silinemedi');
     }
     await loadData();
@@ -585,6 +633,57 @@ function AppContent() {
         </div>
       )}
 
+      {/* Floating Pending Scan Return Bar (Visible when user switches tabs while an invoice/offer is scanned and waiting to be saved) */}
+      {activeTab !== 'invoice-ai' && pendingInvoiceScan && (
+        <div className="bg-indigo-950 text-white px-4 py-2.5 shadow-lg border-b-2 border-emerald-400 sticky top-0 z-40">
+          <div className="max-w-[1700px] mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
+            <div className="flex items-center space-x-2.5">
+              <span className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-black uppercase text-[10px]">
+                Kaydedilmeyi Bekleyen Fatura
+              </span>
+              <span className="font-bold text-indigo-100">
+                {pendingInvoiceScan.supplier} (Fatura No: {pendingInvoiceScan.invoiceNumber}) — {pendingInvoiceScan.totalAmount.toLocaleString('tr-TR')} ₽
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('invoice-ai');
+                pendingInvoiceScan.openModal();
+              }}
+              className="px-3.5 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs shadow-sm cursor-pointer shrink-0"
+            >
+              📄 Fatura Onay Ekranına Dön ve Kaydet
+            </button>
+          </div>
+        </div>
+      )}
+
+      {activeTab !== 'discount-entry' && pendingDiscountScan && (
+        <div className="bg-slate-900 text-white px-4 py-2.5 shadow-lg border-b-2 border-amber-400 sticky top-0 z-40">
+          <div className="max-w-[1700px] mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
+            <div className="flex items-center space-x-2.5">
+              <span className="px-2 py-0.5 rounded bg-emerald-500 text-slate-950 font-black uppercase text-[10px]">
+                Kaydedilmeyi Bekleyen İndirim / Teklif
+              </span>
+              <span className="font-bold text-slate-100">
+                {pendingDiscountScan.supplier} (No: {pendingDiscountScan.invoiceNumber}) — {pendingDiscountScan.totalAmount.toLocaleString('tr-TR')} ₽
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('discount-entry');
+                pendingDiscountScan.openModal();
+              }}
+              className="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-extrabold text-xs shadow-sm cursor-pointer shrink-0"
+            >
+              💰 İndirim Kontrol Ekranına Dön ve Kaydet
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Content View */}
       <main className="flex-1 max-w-[1700px] w-full mx-auto px-2 sm:px-4 lg:px-6 py-4 sm:py-6">
         {isLoading ? (
@@ -611,16 +710,20 @@ function AppContent() {
                 onOpenBackupModal={user?.role === 'admin' ? () => setShowBackupModal(true) : undefined}
                 onNavigateToTab={(tabId) => setActiveTab(tabId)}
                 onRefreshData={() => loadData(false)}
+                onUpdateInvoice={handleUpdateInvoice}
+                onDeleteInvoice={handleDeleteInvoice}
               />
             )}
 
-            {activeTab === 'pre-approval-audit' && (
-              <PreApprovalAudit
-                jobsites={jobsites}
-                supervisors={supervisors}
-                invoices={invoices}
-                onInvoiceSaved={handleSaveInvoice}
-              />
+            {(activeTab === 'pre-approval-audit' || visitedTabs['pre-approval-audit']) && (
+              <div className={activeTab === 'pre-approval-audit' ? 'block' : 'hidden'}>
+                <PreApprovalAudit
+                  jobsites={jobsites}
+                  supervisors={supervisors}
+                  invoices={invoices}
+                  onInvoiceSaved={handleSaveInvoice}
+                />
+              </div>
             )}
 
             {activeTab === 'performance' && (
@@ -649,48 +752,47 @@ function AppContent() {
                   setTargetCompareMaterial(matName);
                   setActiveTab('material-compare');
                 }}
-              />
-            )}
-
-            {activeTab === 'discount-entry' && (
-              <DiscountEntryForm
-                supervisors={supervisors}
-                jobsites={jobsites}
-                discounts={discounts}
-                invoices={invoices}
-                personnel={personnel}
-                onSaveDiscount={handleSaveDiscount}
-                onUpdateDiscount={handleUpdateDiscount}
-                onDeleteDiscount={handleDeleteDiscount}
-                onSuccess={() => {
-                  setTimeout(() => {
-                    document.getElementById('recent-discounts-section')?.scrollIntoView({ behavior: 'smooth' });
-                  }, 150);
-                }}
-              />
-            )}
-
-            {activeTab === 'comparative-offers' && (
-              <ComparativeOffersView
-                jobsites={jobsites}
-                supervisors={supervisors}
-                personnel={personnel}
-                onNavigateToTab={(tabId) => setActiveTab(tabId)}
-                onRefreshData={() => loadData(false)}
-              />
-            )}
-
-            {activeTab === 'invoice-ai' && (
-              <InvoiceScannerAI
-                jobsites={jobsites}
-                supervisors={supervisors}
-                onInvoiceSaved={handleSaveInvoice}
                 onUpdateInvoice={handleUpdateInvoice}
                 onDeleteInvoice={handleDeleteInvoice}
-                onOpenTrashModal={() => setShowTrashModal(true)}
-                trashCount={totalTrashCount}
-                recentInvoices={invoices}
               />
+            )}
+
+            {(activeTab === 'discount-entry' || activeTab === 'comparative-offers' || visitedTabs['discount-entry']) && (
+              <div className={(activeTab === 'discount-entry' || activeTab === 'comparative-offers') ? 'block' : 'hidden'}>
+                <DiscountEntryForm
+                  supervisors={supervisors}
+                  jobsites={jobsites}
+                  discounts={discounts}
+                  invoices={invoices}
+                  personnel={personnel}
+                  onSaveDiscount={handleSaveDiscount}
+                  onUpdateDiscount={handleUpdateDiscount}
+                  onDeleteDiscount={handleDeleteDiscount}
+                  onPendingDiscountScanChange={setPendingDiscountScan}
+                  onSuccess={() => {
+                    void loadData(false);
+                    setTimeout(() => {
+                      document.getElementById('recent-discounts-section')?.scrollIntoView({ behavior: 'smooth' });
+                    }, 150);
+                  }}
+                />
+              </div>
+            )}
+
+            {(activeTab === 'invoice-ai' || visitedTabs['invoice-ai']) && (
+              <div className={activeTab === 'invoice-ai' ? 'block' : 'hidden'}>
+                <InvoiceScannerAI
+                  jobsites={jobsites}
+                  supervisors={supervisors}
+                  onInvoiceSaved={handleSaveInvoice}
+                  onUpdateInvoice={handleUpdateInvoice}
+                  onDeleteInvoice={handleDeleteInvoice}
+                  onOpenTrashModal={() => setShowTrashModal(true)}
+                  trashCount={totalTrashCount}
+                  recentInvoices={invoices}
+                  onPendingScanChange={setPendingInvoiceScan}
+                />
+              </div>
             )}
 
             {activeTab === 'invoice-drive' && (

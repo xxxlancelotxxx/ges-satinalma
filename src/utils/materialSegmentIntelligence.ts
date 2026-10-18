@@ -1,4 +1,4 @@
-import { areSpecSignaturesCompatible } from './materialGroupIntegrity';
+import { areSpecSignaturesCompatible, extractOriginalBrandAndSeries } from './materialGroupIntegrity';
 
 export type MaterialComparisonMode = 'COMMODITY_STANDARD' | 'BRAND_SEGMENTED';
 export type MaterialQualitySegment = 'COMMODITY' | 'PREMIUM' | 'STANDARD' | 'ECONOMY';
@@ -37,7 +37,8 @@ const BRAND_DICTIONARY: Array<{
   { pattern: /\bmetabo\b|метабо/i, brand: 'Metabo', defaultTier: 'PREMIUM' },
   { pattern: /\bfisco\b|фиско/i, brand: 'Fisco', defaultTier: 'PREMIUM' },
   { pattern: /\bgross\b|гросс/i, brand: 'Gross', defaultTier: 'PREMIUM' },
-  { pattern: /\bknauf\b|кнауф/i, brand: 'Knauf', defaultTier: 'PREMIUM' },
+  { pattern: /\bknauf\b|кнауф|сапфир\s+гсп|dfh3ir/i, brand: 'Knauf', defaultTier: 'PREMIUM' },
+  { pattern: /vetonit|ветонит|мультикомфорт/i, brand: 'Vetonit', defaultTier: 'PREMIUM' },
   { pattern: /техноэласт|technoelast/i, brand: 'ТехноНИКОЛЬ Техноэласт', defaultTier: 'PREMIUM' },
   { pattern: /carbon\s*prof|карбон\s*проф/i, brand: 'ТехноНИКОЛЬ Carbon Prof', defaultTier: 'PREMIUM' },
   { pattern: /logicpir|логикпир|logicbase/i, brand: 'ТехноНИКОЛЬ Logic', defaultTier: 'PREMIUM' },
@@ -70,15 +71,19 @@ const BRAND_DICTIONARY: Array<{
   { pattern: /tp-link/i, brand: 'TP-Link', defaultTier: 'PREMIUM' },
   { pattern: /redius|редиус/i, brand: 'Redius', defaultTier: 'PREMIUM' },
   { pattern: /ahmad\s*tea/i, brand: 'Ahmad Tea', defaultTier: 'PREMIUM' },
+  { pattern: /rennbohr|реннбор/i, brand: 'Rennbohr', defaultTier: 'PREMIUM' },
+  { pattern: /kapro|капро/i, brand: 'Kapro', defaultTier: 'PREMIUM' },
+  { pattern: /picante|пиканте/i, brand: 'Picante', defaultTier: 'PREMIUM' },
   { pattern: /luscan|лускан/i, brand: 'Luscan', defaultTier: 'STANDARD' },
   { pattern: /grass\b|milana/i, brand: 'Grass / Milana', defaultTier: 'PREMIUM' },
   { pattern: /клевер/i, brand: 'Клевер', defaultTier: 'STANDARD' },
 
   // Standard / Mid Tier
+  { pattern: /baswool|басвул/i, brand: 'Baswool', defaultTier: 'STANDARD' },
   { pattern: /гипрок|gyproc/i, brand: 'Gyproc (Гипрок)', defaultTier: 'STANDARD' },
-  { pattern: /технониколь|technonicol|технофас|техноблок|плантер|planter/i, brand: 'ТехноНИКОЛЬ', defaultTier: 'STANDARD' },
+  { pattern: /технониколь|technonicol|техновент|tehnovent|технофас|техноблок|роклайт|ультранап|плантер|planter/i, brand: 'ТехноНИКОЛЬ', defaultTier: 'STANDARD' },
   { pattern: /изопласт|izoplast/i, brand: 'Изопласт', defaultTier: 'STANDARD' },
-  { pattern: /виллатекс|villateks/i, brand: 'Виллатекс', defaultTier: 'STANDARD' },
+  { pattern: /виллатекс|villateks/i, brand: 'Виллатекс (Icopal)', defaultTier: 'STANDARD' },
   { pattern: /унифлекс|uniflex/i, brand: 'Унифлекс', defaultTier: 'STANDARD' },
   { pattern: /баутекс|крепикс/i, brand: 'БауТекс Крепикс', defaultTier: 'STANDARD' },
   { pattern: /зубр|\bzubr\b/i, brand: 'Зубр', defaultTier: 'STANDARD' },
@@ -88,7 +93,13 @@ const BRAND_DICTIONARY: Array<{
   { pattern: /\bgigant\b/i, brand: 'Gigant', defaultTier: 'STANDARD' },
   { pattern: /inforce|инфорс/i, brand: 'Inforce', defaultTier: 'STANDARD' },
   { pattern: /луга|luga/i, brand: 'ЛугаАбразив', defaultTier: 'STANDARD' },
-  { pattern: /армата/i, brand: 'Армата', defaultTier: 'STANDARD' },
+  { pattern: /армата|armata/i, brand: 'Армата', defaultTier: 'STANDARD' },
+  { pattern: /piranha|пиранья/i, brand: 'Piranha', defaultTier: 'STANDARD' },
+  { pattern: /\bmesser\b|мессер/i, brand: 'Messer', defaultTier: 'STANDARD' },
+  { pattern: /\bmkss\b/i, brand: 'MKSS Toolbox', defaultTier: 'STANDARD' },
+  { pattern: /d\.?\s*bor\b/i, brand: 'D.BOR', defaultTier: 'STANDARD' },
+  { pattern: /практика|praktika/i, brand: 'Практика', defaultTier: 'STANDARD' },
+  { pattern: /резолюкс/i, brand: 'Резолюкс', defaultTier: 'STANDARD' },
   { pattern: /\btsr\b/i, brand: 'TSR Standard', defaultTier: 'STANDARD' },
   { pattern: /monolit|монолит/i, brand: 'Monolit', defaultTier: 'STANDARD' },
   { pattern: /мистраль/i, brand: 'Мистраль', defaultTier: 'STANDARD' },
@@ -131,10 +142,13 @@ export function analyzeMaterialSegment(
   const catLower = (category || '').toLowerCase();
   const combined = `${origLower} ${matLower}`.trim();
 
+  // Extract 3-layer original brand & product series first
+  const origBrandSeries = extractOriginalBrandAndSeries(originalName || materialName);
+
   // 1. Check if it is a strict GOST / DIN / Structural Commodity ("Demir Demirdir")
   const isStructuralCommodity =
     (/арматур|inşaat\s*demir|insaat\s*demir|nervürlü|a500c|а500с|çelik\s*hasır|сетка\s*сварн|уголок|köşebent|швеллер|şveller|двутавр|i-kiriş|труба\s*(?:профильн|э\/с|электросварн|вгп)|kutu\s*profil|dikişli\s*çelik\s*boru|лист\s*(?:стальн|г\/к|х\/к|рифлен|оцинк)|çelik\s*sac|полоса\s*стальн|çelik\s*lama|катанка|filmaşin|проволока\s*вязальн|tavlı.*bağ\s*teli|доска\s*обрезн|брус\s*обрезн|inşaatlık.*kereste|kenarlı\s*kereste|фанера\s*(?:фсф|фоф|ламинир)|kalıplık.*kontrplak|бетон\b|hazır\s*beton|цемент\b|portland\s*çimento|песок\b|щебень\b|керамзит|keramzit|пескобетон|цпс\b|kuru\s*harç|газобетон|газоблок|gazbeton\s*blok|кирпич|harman\s*tuğla|пнсв|ввгнг|кгтп|пугв|пвс\b|din\s*(?:934|975|125|127|9021|580)|гост\s*(?:34028|8509|8639|8645|10704|8240|57837|23279|8486|3282|22042)|пропан\s*техническ|кислород\s*техническ|дизельное\s*топливо|motorin|mazot|вода.*19\s*л|damacana\s*içme\s*suyu/i.test(combined)) &&
-    !/колпачок|грибок|рубанок|rende|ножовка|testere|герметик|пена|краска|эмаль|грунтовка|клей\s*плиточн|sika|sikaplan|waterbar|техноэласт|икопал|биполь|ботинк|полуботинк|сапог|каска|очки|перчатк|костюм|куртка|жилет|картридж|тонер|строп|горелка/i.test(combined);
+    !/колпачок|грибок|рубанок|rende|ножовка|testere|герметик|пена|краска|эмаль|грунтовка|клей\s*плиточн|sika|sikaplan|waterbar|техноэласт|техновент|baswool|икопал|биполь|ботинк|полуботинк|сапог|каска|очки|перчатк|костюм|куртка|жилет|картридж|тонер|строп|горелка/i.test(combined);
 
   if (isStructuralCommodity) {
     return {
@@ -143,7 +157,7 @@ export function analyzeMaterialSegment(
       qualitySegment: 'COMMODITY',
       qualitySegmentLabel: 'Standart Emtia (GOST / DIN)',
       brand: 'GOST / DIN Standart',
-      productLine: 'Standart Emtia',
+      productLine: origBrandSeries.seriesLabel || 'Standart Emtia',
       segmentReason: 'Bu malzeme ulusal/uluslararası mühendislik standardına (GOST/DIN) tabidir; marka fark etmeksizin doğrudan teknik ölçü bazında kıyaslanır.'
     };
   }
@@ -163,49 +177,82 @@ export function analyzeMaterialSegment(
         ? '📦 Ekonomik / Saha Segmenti'
         : '⚖️ Standart / Orta Segment';
     const brandHit = BRAND_DICTIONARY.find(e => e.pattern.test(combined));
+    const resolvedBrand = origBrandSeries.brandLabel || (brandHit ? brandHit.brand : 'Belirtilen Seri');
+    const resolvedWithSeries = origBrandSeries.seriesLabel && !resolvedBrand.toLowerCase().includes(origBrandSeries.seriesLabel.toLowerCase())
+      ? `${resolvedBrand} (${origBrandSeries.seriesLabel})`
+      : resolvedBrand;
     return {
       comparisonMode: 'BRAND_SEGMENTED',
       comparisonModeLabel: '🏷️ Marka & Kalite Segmentli Malzeme',
       qualitySegment: explicitTier,
       qualitySegmentLabel: segLabelExplicit,
-      brand: brandHit ? brandHit.brand : 'Belirtilen Seri',
-      productLine: tagText,
-      segmentReason: `Kanonik malzeme adında belirtilen segment (${tagText}) esas alınmıştır; yalnızca aynı segmentteki ürünlerle kıyaslanır.`
+      brand: resolvedWithSeries,
+      productLine: origBrandSeries.seriesLabel || tagText,
+      segmentReason: `Kanonik malzeme adında belirtilen segment (${tagText}) esas alınmıştır; yalnızca aynı marka ve ürün serisindeki alımlarla kıyaslanır.`
     };
   }
 
   // 2. Brand & Quality Tier Detection for Brand-Segmented Materials ("Mercedes vs. Lada")
-  for (const entry of BRAND_DICTIONARY) {
-    if (entry.pattern.test(combined)) {
-      let tier = entry.defaultTier;
-      // Special refinements
-      if (entry.brand === 'Luscan' && /50\s*мкм|10\s*мкм.*30\s*шт|подставк/i.test(combined)) {
-        tier = 'PREMIUM';
+  // Strictly check originalName (origLower) first so Turkish translation inaccuracies never override the invoice's real brand!
+  const searchOrder = origLower ? [origLower, combined] : [combined];
+  for (const targetText of searchOrder) {
+    for (const entry of BRAND_DICTIONARY) {
+      if (entry.pattern.test(targetText)) {
+        let tier = entry.defaultTier;
+        if (entry.brand === 'Luscan' && /50\s*мкм|10\s*мкм.*30\s*шт|подставк/i.test(targetText)) {
+          tier = 'PREMIUM';
+        }
+        const segLabel =
+          tier === 'PREMIUM'
+            ? '👑 Premium / Profesyonel Segment'
+            : tier === 'ECONOMY'
+            ? '📦 Ekonomik / Saha Segmenti'
+            : '⚖️ Standart / Orta Segment';
+        const brandWithSeries =
+          origBrandSeries.seriesLabel && !entry.brand.toLowerCase().includes(origBrandSeries.seriesLabel.toLowerCase())
+            ? `${entry.brand} (${origBrandSeries.seriesLabel})`
+            : entry.brand;
+        return {
+          comparisonMode: 'BRAND_SEGMENTED',
+          comparisonModeLabel: '🏷️ Marka & Kalite Segmentli Malzeme',
+          qualitySegment: tier,
+          qualitySegmentLabel: segLabel,
+          brand: brandWithSeries,
+          productLine: origBrandSeries.seriesLabel || entry.brand,
+          segmentReason: `"${brandWithSeries}" markası ve serisi faturadaki orijinal yazımdan tespit edilmiştir (${segLabel}); 1. Seçenekte (Elma-Elma) yalnızca birebir aynı marka ve ürün serisindeki alımlarla kıyaslanır.`
+        };
       }
-      const segLabel =
-        tier === 'PREMIUM'
-          ? '👑 Premium / Profesyonel Segment'
-          : tier === 'ECONOMY'
-          ? '📦 Ekonomik / Saha Segmenti'
-          : '⚖️ Standart / Orta Segment';
-      return {
-        comparisonMode: 'BRAND_SEGMENTED',
-        comparisonModeLabel: '🏷️ Marka & Kalite Segmentli Malzeme',
-        qualitySegment: tier,
-        qualitySegmentLabel: segLabel,
-        brand: entry.brand,
-        productLine: entry.brand,
-        segmentReason: `"${entry.brand}" markası / ürün serisi ${segLabel} kapsamında değerlendirilir; yalnızca aynı kalite sınıfındaki muadilleriyle kıyaslanır.`
-      };
     }
   }
 
+  // 2b. Sözlük dışı dinamik marka veya ürün serisi yakalandıysa (ör. "Green Laser", "Охранник", yeni marka vb.)
+  if (origBrandSeries.brandLabel || origBrandSeries.seriesLabel) {
+    const dynTier = origBrandSeries.tier === 'COMMODITY' ? 'STANDARD' : origBrandSeries.tier;
+    const segLabel =
+      dynTier === 'PREMIUM'
+        ? '👑 Premium / Profesyonel Segment'
+        : dynTier === 'ECONOMY'
+        ? '📦 Ekonomik / Saha Segmenti'
+        : '⚖️ Standart / Orta Segment';
+    const fullBrand = origBrandSeries.brandLabel
+      ? (origBrandSeries.seriesLabel ? `${origBrandSeries.brandLabel} (${origBrandSeries.seriesLabel})` : origBrandSeries.brandLabel)
+      : origBrandSeries.seriesLabel!;
+    return {
+      comparisonMode: 'BRAND_SEGMENTED',
+      comparisonModeLabel: '🏷️ Marka & Kalite Segmentli Malzeme',
+      qualitySegment: dynTier,
+      qualitySegmentLabel: segLabel,
+      brand: fullBrand,
+      productLine: origBrandSeries.seriesLabel || fullBrand,
+      segmentReason: `"${fullBrand}" marka/seri bilgisi faturadaki orijinal metinden dinamik olarak ayrıştırılmıştır.`
+    };
+  }
+
   // 3. Heuristic Quality Segment Detection when explicit brand name is not in dictionary
-  const price = Number(unitPrice) || 0;
   let heuristicTier: MaterialQualitySegment = 'STANDARD';
-  if (/премиум|premium|проф\b|professional|кевлар|натуральн.*мех|кпп\b|усиленн|кобальт|cobalt/i.test(combined)) {
+  if (/премиум|premium|проф\b|professional|кевлар|натуральн.*мех|кпп\b|усиленн|кобальт|cobalt/i.test(origLower || combined)) {
     heuristicTier = 'PREMIUM';
-  } else if (/эконом|искусственн.*мех|"s"|saha\s*genel|б\/у\b|вторичн|6\s*мкм/i.test(combined)) {
+  } else if (/эконом|искусственн.*мех|"s"|saha\s*genel|б\/у\b|вторичн|6\s*мкм/i.test(origLower || combined)) {
     heuristicTier = 'ECONOMY';
   } else if (COMMODITY_CATEGORIES.has(catLower)) {
     return {
@@ -238,8 +285,10 @@ export function analyzeMaterialSegment(
 }
 
 /**
- * Checks whether two history entries belong to compatible quality/brand segments
- * so that a "Mercedes" (Premium) item is never falsely flagged against a "Lada" (Economy) item.
+ * Checks whether two history entries belong to compatible quality/brand segments in Mode 1 (Apple-to-Apple)
+ * so that:
+ * 1) Pure GOST/DIN commodities (rebar, steel, timber, concrete) are compared directly by spec regardless of brand.
+ * 2) Brand-sensitive materials (Knauf vs Volma, Icopal vs TechnoNICOL, etc.) are ONLY compared if their canonical brand & specs match!
  */
 export function areMaterialSegmentsCompatible(
   entryA: { originalName?: string; unitPrice?: number; normalizedUnitPrice?: number },
@@ -263,10 +312,20 @@ export function areMaterialSegmentsCompatible(
     return true;
   }
 
-  // If both have different quality tiers (e.g. PREMIUM vs ECONOMY, or PREMIUM vs STANDARD with conflicting brands), do not compare!
+  const genericBrands = new Set(['Standart Seri', 'Belirtilen Seri', 'Ekonomik / Standart', 'Standart', 'GOST / DIN Standart']);
+  const hasExplicitBrandA = !genericBrands.has(segA.brand);
+  const hasExplicitBrandB = !genericBrands.has(segB.brand);
+
+  // In Mode 1 (Apple-to-Apple), if two brand-segmented items have different explicit brands (e.g. Knauf vs Volma, Icopal vs TechnoNICOL), do NOT mix them!
+  if (hasExplicitBrandA && hasExplicitBrandB && segA.brand !== segB.brand) {
+    return false;
+  }
+
+  // If both have different quality tiers (e.g. PREMIUM vs ECONOMY, or PREMIUM vs STANDARD), do not compare in Mode 1!
   if (segA.qualitySegment !== segB.qualitySegment) {
     return false;
   }
 
   return true;
 }
+

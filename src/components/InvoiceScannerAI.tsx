@@ -51,12 +51,13 @@ import {
 interface Props {
   jobsites: Jobsite[];
   supervisors: PurchasingSupervisor[];
-  onInvoiceSaved: (invoice: Omit<InvoiceRecord, 'id' | 'createdAt'>) => Promise<any> | void;
+  onInvoiceSaved: (invoice: Omit<InvoiceRecord, 'id' | 'createdAt'> & { forceSave?: boolean; forceSaveDuplicate?: boolean; fileData?: string }) => Promise<any> | void;
   onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => void | Promise<void>;
   onDeleteInvoice?: (id: string) => void | Promise<void>;
   onOpenTrashModal?: () => void;
   trashCount?: number;
   recentInvoices: InvoiceRecord[];
+  onPendingScanChange?: (pending: { supplier: string; invoiceNumber: string; totalAmount: number; openModal: () => void } | null) => void;
 }
 
 export const InvoiceScannerAI: React.FC<Props> = ({
@@ -67,7 +68,8 @@ export const InvoiceScannerAI: React.FC<Props> = ({
   onDeleteInvoice,
   onOpenTrashModal,
   trashCount = 0,
-  recentInvoices
+  recentInvoices,
+  onPendingScanChange
 }) => {
   const activeSupervisors = (supervisors && supervisors.length > 0) ? supervisors : INITIAL_SUPERVISORS;
   const activeJobsites = (jobsites && jobsites.length > 0) ? jobsites : INITIAL_JOBSITES;
@@ -132,6 +134,7 @@ export const InvoiceScannerAI: React.FC<Props> = ({
   const [showConfirmModal, setShowConfirmModal] = useState<boolean>(false);
   const [successToast, setSuccessToast] = useState<string | null>(null);
   const [selectedInvoiceForModal, setSelectedInvoiceForModal] = useState<InvoiceRecord | null>(null);
+  const [openModalInEditMode, setOpenModalInEditMode] = useState<boolean>(false);
   const [invoiceToDelete, setInvoiceToDelete] = useState<InvoiceRecord | null>(null);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [dateSortOrder, setDateSortOrder] = useState<'desc' | 'asc'>('desc');
@@ -599,34 +602,112 @@ export const InvoiceScannerAI: React.FC<Props> = ({
     }
   };
 
-  const uploadToServerVault = async (fileName: string, base64Data: string) => {
-    try {
-      const response = await fetch('/api/upload-file', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          fileName,
-          fileData: base64Data
-        })
-      });
-      const data = await response.json();
-      if (!data.success) throw new Error(data.error || 'Sunucu hatası');
-      return { url: data.fileUrl || data.url, fileId: data.fileId };
-    } catch (err: any) {
-      console.error('Upload failed:', err);
-      alert(`Dosya yüklemesi başarısız oldu: ${err.message}.`);
-      throw err;
+  // Real-time duplicate detection against loaded recentInvoices + server duplicateResult
+  const effectiveDuplicateResult = useMemo<DuplicateInvoiceMatch | null>(() => {
+    if (!extractedInvoice) return duplicateResult;
+    const rawNum = String(extractedInvoice.invoiceNumber || '').trim();
+    const cleanNum = rawNum.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+    const isGeneric = !rawNum || rawNum.startsWith('FT-') || rawNum.startsWith('TKF-') || rawNum.startsWith('ARCH-') || rawNum.startsWith('BLG-');
+    const cleanSup = normalizeVendorName(extractedInvoice.supplier || '');
+
+    for (const inv of recentInvoices) {
+      if ((inv as any).isDeleted) continue;
+      const iNumRaw = String(inv.invoiceNumber || '').trim();
+      const iNum = iNumRaw.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+      const iSup = normalizeVendorName(inv.supplier || '');
+      const isInvGeneric = !iNumRaw || iNumRaw.startsWith('FT-EXCEL-') || iNumRaw.startsWith('TKF-') || iNumRaw.startsWith('ARCH-');
+
+      if (!isGeneric && !isInvGeneric && cleanNum && iNum && cleanNum === iNum) {
+        const sameVendor = areVendorsEqual(cleanSup, iSup) || (cleanSup && iSup && (cleanSup.includes(iSup) || iSup.includes(cleanSup)));
+        const sameAmt = extractedInvoice.totalAmount > 0 && Math.abs(extractedInvoice.totalAmount - (Number(inv.totalAmount) || 0)) < 5;
+        if (sameVendor || (cleanNum.length >= 3 && sameAmt)) {
+          return {
+            isDuplicate: true,
+            matchType: 'exact',
+            existingInvoice: inv,
+            similarityScore: 1,
+            message: `Bu fatura sistemde kayıtlı! "${iNumRaw}" numaralı ve "${inv.supplier}" tedarikçili fatura daha önce (${inv.date || '-'} / ${inv.jobsiteName || 'Şantiye'}) sisteme yüklenmiş.`
+          };
+        }
+      }
+      if (
+        extractedInvoice.totalAmount > 0 &&
+        Math.abs(extractedInvoice.totalAmount - (Number(inv.totalAmount) || 0)) < 1 &&
+        extractedInvoice.date &&
+        inv.date === extractedInvoice.date &&
+        areVendorsEqual(cleanSup, iSup)
+      ) {
+        return {
+          isDuplicate: true,
+          matchType: 'content_similar',
+          existingInvoice: inv,
+          similarityScore: 0.95,
+          message: `Bu fatura sistemde kayıtlı! "${inv.supplier}" tedarikçisine ait aynı tarih (${inv.date}) ve aynı tutarda (${formatRuble(inv.totalAmount)}) bir fatura zaten sistemde mevcut (Fatura No: ${iNumRaw || '-'}).`
+        };
+      }
     }
+    if (duplicateResult?.isDuplicate) {
+      return {
+        ...duplicateResult,
+        message: duplicateResult.message?.startsWith('Bu fatura sistemde kayıtlı')
+          ? duplicateResult.message
+          : `Bu fatura sistemde kayıtlı! ${duplicateResult.message || 'Daha önce sisteme yüklenmiş bir fatura ile eşleşti.'}`
+      };
+    }
+    return duplicateResult;
+  }, [extractedInvoice, recentInvoices, duplicateResult]);
+
+  // Notify parent App when a scanned invoice is waiting for confirmation so user can switch tabs and return
+  useEffect(() => {
+    if (!onPendingScanChange) return;
+    if (extractedInvoice) {
+      onPendingScanChange({
+        supplier: extractedInvoice.supplier || 'Tedarikçi',
+        invoiceNumber: extractedInvoice.invoiceNumber || '-',
+        totalAmount: Number(extractedInvoice.totalAmount) || 0,
+        openModal: () => setShowConfirmModal(true)
+      });
+    } else {
+      onPendingScanChange(null);
+    }
+  }, [extractedInvoice]);
+
+  const uploadToServerVault = async (fileName: string, base64Data: string) => {
+    const response = await fetch('/api/upload-file', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        fileName,
+        fileData: base64Data
+      })
+    });
+    const data = await response.json();
+    if (!data.success) throw new Error(data.error || 'Sunucu dosya yükleme hatası');
+    return { url: data.fileUrl || data.url, fileId: data.fileId };
   };
 
   // Confirm & Save Invoice to Database
   const handleSaveConfirmedInvoice = async () => {
     if (!extractedInvoice) return;
+    setErrorMsg(null);
 
-    if (duplicateResult?.isDuplicate && !forceSaveDuplicate) {
-      alert('Bu fatura sistemde zaten kayıtlı görünüyor (mükerrer kayıt). Kaydetmeye devam etmek için lütfen "Yine de yeni kayıt oluştur" kutucuğunu işaretleyin.');
+    if (!selectedJobsiteId) {
+      setErrorMsg('Lütfen faturanın kaydedileceği Şantiyeyi seçin.');
+      return;
+    }
+    if (!String(extractedInvoice.supplier || '').trim()) {
+      setErrorMsg('Lütfen geçerli bir Tedarikçi Adı girin.');
+      return;
+    }
+    if (Number(extractedInvoice.totalAmount) <= 0) {
+      setErrorMsg('Fatura genel toplam tutarı 0 olamaz. Lütfen kalem tutarlarını kontrol edin.');
+      return;
+    }
+
+    if (effectiveDuplicateResult?.isDuplicate && !forceSaveDuplicate) {
+      setErrorMsg('⚠️ BU FATURA SİSTEMDE KAYITLI! Mükerrer kaydı onaylamak için lütfen aşağıdaki "Bu faturanın sistemde kayıtlı olduğunu biliyorum, yine de yeni kayıt oluştur" kutucuğunu işaretleyip tekrar Kaydet butonuna basın.');
       return;
     }
 
@@ -635,13 +716,12 @@ export const InvoiceScannerAI: React.FC<Props> = ({
       const job = activeJobsites.find(j => j.id === selectedJobsiteId);
       const sup = activeSupervisors.find(s => s.id === selectedSupervisorId);
 
-      let driveRes = null;
+      let driveRes: { url?: string; fileId?: string } | null = null;
       if (uploadedFile && uploadedFile.base64) {
         try {
           driveRes = await uploadToServerVault(uploadedFile.name, uploadedFile.base64);
-        } catch (err) {
-          // Abort saving if upload failed
-          return;
+        } catch (uploadErr: any) {
+          console.warn('Direct upload warning, fallback to inline fileData in POST /api/invoices:', uploadErr?.message);
         }
       }
 
@@ -653,8 +733,16 @@ export const InvoiceScannerAI: React.FC<Props> = ({
         jobsiteName: job ? job.name : 'Şantiye',
         uploadedBySupervisorId: selectedSupervisorId,
         uploadedBySupervisorName: sup ? sup.name : 'Satınalma Personeli',
+        uploadedByPersonnelId: user?.role === 'personnel' ? user?.personnelId : undefined,
+        uploadedByPersonnelName: user?.role === 'personnel' ? (user?.displayName || user?.name) : undefined,
+        uploadedByUserId: user?.personnelId || user?.supervisorId || user?.username,
+        uploadedByUserRole: user?.role,
+        uploaderSessionUser: user?.displayName || user?.name || user?.username,
         totalAmount: extractedInvoice.totalAmount,
         fileUrl: driveRes?.url || undefined,
+        fileData: !driveRes?.url && uploadedFile?.base64 ? uploadedFile.base64 : undefined,
+        forceSave: forceSaveDuplicate,
+        forceSaveDuplicate: forceSaveDuplicate,
         driveFileId: undefined,
         rawFileName: uploadedFile ? uploadedFile.name : undefined,
         items: extractedInvoice.items.map((it, idx) => ({
@@ -668,7 +756,7 @@ export const InvoiceScannerAI: React.FC<Props> = ({
         firestoreStatus: 'success',
         readBackVerified: true,
         backupStatus: 'success',
-        fileStorageStatus: driveRes?.url ? 'stored' : 'none',
+        fileStorageStatus: (driveRes?.url || uploadedFile?.base64) ? 'stored' : 'none',
         mathCheckStatus: validationResult?.checks?.mathConsistency === 'valid' ? 'valid' : 'valid',
         aiConfidenceLevel: (extractedInvoice.overallConfidence || 0) >= 0.9 ? 'high' : 'medium',
         warnings: validationResult?.warnings || []
@@ -692,13 +780,22 @@ export const InvoiceScannerAI: React.FC<Props> = ({
       setValidationResult(null);
       setDuplicateResult(null);
       setForceSaveDuplicate(false);
+      setErrorMsg(null);
 
       setTimeout(() => {
         setSuccessToast(null);
       }, 5000);
     } catch (err: any) {
       console.error('Error saving invoice:', err);
-      setErrorMsg('Fatura kaydedilirken bir hata oluştu: ' + (err.message || 'Bilinmeyen hata'));
+      const msg = err.message || 'Bilinmeyen hata';
+      if (msg.toLowerCase().includes('kayıtlı') || msg.toLowerCase().includes('mükerrer')) {
+        setDuplicateResult({
+          isDuplicate: true,
+          matchType: 'exact',
+          message: msg
+        });
+      }
+      setErrorMsg('Fatura kaydedilemedi: ' + msg);
     } finally {
       setIsProcessing(false);
     }
@@ -915,11 +1012,58 @@ export const InvoiceScannerAI: React.FC<Props> = ({
         </div>
       </div>
 
+      {/* Minimized Scanned Invoice Resume Bar (when user closed modal to inspect other tabs/tables) */}
+      {extractedInvoice && !showConfirmModal && (
+        <div className="p-4 rounded-2xl bg-indigo-950 text-white border-2 border-indigo-500 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-center space-x-3">
+            <div className="p-2.5 bg-indigo-600 rounded-xl shrink-0">
+              <FileCheck className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-extrabold uppercase tracking-wider text-amber-300">Taranan Fatura Kayıt Bekliyor</span>
+                {effectiveDuplicateResult?.isDuplicate && (
+                  <span className="text-[11px] font-bold bg-rose-600 text-white px-2 py-0.5 rounded">
+                    ⚠️ Bu Fatura Sistemde Kayıtlı!
+                  </span>
+                )}
+              </div>
+              <p className="text-sm font-bold text-white mt-0.5">
+                {extractedInvoice.supplier} — Fatura No: <span className="font-mono text-indigo-200">{extractedInvoice.invoiceNumber}</span> ({extractedInvoice.items.length} Kalem • <span className="font-mono text-emerald-300">{formatTL(extractedInvoice.totalAmount)}</span>)
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                setExtractedInvoice(null);
+                setUploadedFile(null);
+                setDuplicateResult(null);
+                setValidationResult(null);
+                setErrorMsg(null);
+              }}
+              className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold cursor-pointer"
+            >
+              Taslağı Temizle
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowConfirmModal(true)}
+              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold flex items-center space-x-1.5 shadow-md cursor-pointer"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Kontrol Ekranını Aç & Kaydet</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Extracted Invoice Review Confirmation Modal */}
       {showConfirmModal && extractedInvoice && (
         <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white rounded-2xl max-w-6xl w-full p-6 sm:p-8 shadow-2xl border border-slate-200 space-y-6 max-h-[90vh] overflow-y-auto my-8">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-100 pb-4 gap-3">
               <div>
                 <div className="flex items-center space-x-2">
                   <FileCheck className="w-6 h-6 text-emerald-600" />
@@ -930,7 +1074,15 @@ export const InvoiceScannerAI: React.FC<Props> = ({
                 </p>
               </div>
 
-              <div className="flex flex-col items-end gap-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmModal(false)}
+                  className="text-xs font-bold px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 cursor-pointer"
+                  title="Bu pencereyi küçülterek diğer sekmelerde kontrol yapabilir ve istediğiniz an geri dönüp kaydedebilirsiniz"
+                >
+                  🗕 Küçült (Diğer Sekmelerde Kontrol Et)
+                </button>
                 <span className="text-xs font-bold px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
                   {t('aiExtractedBadge')}
                 </span>
@@ -942,30 +1094,35 @@ export const InvoiceScannerAI: React.FC<Props> = ({
             </div>
 
             {/* Validation & Duplicate Warning Banners */}
-            {duplicateResult?.isDuplicate && (
-              <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            {effectiveDuplicateResult?.isDuplicate && (
+              <div className="bg-rose-50 border-2 border-rose-400 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm">
                 <div className="flex items-start space-x-3">
-                  <ShieldAlert className="w-6 h-6 text-amber-600 shrink-0 mt-0.5" />
+                  <ShieldAlert className="w-7 h-7 text-rose-600 shrink-0 mt-0.5" />
                   <div>
-                    <h4 className="text-sm font-bold text-amber-900">Mükerrer (Duplicate) Fatura Şüphesi</h4>
-                    <p className="text-xs text-amber-700 mt-0.5">
-                      {duplicateResult.message || 'Bu fatura numarası veya tedarikçi ile daha önce sistemde kayıtlı bir fatura bulundu.'}
+                    <h4 className="text-sm font-black text-rose-900 uppercase tracking-wide">
+                      ⚠️ UYARI: Bu Fatura Sistemde Kayıtlı! (Mükerrer Kayıt Tespit Edildi)
+                    </h4>
+                    <p className="text-xs text-rose-800 font-semibold mt-1">
+                      {effectiveDuplicateResult.message || 'Bu fatura numarası veya tedarikçi ile daha önce sistemde kayıtlı bir fatura bulundu.'}
                     </p>
-                    {duplicateResult.existingInvoice && (
-                      <p className="text-[11px] text-amber-800 font-mono mt-1">
-                        Eşleşen Kayıt: {duplicateResult.existingInvoice.supplier} | No: {duplicateResult.existingInvoice.invoiceNumber} | Tarih: {duplicateResult.existingInvoice.date}
+                    {effectiveDuplicateResult.existingInvoice && (
+                      <p className="text-[11px] text-rose-900 bg-white/80 px-2.5 py-1 rounded border border-rose-200 font-mono mt-1.5 inline-block">
+                        Mevcut Kayıt: {effectiveDuplicateResult.existingInvoice.supplier} | Fatura No: {effectiveDuplicateResult.existingInvoice.invoiceNumber} | Tarih: {effectiveDuplicateResult.existingInvoice.date} | Tutar: {formatTL(effectiveDuplicateResult.existingInvoice.totalAmount || 0)}
                       </p>
                     )}
                   </div>
                 </div>
-                <label className="flex items-center space-x-2 bg-white px-3 py-1.5 rounded-lg border border-amber-300 text-xs font-bold text-amber-900 cursor-pointer shrink-0">
+                <label className="flex items-center space-x-2 bg-white px-3.5 py-2 rounded-xl border-2 border-rose-400 text-xs font-extrabold text-rose-900 cursor-pointer shrink-0 shadow-xs hover:bg-rose-50">
                   <input
                     type="checkbox"
                     checked={forceSaveDuplicate}
-                    onChange={(e) => setForceSaveDuplicate(e.target.checked)}
-                    className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                    onChange={(e) => {
+                      setForceSaveDuplicate(e.target.checked);
+                      if (e.target.checked) setErrorMsg(null);
+                    }}
+                    className="rounded text-rose-600 focus:ring-rose-500 w-4 h-4 cursor-pointer"
                   />
-                  <span>Yine de yeni kayıt oluştur</span>
+                  <span>Bu faturanın sistemde kayıtlı olduğunu biliyorum, yine de kaydet</span>
                 </label>
               </div>
             )}
@@ -1179,22 +1336,68 @@ export const InvoiceScannerAI: React.FC<Props> = ({
               </div>
             </div>
 
+            {/* Inline Error & Duplicate Confirmation right above the Save button */}
+            {errorMsg && (
+              <div className="p-4 rounded-xl bg-rose-50 text-rose-900 border-2 border-rose-300 flex items-start space-x-3 shadow-sm">
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                <div className="flex-1 text-xs font-bold">{errorMsg}</div>
+              </div>
+            )}
+
+            {effectiveDuplicateResult?.isDuplicate && (
+              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div className="flex items-center space-x-2 text-xs font-bold text-amber-900">
+                  <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>Bu fatura sistemde kayıtlı! Kaydetmek için yandaki onay kutucuğunu işaretleyin:</span>
+                </div>
+                <label className="flex items-center space-x-2 bg-white px-3 py-1.5 rounded-lg border border-amber-400 text-xs font-extrabold text-amber-950 cursor-pointer shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={forceSaveDuplicate}
+                    onChange={(e) => {
+                      setForceSaveDuplicate(e.target.checked);
+                      if (e.target.checked) setErrorMsg(null);
+                    }}
+                    className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                  />
+                  <span>Yine de yeni kayıt oluştur</span>
+                </label>
+              </div>
+            )}
+
             {/* Modal Actions */}
-            <div className="flex items-center justify-end space-x-3 pt-4 border-t border-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t border-slate-200">
               <button
+                type="button"
                 onClick={() => setShowConfirmModal(false)}
-                className="px-4 py-2.5 rounded-xl text-slate-600 font-semibold hover:bg-slate-100 text-sm cursor-pointer"
+                className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer"
               >
-                {t('cancelBtn')}
+                🗕 Küçült ve Diğer Sekmeleri Kontrol Et
               </button>
-              <button
-                onClick={handleSaveConfirmedInvoice}
-                disabled={isProcessing}
-                className={`px-6 py-2.5 rounded-xl text-white font-extrabold text-sm shadow-md transition-all flex items-center space-x-2 cursor-pointer ${isProcessing ? 'bg-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}
-              >
-                {isProcessing ? <Sparkles className="w-5 h-5 animate-spin" /> : <CheckCircle2 className="w-5 h-5" />}
-                <span>{t('confirmSaveBtn')}</span>
-              </button>
+              <div className="flex items-center space-x-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowConfirmModal(false);
+                    setExtractedInvoice(null);
+                    setUploadedFile(null);
+                    setDuplicateResult(null);
+                    setErrorMsg(null);
+                  }}
+                  className="px-4 py-2.5 rounded-xl text-rose-600 font-semibold hover:bg-rose-50 text-sm cursor-pointer"
+                >
+                  {t('cancelBtn')}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveConfirmedInvoice}
+                  disabled={isProcessing}
+                  className={`px-6 py-2.5 rounded-xl text-white font-extrabold text-sm shadow-md transition-all flex items-center space-x-2 cursor-pointer ${isProcessing ? 'bg-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+                >
+                  {isProcessing ? <Sparkles className="w-5 h-5 animate-spin" /> : <CheckCircle2 className="w-5 h-5" />}
+                  <span>{t('confirmSaveBtn')}</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1408,11 +1611,14 @@ export const InvoiceScannerAI: React.FC<Props> = ({
                 </tr>
               ) : (
                 paginatedInvoices.map((inv) => {
-                  const perm = checkRecordPermission(user, inv.uploadedBySupervisorId, inv.uploadedBySupervisorName);
+                  const perm = checkRecordPermission(user, inv);
                   return (
                     <tr
                       key={inv.id}
-                      onClick={() => setSelectedInvoiceForModal(inv)}
+                      onClick={() => {
+                        setOpenModalInEditMode(false);
+                        setSelectedInvoiceForModal(inv);
+                      }}
                       className="hover:bg-indigo-50/70 transition-colors cursor-pointer group"
                     >
                       <td className="py-3 px-3.5 font-mono text-emerald-800 font-bold bg-emerald-50/50 whitespace-nowrap">
@@ -1445,6 +1651,7 @@ export const InvoiceScannerAI: React.FC<Props> = ({
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
+                              setOpenModalInEditMode(false);
                               setSelectedInvoiceForModal(inv);
                             }}
                             className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all flex items-center justify-center space-x-1 cursor-pointer shadow-xs"
@@ -1459,6 +1666,7 @@ export const InvoiceScannerAI: React.FC<Props> = ({
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
+                                setOpenModalInEditMode(true);
                                 setSelectedInvoiceForModal(inv);
                               }}
                               className="px-2.5 py-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-800 border border-amber-300 rounded-lg text-xs font-bold transition-all flex items-center justify-center space-x-1 cursor-pointer shadow-xs"
@@ -1472,10 +1680,10 @@ export const InvoiceScannerAI: React.FC<Props> = ({
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                alert(`Salt Okunur: Bu fatura "${inv.uploadedBySupervisorName || 'başka bir'}" şef tarafından yüklenmiştir. Yalnızca kendi eklediğiniz veya yöneticisi olduğunuz faturaları düzenleyebilirsiniz.`);
+                                alert(perm.reason || `Salt Okunur: Bu fatura bağlı olduğunuz şantiyelere ait değildir.`);
                               }}
                               className="px-2.5 py-1 bg-slate-100 text-slate-500 border border-slate-200 rounded-lg text-xs font-bold transition-all flex items-center justify-center space-x-1 cursor-pointer opacity-80"
-                              title="Salt Okunur: Başka şefe ait fatura"
+                              title="Salt Okunur: Başka şantiyeye ait fatura"
                             >
                               <Lock className="w-3.5 h-3.5 text-amber-600" />
                               <span className="text-amber-800 font-extrabold">Salt Okunur</span>
@@ -1528,7 +1736,7 @@ export const InvoiceScannerAI: React.FC<Props> = ({
                 <Trash2 className="w-6 h-6" />
               </div>
               <div>
-                <h4 className="text-base font-bold text-slate-900">Faturayı Çöp Kutusuna Taşımın</h4>
+                <h4 className="text-base font-bold text-slate-900">Faturayı Çöp Kutusuna Taşı</h4>
                 <p className="text-xs text-slate-500 font-mono mt-0.5">Fatura No: {invoiceToDelete.invoiceNumber}</p>
               </div>
             </div>
@@ -1537,7 +1745,7 @@ export const InvoiceScannerAI: React.FC<Props> = ({
               <strong>"{invoiceToDelete.supplier}"</strong> firmasından alınan <strong>{invoiceToDelete.invoiceNumber}</strong> numaralı fatura çöp kutusuna taşınacaktır.
               <br /><br />
               <span className="text-slate-500">
-                Silinen faturalar 7 gün boyunca Çöp Kutusunda saklanır ve istenildiğinde tek tıkla geri yüklenebilir.
+                Silinen faturalar Çöp Kutusunda saklanır ve istendiğinde tek tıkla geri yüklenebilir. Yalnızca Sistem Yöneticisi Çöp Kutusundan kalıcı olarak silebilir.
               </span>
             </p>
 
@@ -1583,7 +1791,11 @@ export const InvoiceScannerAI: React.FC<Props> = ({
           invoice={selectedInvoiceForModal}
           jobsites={jobsites}
           supervisors={supervisors}
-          onClose={() => setSelectedInvoiceForModal(null)}
+          initialIsEditing={openModalInEditMode}
+          onClose={() => {
+            setSelectedInvoiceForModal(null);
+            setOpenModalInEditMode(false);
+          }}
           onUpdateInvoice={onUpdateInvoice}
           onDeleteInvoice={onDeleteInvoice}
         />

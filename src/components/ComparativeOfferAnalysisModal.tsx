@@ -1693,6 +1693,16 @@ export const ComparativeOfferAnalysisModal: React.FC<Props> = ({
                 </div>
               )}
 
+              {/* Inline Error or Validation Reasons right above the Save button */}
+              {(errorMsg || validationErrors.length > 0) && (
+                <div className="p-3.5 rounded-xl bg-rose-50 border-2 border-rose-300 text-rose-900 text-xs font-bold flex items-start space-x-2.5 shadow-2xs">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    {errorMsg || `Kaydetmek için gerekli bilgiler: ${validationErrors.join(' • ')}`}
+                  </div>
+                </div>
+              )}
+
               {/* Action Buttons: Save & Confirm */}
               <div className="flex items-center justify-between pt-4 border-t border-slate-200">
                 <div className="text-xs text-slate-500">
@@ -1703,7 +1713,7 @@ export const ComparativeOfferAnalysisModal: React.FC<Props> = ({
                     </span>
                   ) : validationErrors.length > 0 ? (
                     <span className="text-amber-700 font-medium">
-                      {isRu ? 'Завершение заблокировано: отсутствуют обязательные данные.' : 'Kaydetme devre dışı: Eksik belgeler veya bilgiler mevcut.'}
+                      {isRu ? 'Завершение заблокировано: отсутствуют обязательные данные.' : 'Lütfen yukarıdaki eksik bilgileri tamamlayıp tekrar deneyin.'}
                     </span>
                   ) : (
                     <span>{isRu ? 'Все вычисления проверены' : 'Tüm hesaplamalar ve birim normalizasyonları onaylanmaya hazır.'}</span>
@@ -1733,10 +1743,10 @@ export const ComparativeOfferAnalysisModal: React.FC<Props> = ({
                   )}
                   <button
                     onClick={handleSaveAnalysis}
-                    disabled={isSaving || saveSuccess || validationErrors.length > 0}
+                    disabled={isSaving || saveSuccess}
                     className={`inline-flex items-center space-x-2 px-5 py-2.5 text-white rounded-xl text-xs font-bold shadow-md transition-all cursor-pointer ${
                       validationErrors.length > 0
-                        ? 'bg-slate-300 opacity-60 cursor-not-allowed text-slate-600'
+                        ? 'bg-amber-600 hover:bg-amber-700'
                         : 'bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50'
                     }`}
                     title={

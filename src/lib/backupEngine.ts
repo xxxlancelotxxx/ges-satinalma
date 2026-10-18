@@ -56,7 +56,7 @@ const BACKUP_ROOT = getBackupRoot();
 const SNAPSHOTS_DIR = path.join(BACKUP_ROOT, 'snapshots');
 const MANIFEST_PATH = path.join(BACKUP_ROOT, 'manifest.json');
 const MAX_SNAPSHOTS = 24; // Keep up to 24 snapshots locally (plenty of recovery points)
-const MAX_CLOUD_SNAPSHOTS = 5; // Keep up to 10 snapshots in Firestore cloud to strictly avoid memory/query limits
+const MAX_CLOUD_SNAPSHOTS = 7; // Keep up to 7 compressed snapshots in Firestore cloud (while GCS keeps up to 24) to avoid memory/query limits
 
 // Ensure directories exist
 if (!fs.existsSync(BACKUP_ROOT)) fs.mkdirSync(BACKUP_ROOT, { recursive: true });
@@ -107,10 +107,10 @@ export interface FullBackupPayload {
 export function createSnapshot(
   data: FullBackupPayload,
   trigger: SnapshotMeta['trigger'] = 'manual',
-  options?: { label?: string; description?: string }
+  options?: { id?: string; label?: string; description?: string }
 ): SnapshotMeta {
   const timestamp = new Date().toISOString();
-  const id = `snap_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+  const id = options?.id || `snap_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
   const snapDir = path.join(SNAPSHOTS_DIR, id);
   if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
 
@@ -641,7 +641,7 @@ export async function syncSnapshotToCloud(
     fs.writeFileSync(path.join(snapDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf-8');
   } catch (_) {}
 
-  // Sync manifest to Firestore & GCS
+  // Sync manifest to Firestore & GCS and prune older Firestore chunked snapshots beyond MAX_CLOUD_SNAPSHOTS
   if (db) {
     try {
       const cleanManifest = {
@@ -652,6 +652,17 @@ export async function syncSnapshotToCloud(
         manifest: cleanManifest,
         lastUpdated: new Date().toISOString()
       });
+
+      if (manifest.snapshots.length > MAX_CLOUD_SNAPSHOTS) {
+        const oldSnapshotsToPrune = manifest.snapshots.slice(MAX_CLOUD_SNAPSHOTS);
+        for (const oldSnap of oldSnapshotsToPrune) {
+          if (!oldSnap?.id) continue;
+          await deleteDoc(doc(db, 'system_backups', oldSnap.id)).catch(() => {});
+          for (let c = 0; c < 6; c++) {
+            await deleteDoc(doc(db, 'system_backups', `${oldSnap.id}_chunk_${c}`)).catch(() => {});
+          }
+        }
+      }
     } catch (_) {}
   }
 

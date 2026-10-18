@@ -288,42 +288,50 @@ export const InvoiceDriveVault: React.FC<Props> = ({
       }
     }
 
-    onInvoiceSaved({
-      invoiceNumber: invNo,
-      date: new Date().toISOString().split('T')[0],
-      supplier: String(uploadSupplier).trim(),
-      jobsiteId: uploadJobsiteId,
-      jobsiteName: job ? job.name : 'Şantiye',
-      uploadedBySupervisorId: uploadSupervisorId,
-      uploadedBySupervisorName: sup ? sup.name : 'Satınalma Şefi',
-      totalAmount: Number(uploadTotalAmount) || 0,
-      rawFileName: uploadFile ? uploadFile.name : `${invNo}_Fatura.pdf`,
-      fileType: uploadFile?.type || 'application/pdf',
-      fileSize: uploadFile ? `${(uploadFile.size / (1024 * 1024)).toFixed(1)} MB` : '1.5 MB',
-      fileUrl: finalFileUrl,
-      items: [
-        {
-          id: `item_manual_${Date.now()}`,
-          materialName: `${uploadSupplier} İnşaat Malzemesi Alımı`,
-          category: 'Genel Malzeme',
-          unit: 'Adet',
-          quantity: 1,
-          unitPrice: Number(uploadTotalAmount) || 0,
-          totalPrice: Number(uploadTotalAmount) || 0
-        }
-      ]
-    });
+    try {
+      await onInvoiceSaved({
+        invoiceNumber: invNo,
+        date: new Date().toISOString().split('T')[0],
+        supplier: String(uploadSupplier).trim(),
+        jobsiteId: uploadJobsiteId,
+        jobsiteName: job ? job.name : 'Şantiye',
+        uploadedBySupervisorId: uploadSupervisorId,
+        uploadedBySupervisorName: sup ? sup.name : 'Satınalma Şefi',
+        totalAmount: Number(uploadTotalAmount) || 0,
+        rawFileName: uploadFile ? uploadFile.name : `${invNo}_Fatura.pdf`,
+        fileType: uploadFile?.type || 'application/pdf',
+        fileSize: uploadFile ? `${(uploadFile.size / (1024 * 1024)).toFixed(1)} MB` : '1.5 MB',
+        fileUrl: finalFileUrl,
+        items: [
+          {
+            id: `item_manual_${Date.now()}`,
+            materialName: `${uploadSupplier} İnşaat Malzemesi Alımı`,
+            category: 'Genel Malzeme',
+            unit: 'Adet',
+            quantity: 1,
+            unitPrice: Number(uploadTotalAmount) || 0,
+            totalPrice: Number(uploadTotalAmount) || 0
+          }
+        ]
+      });
 
-    setSyncToast(`Başarılı! "${invNo}" faturası Firestore veritabanına yüklendi ve arşivlendi.`);
-    setShowUploadModal(false);
-    setUploadSupplier('');
-    setUploadInvoiceNo('');
-    setUploadTotalAmount('');
-    setUploadFile(null);
+      setSyncToast(`Başarılı! "${invNo}" faturası Firestore veritabanına yüklendi ve arşivlendi.`);
+      setShowUploadModal(false);
+      setUploadSupplier('');
+      setUploadInvoiceNo('');
+      setUploadTotalAmount('');
+      setUploadFile(null);
 
-    setTimeout(() => {
-      setSyncToast(null);
-    }, 4000);
+      setTimeout(() => {
+        setSyncToast(null);
+      }, 4000);
+    } catch (err: any) {
+      console.error('Vault upload save error:', err);
+      setSyncToast(`⚠️ Kayıt Uyarısı: ${err.message || 'Fatura kaydedilemedi.'}`);
+      setTimeout(() => setSyncToast(null), 6000);
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   const handleTriggerSync = () => {
@@ -768,7 +776,7 @@ export const InvoiceDriveVault: React.FC<Props> = ({
             /* GRID VIEW */
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
               {paginatedInvoices.map((inv) => {
-            const perm = checkRecordPermission(user, inv.uploadedBySupervisorId, inv.uploadedBySupervisorName);
+            const perm = checkRecordPermission(user, inv);
             return (
             <div
               key={inv.id}
@@ -884,7 +892,7 @@ export const InvoiceDriveVault: React.FC<Props> = ({
               </thead>
               <tbody className="divide-y divide-slate-200 text-slate-800">
                 {paginatedInvoices.map((inv) => {
-                  const perm = checkRecordPermission(user, inv.uploadedBySupervisorId, inv.uploadedBySupervisorName);
+                  const perm = checkRecordPermission(user, inv);
                   return (
                   <tr
                     key={inv.id}
@@ -939,10 +947,10 @@ export const InvoiceDriveVault: React.FC<Props> = ({
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                alert(`🔒 Salt Okunur: Bu fatura "${inv.uploadedBySupervisorName || 'başka bir'}" şef tarafından yüklenmiştir. Yalnızca kendi faturalarınızı silebilirsiniz.`);
+                                alert(perm.reason || `🔒 Salt Okunur: Bu fatura bağlı olduğunuz şantiyelere ait değildir.`);
                               }}
                               className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-500 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center justify-center space-x-1 cursor-pointer"
-                              title="Salt Okunur: Başka şefe ait kayıt"
+                              title="Salt Okunur: Başka şantiyeye ait kayıt"
                             >
                               <Lock className="w-3.5 h-3.5 text-slate-500" />
                               <span>Salt Okunur</span>
@@ -992,7 +1000,7 @@ export const InvoiceDriveVault: React.FC<Props> = ({
               <strong>"{invoiceToDelete.supplier}"</strong> firmasından alınan <strong>{invoiceToDelete.invoiceNumber}</strong> numaralı fatura çöp kutusuna taşınacaktır.
               <br /><br />
               <span className="text-slate-500">
-                Silinen faturalar 7 gün boyunca Çöp Kutusunda saklanır ve istenildiğinde tek tıkla geri yüklenebilir.
+                Silinen faturalar Çöp Kutusunda güvenle saklanır ve istendiğinde tek tıkla geri yüklenebilir. Yalnızca Sistem Yöneticisi Çöp Kutusundan kalıcı olarak silebilir.
               </span>
             </p>
 

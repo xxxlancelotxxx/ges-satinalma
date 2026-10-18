@@ -1,6 +1,6 @@
 import { INITIAL_SUPERVISORS, INITIAL_JOBSITES, INITIAL_PERSONNEL } from '../data/initialData';
 import React, { useState, useEffect, useMemo } from 'react';
-import { PurchasingSupervisor, Jobsite, DiscountRecord, InvoiceItem, InvoiceRecord, Personnel, NegotiationRound, StageDocument } from '../types';
+import { PurchasingSupervisor, Jobsite, DiscountRecord, InvoiceItem, InvoiceRecord, Personnel, NegotiationRound, StageDocument, ComparativeAnalysisRecord, CanonicalMaterial } from '../types';
 import { formatRuble, formatUploadDate, openOriginalFileViewer } from '../utils/format';
 import { getDiscountDocumentStages, StageDocumentItem, getEffectiveAgreedPrice, getEffectiveDiscount, getGenuineNegotiationRoundCount } from '../utils/negotiationStages';
 import { checkRecordPermission } from '../utils/permissions';
@@ -9,6 +9,14 @@ import { useAuth } from '../context/AuthContext';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { NEGOTIATION_THRESHOLD, validateProcedure52 } from '../utils/procedureConfig';
 import { CANONICAL_CATEGORIES } from '../utils/categoryClassifier';
+import {
+  convertMaterialUnit,
+  extractTechnicalSpecs,
+  detectMaterialType,
+  calculateMatchScore,
+  normalizeVatPrice,
+  generateAnalysisCode
+} from '../utils/comparativeCalculation';
 
 import { GesLogo } from './GesLogo';
 import {
@@ -49,13 +57,16 @@ import {
   AlertTriangle,
   TrendingDown,
   Wand2,
-  RotateCcw
+  RotateCcw,
+  Scale,
+  FileSpreadsheet
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { EditDiscountModal } from './EditDiscountModal';
 import { DiscountDetailModal } from './DiscountDetailModal';
 import { PaginationControls } from './PaginationControls';
 import { ComparativeOfferAnalysisModal } from './ComparativeOfferAnalysisModal';
+import { ComparativeAnalysisDetailModal } from './ComparativeAnalysisDetailModal';
 import { SearchableFilterDropdown } from './SearchableFilterDropdown';
 import { DateRangeFilterDropdown } from './DateRangeFilterDropdown';
 import { DateFilterState, matchesDateFilter } from '../utils/filterHelpers';
@@ -67,11 +78,12 @@ interface Props {
   personnel?: Personnel[];
   discounts?: DiscountRecord[];
   invoices?: InvoiceRecord[];
-  onSaveDiscount: (record: Omit<DiscountRecord, 'id' | 'supervisorName' | 'jobsiteName' | 'discountAmount' | 'discountPercentage' | 'status'>) => void | Promise<void>;
+  onSaveDiscount: (record: Omit<DiscountRecord, 'id' | 'supervisorName' | 'jobsiteName' | 'discountAmount' | 'discountPercentage' | 'status'> & { forceSave?: boolean; forceSaveDuplicate?: boolean; firstOfferFileData?: string; finalOfferFileData?: string }) => void | Promise<void>;
   onUpdateDiscount?: (id: string, record: Partial<DiscountRecord>) => Promise<void> | void;
   onDeleteDiscount?: (id: string) => Promise<void> | void;
   onSuccess: () => void;
   isModal?: boolean;
+  onPendingDiscountScanChange?: (pending: { supplier: string; invoiceNumber: string; totalAmount: number; openModal: () => void } | null) => void;
 }
 
 export const DiscountEntryForm: React.FC<Props> = ({
@@ -84,7 +96,8 @@ export const DiscountEntryForm: React.FC<Props> = ({
   onUpdateDiscount,
   onDeleteDiscount,
   onSuccess,
-  isModal = false
+  isModal = false,
+  onPendingDiscountScanChange
 }) => {
   const activeSupervisors = (supervisors && supervisors.length > 0) ? supervisors : INITIAL_SUPERVISORS;
   const activeJobsites = (jobsites && jobsites.length > 0) ? jobsites : INITIAL_JOBSITES;
@@ -242,6 +255,75 @@ export const DiscountEntryForm: React.FC<Props> = ({
   // States for handling drag/upload inside the AI Review Modal
   const [modalRoundLoadingIndex, setModalRoundLoadingIndex] = useState<number | null>(null);
   const [isModalRoundDragOver, setIsModalRoundDragOver] = useState<boolean>(false);
+  const [isAiModalMinimized, setIsAiModalMinimized] = useState<boolean>(false);
+  const [duplicateWarning, setDuplicateWarning] = useState<{ isDuplicate: boolean; message: string; existingRecord?: any } | null>(null);
+  const [forceSaveDuplicate, setForceSaveDuplicate] = useState<boolean>(false);
+
+  // TDF-Style Unified Multi-Document Upload & Smart Negotiation Stage State
+  const [stagedOfferDocs, setStagedOfferDocs] = useState<Array<{
+    id: string;
+    file?: File;
+    fileName: string;
+    base64?: string;
+    fileUrl?: string;
+    fileId?: string;
+    role: 'initial_offer' | 'negotiation_round' | 'final_invoice';
+    roundNumber: 1 | 2 | 3 | 4 | 5;
+    status: 'pending' | 'scanning' | 'analyzed' | 'error';
+    errorMsg?: string;
+    supplier?: string;
+    invoiceNumber?: string;
+    date?: string;
+    category?: string;
+    totalAmount: number;
+    isVatIncluded?: boolean;
+    itemsCount?: number;
+    items?: Array<{
+      materialName: string;
+      originalName?: string;
+      category?: string;
+      unit: string;
+      quantity: number;
+      unitPrice: number;
+      totalPrice: number;
+      discountAmount?: number;
+    }>;
+    usedModel?: string;
+  }>>([]);
+  const [autoSortByPrice, setAutoSortByPrice] = useState<boolean>(true);
+  const [isMultiScanning, setIsMultiScanning] = useState<boolean>(false);
+  const [isMultiDragOver, setIsMultiDragOver] = useState<boolean>(false);
+  const [archiveViewMode, setArchiveViewMode] = useState<'discounts' | 'tdf'>('discounts');
+  const [savedTdfAnalyses, setSavedTdfAnalyses] = useState<ComparativeAnalysisRecord[]>([]);
+  const [loadingTdfArchive, setLoadingTdfArchive] = useState<boolean>(false);
+  const [selectedTdfDetail, setSelectedTdfDetail] = useState<ComparativeAnalysisRecord | null>(null);
+
+  const loadSavedTdfAnalyses = async () => {
+    try {
+      setLoadingTdfArchive(true);
+      const res = await fetch(`/api/comparative-analyses?_t=${Date.now()}`, {
+        headers: {
+          'Content-Type': 'application/json',
+          'x-session-token': user?.token || '',
+          'x-user-role': encodeURIComponent(user?.role || ''),
+          'x-user-supervisor-id': encodeURIComponent(user?.supervisorId || ''),
+          'x-user-name': encodeURIComponent(user?.displayName || '')
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSavedTdfAnalyses(Array.isArray(data) ? data.filter((a: any) => !a.isDeleted) : []);
+      }
+    } catch (e) {
+      console.warn('[LOAD TDF ARCHIVE WARN]:', e);
+    } finally {
+      setLoadingTdfArchive(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadSavedTdfAnalyses();
+  }, [discounts?.length]);
 
   // Review / Control Modal State (Pops up BEFORE saving)
   const [pendingReviewRecord, setPendingReviewRecord] = useState<{
@@ -450,31 +532,6 @@ export const DiscountEntryForm: React.FC<Props> = ({
       prevPrice = Number(aiReviewModal.agreedPrice);
     }
 
-    // Create or update round
-    let currentRound: NegotiationRound;
-    if (isNew) {
-      currentRound = {
-        id: `rnd_modal_${Date.now()}_${roundIdx + 1}`,
-        roundNumber: roundIdx + 1,
-        date: new Date().toISOString().split('T')[0],
-        vendorName: aiReviewModal.vendorName || vendorName || 'Tedarikçi Firma',
-        quotedPrice: 0,
-        previousPrice: prevPrice,
-        discountThisRound: 0,
-        documentName: file.name,
-        note: `${roundIdx + 1}. Tur: İndirimli teklif / ara fatura`
-      };
-      existingRounds.push(currentRound);
-    } else {
-      currentRound = {
-        ...existingRounds[roundIdx],
-        documentName: file.name,
-        previousPrice: prevPrice
-      };
-      existingRounds[roundIdx] = currentRound;
-    }
-
-    setAiReviewModal({ ...aiReviewModal, rounds: existingRounds });
     setModalRoundLoadingIndex(roundIdx);
 
     try {
@@ -511,52 +568,84 @@ export const DiscountEntryForm: React.FC<Props> = ({
         console.warn('Modal round quick OCR skipped or failed:', ocrErr);
       }
 
-      // 4. Update round with URL and amount
+      // 4. Smartly insert and sort all stages (offerPrice -> rounds -> agreedPrice) so lowest is always agreedPrice!
       setAiReviewModal(prev => {
         if (!prev) return prev;
         const baseOffer = Number(prev.offerPrice) || 0;
         const currentAgreed = Number(prev.agreedPrice) || 0;
+        const effectiveNewPrice = readAmount > 0
+          ? readAmount
+          : (prevPrice > currentAgreed && currentAgreed > 0 ? Math.round(prevPrice - (prevPrice - currentAgreed) * 0.5) : Math.round(prevPrice * 0.95));
 
-        // If the uploaded document has price <= currentAgreed: it is a cheaper final invoice, not an intermediate round!
-        if (readAmount > 0 && currentAgreed > 0 && readAmount <= currentAgreed + 0.01) {
-          setNotification({
-            type: 'success',
-            message: `⚡ Yüklenen belgedeki tutar (${formatRuble(readAmount)}) nihai anlaşılan tutar ve son fatura olarak güncellendi.`
-          });
-          return {
-            ...prev,
-            agreedPrice: readAmount,
-            fileName: file.name
-          };
-        }
-
-        // If readAmount is >= baseOffer, it cannot be a discount round!
-        if (readAmount > 0 && baseOffer > 0 && readAmount >= baseOffer - 0.01) {
+        if (effectiveNewPrice > 0 && baseOffer > 0 && effectiveNewPrice >= baseOffer) {
           setNotification({
             type: 'error',
-            message: `⚠️ Yüklenen belgedeki teklif tutarı (${formatRuble(readAmount)}) ilk tekliften (${formatRuble(baseOffer)}) daha düşük olmalıdır!`
+            message: `⚠️ Yüklenen belgedeki teklif tutarı (${formatRuble(effectiveNewPrice)}) ilk tekliften (${formatRuble(baseOffer)}) daha düşük olmalıdır!`
           });
           return prev;
         }
 
-        const existingRounds = prev.rounds ? [...prev.rounds] : [];
-        const roundIdx = existingRounds.length;
-        const effectivePrice = readAmount > 0 ? readAmount : (prevPrice > currentAgreed && currentAgreed > 0 ? Math.round(prevPrice - (prevPrice - currentAgreed) * 0.5) : Math.round(prevPrice * 0.95));
+        // Gather all existing intermediate rounds + currentAgreed + new document, then sort descending!
+        const candidateDocs: Array<{ price: number; docName: string; docUrl?: string; note?: string }> = [];
+        if (currentAgreed > 0) {
+          candidateDocs.push({
+            price: currentAgreed,
+            docName: prev.fileName || finalOfferFile?.name || '2_Indirimli_Teklif.pdf',
+            docUrl: finalOfferFile?.url
+          });
+        }
+        for (const r of (prev.rounds || [])) {
+          if (Number(r.quotedPrice) > 0) {
+            candidateDocs.push({
+              price: Number(r.quotedPrice),
+              docName: r.documentName || 'Ara_Teklif.pdf',
+              docUrl: r.documentUrl,
+              note: r.note
+            });
+          }
+        }
+        candidateDocs.push({
+          price: effectiveNewPrice,
+          docName: file.name,
+          docUrl: vaultRes.url
+        });
 
-        const newRound: NegotiationRound = {
-          id: `rnd_modal_${Date.now()}_${roundIdx + 1}`,
-          roundNumber: roundIdx + 1,
-          date: new Date().toISOString().split('T')[0],
-          vendorName: prev.vendorName || vendorName || 'Tedarikçi Firma',
-          quotedPrice: effectivePrice,
-          previousPrice: prevPrice,
-          discountThisRound: Math.max(0, prevPrice - effectivePrice),
-          documentName: file.name,
-          documentUrl: vaultRes.url,
-          note: `${roundIdx + 1}. Tur: Belgeden ${formatRuble(effectivePrice)} teklif okundu`
+        // Sort descending (highest price first = 1. Tur, ..., lowest price last = Nihai Anlaşılan Fatura)
+        candidateDocs.sort((a, b) => b.price - a.price);
+
+        const finalCandidate = candidateDocs[candidateDocs.length - 1];
+        const roundCandidates = candidateDocs.slice(0, candidateDocs.length - 1);
+
+        let stepPrev = baseOffer;
+        const rebuiltRounds: NegotiationRound[] = roundCandidates.map((rc, i) => {
+          const disc = Math.max(0, stepPrev - rc.price);
+          const rnd: NegotiationRound = {
+            id: `rnd_modal_${Date.now()}_${i + 1}`,
+            roundNumber: i + 1,
+            date: new Date().toISOString().split('T')[0],
+            vendorName: prev.vendorName || vendorName || 'Tedarikçi Firma',
+            previousPrice: stepPrev,
+            quotedPrice: rc.price,
+            discountThisRound: disc,
+            documentName: rc.docName,
+            documentUrl: rc.docUrl,
+            note: rc.note || `${i + 1}. Tur: ${formatRuble(stepPrev)} → ${formatRuble(rc.price)} (-${formatRuble(disc)})`
+          };
+          stepPrev = rc.price;
+          return rnd;
+        });
+
+        setNotification({
+          type: 'success',
+          message: `✨ Pazarlık aşamaları tutara göre otomatik sıralandı: ${rebuiltRounds.length} Ara Tur ve Nihai Fatura (${formatRuble(finalCandidate.price)}) güncellendi.`
+        });
+
+        return {
+          ...prev,
+          agreedPrice: finalCandidate.price,
+          fileName: finalCandidate.docName,
+          rounds: rebuiltRounds
         };
-
-        return { ...prev, rounds: [...existingRounds, newRound] };
       });
     } catch (err: any) {
       console.error('Error uploading modal round document:', err);
@@ -1112,11 +1201,13 @@ export const DiscountEntryForm: React.FC<Props> = ({
 
       // Call Gemini AI server API
       let firstOfferBase64 = undefined;
+      let firstOfferFn = undefined;
       if (offerType === 'final' && firstOfferFile) {
         firstOfferBase64 = firstOfferFile.base64 || (firstOfferFile.url?.startsWith('data:') ? firstOfferFile.url : undefined);
+        firstOfferFn = firstOfferFile.name || firstOfferFileName || undefined;
       }
       let extractedData: any = null;
-      let usedModelName = 'Gemini AI OCR';
+      let usedModelName = 'gemini-3.8-flash';
       try {
         const res = await fetch('/api/discounts/process-ai', {
           method: 'POST',
@@ -1128,9 +1219,12 @@ export const DiscountEntryForm: React.FC<Props> = ({
             mimeType: file.type || 'application/octet-stream',
             fileName: file.name,
             fileTextContext,
+            excelCsv: fileTextContext || undefined,
             offerType,
             scanMode: offerType === 'first' ? 'summary-only' : 'full',
-            firstOfferContext, firstOfferBase64
+            firstOfferContext,
+            firstOfferBase64,
+            firstOfferFileName: firstOfferFn
           })
         });
         const resText = await res.text();
@@ -1144,6 +1238,19 @@ export const DiscountEntryForm: React.FC<Props> = ({
           extractedData = data.extracted;
           if (data.usedModel) {
             usedModelName = data.usedModel;
+          }
+          if (data.duplicateInfo?.isDuplicate) {
+            setDuplicateWarning({
+              isDuplicate: true,
+              message: data.duplicateInfo.message?.startsWith('Bu fatura sistemde kayıtlı')
+                ? data.duplicateInfo.message
+                : `Bu fatura sistemde kayıtlı! ${data.duplicateInfo.message || 'Daha önce sisteme yüklenmiş bir fatura ile eşleşti.'}`,
+              existingRecord: data.duplicateInfo.existingInvoice
+            });
+            setForceSaveDuplicate(false);
+          } else {
+            setDuplicateWarning(null);
+            setForceSaveDuplicate(false);
           }
         } else {
           throw new Error(data.error + (data.details ? ' (' + data.details + ')' : '') || 'AI OCR başarısız');
@@ -1287,6 +1394,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
         if (formattedItems.length > 0) setExtractedItems(formattedItems);
 
         // Open AI Extracted Data Review & Approval Modal for the final invoice items
+        setIsAiModalMinimized(false);
         setAiReviewModal({
           offerType,
           fileName: file.name,
@@ -1441,17 +1549,22 @@ export const DiscountEntryForm: React.FC<Props> = ({
       base64Data = await readFileOrCompressImage(file);
       setFirstOfferFileName(file.name);
 
-      const res = await uploadToServerVault(file.name, base64Data);
-      if (res && res.url) {
-        setFirstOfferFile({ name: file.name, url: res.url, fileId: res.fileId });
-      } else {
-        throw new Error('Dosya sunucu adresi alınamadı');
+      try {
+        const res = await uploadToServerVault(file.name, base64Data);
+        if (res && res.url) {
+          setFirstOfferFile({ name: file.name, url: res.url, base64: base64Data, fileId: res.fileId });
+        } else {
+          setFirstOfferFile({ name: file.name, url: '', base64: base64Data });
+        }
+      } catch (uploadErr: any) {
+        console.warn('handleFirstOfferUpload direct upload warning, keeping base64 fallback:', uploadErr);
+        setFirstOfferFile({ name: file.name, url: '', base64: base64Data });
       }
     } catch (err: any) {
       console.error('handleFirstOfferUpload failed:', err);
       setFirstOfferFile(null);
       setFirstOfferFileName('');
-      alert(`KRİTİK HATA: İlk teklif belgesi yüklenemedi: ${err.message || 'Sunucu hatası'}. Dosya kayda eklenmedi.`);
+      setNotification({ type: 'error', message: `İlk teklif belgesi okunamadı: ${err.message || 'Sunucu hatası'}.` });
       return;
     }
 
@@ -1468,39 +1581,931 @@ export const DiscountEntryForm: React.FC<Props> = ({
       base64Data = await readFileOrCompressImage(file);
       setFinalOfferFileName(file.name);
 
-      const res = await uploadToServerVault(file.name, base64Data);
-      if (res && res.url) {
-        setFinalOfferFile({ name: file.name, url: res.url, fileId: res.fileId });
-      } else {
-        throw new Error('Dosya sunucu adresi alınamadı');
+      try {
+        const res = await uploadToServerVault(file.name, base64Data);
+        if (res && res.url) {
+          setFinalOfferFile({ name: file.name, url: res.url, base64: base64Data, fileId: res.fileId });
+        } else {
+          setFinalOfferFile({ name: file.name, url: '', base64: base64Data });
+        }
+      } catch (uploadErr: any) {
+        console.warn('handleFinalOfferUpload direct upload warning, keeping base64 fallback:', uploadErr);
+        setFinalOfferFile({ name: file.name, url: '', base64: base64Data });
       }
     } catch (err: any) {
       console.error('handleFinalOfferUpload failed:', err);
       setFinalOfferFile(null);
       setFinalOfferFileName('');
-      alert(`KRİTİK HATA: Son teklif/fatura belgesi yüklenemedi: ${err.message || 'Sunucu hatası'}. Dosya kayda eklenmedi.`);
+      setNotification({ type: 'error', message: `Son teklif/fatura belgesi okunamadı: ${err.message || 'Sunucu hatası'}.` });
       return;
     }
 
     await processOfferDocument(file, 'final', base64Data);
   };
 
-  // Load 1-Click Demo Double Offer Preset
+  // Load 1-Click Demo Multi-Stage Negotiation Preset
   const handleLoadDemoPreset = () => {
-    setVendorName('Diler Demir Çelik A.Ş.');
-    setCategory('İnşaat Demiri & Çelik');
-    setOfferPrice('2450000');
-    setAgreedPrice('1960000');
-    setNotes('Peşin ödeme protokolü ve 100 Ton üzeri toplu sipariş taahhüdü ile %20 pazarlık indirimi elde edildi.');
-    setFirstOfferFileName('1_Teklif_Diler_Celik_Gelen_Liste.pdf');
-    setFinalOfferFileName('2_Son_Indirimli_Proforma_Fatura.xlsx');
-    setFirstOfferFile({ name: '1_Teklif_Diler_Celik_Gelen_Liste.pdf', url: '1_Teklif_Diler_Celik_Gelen_Liste.pdf' });
-    setFinalOfferFile({ name: '2_Son_Indirimli_Proforma_Fatura.xlsx', url: '2_Son_Indirimli_Proforma_Fatura.xlsx' });
-    setInvoiceNo('FT-PAZARLIK-9920');
+    setVendorName('ООО "РУС-ГАРАНТ"');
+    setCategory('Seramik & Vitrifiye');
+    setOfferPrice('675547.14');
+    setAgreedPrice('672190.50');
+    setNotes('İlk teklif (675.547,14 ₽) üzerinden 1. Tur ara pazarlık (674.688,00 ₽) ve nihai anlaşma (672.190,50 ₽) ile birim fiyat 512,86 ₽ seviyesinden 509,50 ₽ seviyesine indirildi.');
+    setFirstOfferFileName('1_Ilk_Teklif_Rus_Garant_3257.pdf');
+    setFinalOfferFileName('3_Nihai_Anlasilan_Fatura_Rus_Garant_3257.pdf');
+    setFirstOfferFile({ name: '1_Ilk_Teklif_Rus_Garant_3257.pdf', url: '' });
+    setFinalOfferFile({ name: '3_Nihai_Anlasilan_Fatura_Rus_Garant_3257.pdf', url: '' });
+    setInvoiceNo('3257');
+    setOrderDate('2026-10-16');
+
+    const demoStaged = [
+      {
+        id: `demo_doc_1_${Date.now()}`,
+        fileName: '1_Ilk_Teklif_Rus_Garant_3257.pdf',
+        fileUrl: '',
+        role: 'initial_offer' as const,
+        roundNumber: 1 as const,
+        status: 'analyzed' as const,
+        supplier: 'ООО "РУС-ГАРАНТ"',
+        invoiceNumber: '3257',
+        date: '2026-10-16',
+        category: 'Seramik & Vitrifiye',
+        totalAmount: 675547.14,
+        itemsCount: 2,
+        usedModel: 'gemini-3.8-flash',
+        items: [
+          { materialName: 'Напольное покрытие MASTER PROXI 2 3 м', unit: 'м2', quantity: 999, unitPrice: 512.86, totalPrice: 512347.14 },
+          { materialName: 'Клей для напольных покрытий Soudal 26A 15 кг', unit: 'шт', quantity: 40, unitPrice: 4080.00, totalPrice: 163200.00 }
+        ]
+      },
+      {
+        id: `demo_doc_2_${Date.now()}`,
+        fileName: '2_Ara_Pazarlik_1_Tur_Rus_Garant_3257.pdf',
+        fileUrl: '',
+        role: 'negotiation_round' as const,
+        roundNumber: 1 as const,
+        status: 'analyzed' as const,
+        supplier: 'ООО "РУС-ГАРАНТ"',
+        invoiceNumber: '3257',
+        date: '2026-10-16',
+        category: 'Seramik & Vitrifiye',
+        totalAmount: 674688.00,
+        itemsCount: 2,
+        usedModel: 'gemini-3.8-flash',
+        items: [
+          { materialName: 'Напольное покрытие MASTER PROXI 2 3 м', unit: 'м2', quantity: 999, unitPrice: 512.00, totalPrice: 511488.00 },
+          { materialName: 'Клей для напольных покрытий Soudal 26A 15 кг', unit: 'шт', quantity: 40, unitPrice: 4080.00, totalPrice: 163200.00 }
+        ]
+      },
+      {
+        id: `demo_doc_3_${Date.now()}`,
+        fileName: '3_Nihai_Anlasilan_Fatura_Rus_Garant_3257.pdf',
+        fileUrl: '',
+        role: 'final_invoice' as const,
+        roundNumber: 1 as const,
+        status: 'analyzed' as const,
+        supplier: 'ООО "РУС-ГАРАНТ"',
+        invoiceNumber: '3257',
+        date: '2026-10-16',
+        category: 'Seramik & Vitrifiye',
+        totalAmount: 672190.50,
+        itemsCount: 2,
+        usedModel: 'gemini-3.8-flash',
+        items: [
+          { materialName: 'Напольное покрытие MASTER PROXI 2 3 м', unit: 'м2', quantity: 999, unitPrice: 509.50, totalPrice: 508990.50 },
+          { materialName: 'Клей для напольных покрытий Soudal 26A 15 кг', unit: 'шт', quantity: 40, unitPrice: 4080.00, totalPrice: 163200.00 }
+        ]
+      }
+    ];
+    setStagedOfferDocs(demoStaged);
+    setExtractedItems(demoStaged[2].items);
+    setNegotiationRounds([
+      {
+        id: `rnd_demo_${Date.now()}`,
+        roundNumber: 1,
+        date: '2026-10-16',
+        vendorName: 'ООО "РУС-ГАРАНТ"',
+        previousPrice: 675547.14,
+        quotedPrice: 674688.00,
+        discountThisRound: 859.14,
+        documentName: '2_Ara_Pazarlik_1_Tur_Rus_Garant_3257.pdf',
+        documentUrl: '',
+        note: '1. Tur Ara Pazarlık: Birim fiyat 512,86 ₽ → 512,00 ₽ seviyesine çekildi.'
+      }
+    ]);
   };
+
+  // Smart Role & Round Sorter based on document amounts
+  const applySmartPriceSortToDocs = (docs: typeof stagedOfferDocs, forceAllByPrice = false) => {
+    if (docs.length < 2) return docs;
+    const validWithPrice = docs.filter(d => d.totalAmount > 0);
+    if (validWithPrice.length < 2) return docs;
+
+    // Check if user explicitly selected multiple initial_offer documents
+    const explicitInitials = docs.filter(d => d.role === 'initial_offer' && d.totalAmount > 0);
+    const minOverallPrice = Math.min(...validWithPrice.map(d => d.totalAmount));
+
+    // If user marked 2+ initial offers and they are all > minOverallPrice, preserve those initial offers!
+    if (!forceAllByPrice && explicitInitials.length >= 2 && explicitInitials.every(d => d.totalAmount > minOverallPrice)) {
+      const initialIds = new Set(explicitInitials.map(d => d.id));
+      const nonInitials = docs
+        .filter(d => !initialIds.has(d.id) && d.totalAmount > 0)
+        .sort((a, b) => b.totalAmount - a.totalAmount);
+
+      if (nonInitials.length === 0) return docs;
+      const finalDocId = nonInitials[nonInitials.length - 1].id;
+      const roundDocsList = nonInitials.slice(0, nonInitials.length - 1);
+      const roundMap = new Map<string, 1 | 2 | 3 | 4 | 5>();
+      roundDocsList.forEach((rd, idx) => {
+        roundMap.set(rd.id, Math.min(5, idx + 1) as 1 | 2 | 3 | 4 | 5);
+      });
+
+      return docs.map(d => {
+        if (initialIds.has(d.id)) return { ...d, role: 'initial_offer' as const };
+        if (d.id === finalDocId) return { ...d, role: 'final_invoice' as const };
+        if (roundMap.has(d.id)) return { ...d, role: 'negotiation_round' as const, roundNumber: roundMap.get(d.id)! };
+        return d;
+      });
+    }
+
+    // Standard Smart Sort: Sort all priced documents descending (Highest = İlk Teklif, Middle = 1..5. Tur, Lowest = Nihai Fatura)
+    const sortedByPriceDesc = [...validWithPrice].sort((a, b) => b.totalAmount - a.totalAmount);
+    const highestId = sortedByPriceDesc[0].id;
+    const lowestId = sortedByPriceDesc[sortedByPriceDesc.length - 1].id;
+    const middleDocs = sortedByPriceDesc.slice(1, sortedByPriceDesc.length - 1);
+    const middleRoundMap = new Map<string, 1 | 2 | 3 | 4 | 5>();
+    middleDocs.forEach((md, idx) => {
+      middleRoundMap.set(md.id, Math.min(5, idx + 1) as 1 | 2 | 3 | 4 | 5);
+    });
+
+    // Also reorder the array itself from highest price to lowest price so visual list matches the ladder
+    const unpricedDocs = docs.filter(d => !(d.totalAmount > 0));
+    const reordered = [
+      ...sortedByPriceDesc.map(d => {
+        if (d.id === highestId) return { ...d, role: 'initial_offer' as const, roundNumber: 1 as const };
+        if (d.id === lowestId) return { ...d, role: 'final_invoice' as const, roundNumber: 1 as const };
+        return {
+          ...d,
+          role: 'negotiation_round' as const,
+          roundNumber: middleRoundMap.get(d.id) || (1 as const)
+        };
+      }),
+      ...unpricedDocs
+    ];
+    return reordered;
+  };
+
+  // Sync stagedOfferDocs into main form fields whenever analyzed docs or roles change
+  const syncStagedDocsToForm = (docs: typeof stagedOfferDocs) => {
+    const priced = docs.filter(d => d.totalAmount > 0);
+    if (priced.length === 0) return;
+
+    const initials = priced.filter(d => d.role === 'initial_offer');
+    const finals = priced.filter(d => d.role === 'final_invoice');
+    const rounds = priced
+      .filter(d => d.role === 'negotiation_round')
+      .sort((a, b) => (a.roundNumber !== b.roundNumber ? a.roundNumber - b.roundNumber : b.totalAmount - a.totalAmount));
+
+    const minOverallDoc = [...priced].sort((a, b) => a.totalAmount - b.totalAmount)[0];
+    const maxOverallDoc = [...priced].sort((a, b) => b.totalAmount - a.totalAmount)[0];
+    const validInitialsAboveMin = initials.filter(d => d.totalAmount > (minOverallDoc?.totalAmount || 0));
+
+    // TDF Rule: Base initial offer is the LOWEST among initial offers that are > final price (or highest priced doc if inverted)
+    const baselineDoc = validInitialsAboveMin.length > 0
+      ? [...validInitialsAboveMin].sort((a, b) => a.totalAmount - b.totalAmount)[0]
+      : maxOverallDoc;
+
+    const validFinalsBelowBase = finals.filter(d => d.id !== baselineDoc?.id && d.totalAmount <= (baselineDoc?.totalAmount || Infinity));
+    const finalDoc = validFinalsBelowBase.length > 0
+      ? [...validFinalsBelowBase].sort((a, b) => a.totalAmount - b.totalAmount)[0]
+      : minOverallDoc;
+
+    if (baselineDoc && baselineDoc.totalAmount > 0) {
+      setOfferPrice(String(baselineDoc.totalAmount));
+      setFirstOfferFileName(baselineDoc.fileName);
+      setFirstOfferFile({
+        name: baselineDoc.fileName,
+        url: baselineDoc.fileUrl || '',
+        base64: baselineDoc.base64,
+        fileId: baselineDoc.fileId
+      });
+      if (baselineDoc.itemsCount && baselineDoc.itemsCount > 0) {
+        setFirstOfferItemCount(baselineDoc.itemsCount);
+      }
+    }
+
+    if (finalDoc && finalDoc.totalAmount > 0 && finalDoc.id !== baselineDoc?.id) {
+      setAgreedPrice(String(finalDoc.totalAmount));
+      setFinalOfferFileName(finalDoc.fileName);
+      setFinalOfferFile({
+        name: finalDoc.fileName,
+        url: finalDoc.fileUrl || '',
+        base64: finalDoc.base64,
+        fileId: finalDoc.fileId
+      });
+      if (finalDoc.items && finalDoc.items.length > 0) {
+        setExtractedItems(finalDoc.items);
+      }
+    }
+
+    const bestSupplier = finalDoc?.supplier || baselineDoc?.supplier || priced.find(d => d.supplier)?.supplier;
+    if (bestSupplier) setVendorName(bestSupplier);
+
+    const bestCat = finalDoc?.category || baselineDoc?.category || priced.find(d => d.category)?.category;
+    if (bestCat) setCategory(bestCat);
+
+    const bestInvNo = finalDoc?.invoiceNumber || baselineDoc?.invoiceNumber || priced.find(d => d.invoiceNumber)?.invoiceNumber;
+    if (bestInvNo) setInvoiceNo(bestInvNo);
+
+    const bestDate = finalDoc?.date || baselineDoc?.date || priced.find(d => d.date)?.date;
+    if (bestDate) setOrderDate(bestDate);
+
+    // Build negotiationRounds from intermediate round documents
+    let prevStepPrice = baselineDoc ? baselineDoc.totalAmount : 0;
+    const builtRounds: NegotiationRound[] = rounds.map((rd, idx) => {
+      const disc = Math.max(0, prevStepPrice - rd.totalAmount);
+      const nr: NegotiationRound = {
+        id: `rnd_staged_${rd.id}`,
+        roundNumber: rd.roundNumber || (idx + 1),
+        date: rd.date || orderDate || new Date().toISOString().split('T')[0],
+        vendorName: rd.supplier || bestSupplier || vendorName || 'Tedarikçi Firma',
+        previousPrice: prevStepPrice,
+        quotedPrice: rd.totalAmount,
+        discountThisRound: disc,
+        documentName: rd.fileName,
+        documentUrl: rd.fileUrl,
+        note: `${rd.roundNumber || (idx + 1)}. Tur Ara Pazarlık: ${formatRuble(prevStepPrice)} → ${formatRuble(rd.totalAmount)} (-${formatRuble(disc)})`
+      };
+      prevStepPrice = rd.totalAmount;
+      return nr;
+    });
+    setNegotiationRounds(builtRounds);
+  };
+
+  // Add multiple or single files to the unified TDF-style staging table
+  const handleAddStagedFiles = async (fileList: FileList | File[]) => {
+    const filesArray = Array.from(fileList);
+    if (filesArray.length === 0) return;
+
+    const currentLen = stagedOfferDocs.length;
+    const totalLen = currentLen + filesArray.length;
+
+    const newEntries = filesArray.map((file, idx) => {
+      const globalIdx = currentLen + idx;
+      let defaultRole: 'initial_offer' | 'negotiation_round' | 'final_invoice' = 'initial_offer';
+      let defaultRound: 1 | 2 | 3 | 4 | 5 = 1;
+
+      if (totalLen === 1) {
+        defaultRole = 'initial_offer';
+      } else if (globalIdx === 0 && !stagedOfferDocs.some(d => d.role === 'initial_offer')) {
+        defaultRole = 'initial_offer';
+      } else if (globalIdx === totalLen - 1) {
+        defaultRole = 'final_invoice';
+      } else {
+        defaultRole = 'negotiation_round';
+        defaultRound = Math.min(5, Math.max(1, globalIdx)) as 1 | 2 | 3 | 4 | 5;
+      }
+
+      return {
+        id: `staged_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
+        file,
+        fileName: file.name,
+        role: defaultRole,
+        roundNumber: defaultRound,
+        status: 'pending' as const,
+        totalAmount: 0
+      };
+    });
+
+    // If adding new files when an existing doc was final_invoice, shift previous final_invoice to negotiation_round if needed
+    const updatedExisting = stagedOfferDocs.map((d, i) => {
+      if (filesArray.length > 0 && d.role === 'final_invoice' && i < totalLen - 1) {
+        return {
+          ...d,
+          role: 'negotiation_round' as const,
+          roundNumber: Math.min(5, Math.max(1, i)) as 1 | 2 | 3 | 4 | 5
+        };
+      }
+      return d;
+    });
+
+    const combined = [...updatedExisting, ...newEntries];
+    setStagedOfferDocs(combined);
+  };
+
+  // Analyze all staged documents with AI OCR + Hybrid Excel/PDF reader
+  const handleStartMultiDocAnalysis = async () => {
+    if (stagedOfferDocs.length === 0 || isMultiScanning) return;
+    setIsMultiScanning(true);
+    setNotification(null);
+
+    try {
+      const updatedDocs = [...stagedOfferDocs];
+
+      // Mark all pending/error docs as scanning
+      setStagedOfferDocs(prev =>
+        prev.map(d => (d.status === 'analyzed' && d.totalAmount > 0 ? d : { ...d, status: 'scanning', errorMsg: undefined }))
+      );
+
+      await Promise.all(
+        updatedDocs.map(async (docItem, idx) => {
+          if (docItem.status === 'analyzed' && docItem.totalAmount > 0 && !docItem.file) {
+            return;
+          }
+          const file = docItem.file;
+          if (!file && !docItem.base64) return;
+
+          try {
+            const base64Data = docItem.base64 || (file ? await readFileOrCompressImage(file) : '');
+            let uploadedUrl = docItem.fileUrl || '';
+            let uploadedFileId = docItem.fileId;
+
+            if (!uploadedUrl && base64Data) {
+              try {
+                const upRes = await uploadToServerVault(docItem.fileName, base64Data);
+                if (upRes?.url) {
+                  uploadedUrl = upRes.url;
+                  uploadedFileId = upRes.fileId;
+                }
+              } catch (upErr) {
+                console.warn('Staged file vault upload fallback to base64:', upErr);
+              }
+            }
+
+            // Optional local Excel parsing if spreadsheet
+            let fileTextContext = '';
+            let calculatedExcelTotal = 0;
+            if (file && (file.name.endsWith('.xlsx') || file.name.endsWith('.xls') || file.name.endsWith('.csv'))) {
+              try {
+                const arrayBuffer = await file.arrayBuffer();
+                const wb = XLSX.read(arrayBuffer, { type: 'array' });
+                const firstSheet = wb.Sheets[wb.SheetNames[0]];
+                fileTextContext = XLSX.utils.sheet_to_csv(firstSheet);
+              } catch (exErr) {
+                console.warn('Excel parse warning:', exErr);
+              }
+            }
+
+            const res = await fetch('/api/discounts/process-ai', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                fileBase64: base64Data,
+                mimeType: file?.type || 'application/pdf',
+                fileName: docItem.fileName,
+                fileTextContext: fileTextContext || undefined,
+                excelCsv: fileTextContext || undefined,
+                offerType: docItem.role === 'initial_offer' ? 'first' : 'final',
+                scanMode: 'full'
+              })
+            });
+
+            const data = await res.json();
+            if (!res.ok || !data.success || !data.extracted) {
+              throw new Error(data.error || 'Belge okunamadı');
+            }
+
+            if (data.duplicateInfo?.isDuplicate) {
+              setDuplicateWarning({
+                isDuplicate: true,
+                message: data.duplicateInfo.message?.startsWith('Bu fatura sistemde kayıtlı')
+                  ? data.duplicateInfo.message
+                  : `Bu fatura sistemde kayıtlı! ${data.duplicateInfo.message || 'Daha önce sisteme yüklenmiş bir fatura ile eşleşti.'}`,
+                existingRecord: data.duplicateInfo.existingInvoice
+              });
+              setForceSaveDuplicate(false);
+            }
+
+            const ext = data.extracted;
+            const rawItems = Array.isArray(ext.items) ? ext.items : [];
+            const formattedItems = rawItems.map((it: any) => ({
+              materialName: it.materialName || 'İnşaat Malzemesi',
+              originalName: it.originalName || it.materialName || '',
+              category: it.category || ext.category || 'Diğer Malzeme',
+              unit: it.unit || 'Adet',
+              quantity: Number(it.quantity) || 1,
+              unitPrice: Number(it.unitPrice) || 0,
+              totalPrice: Number(it.totalPrice) || (Number(it.quantity) * Number(it.unitPrice)),
+              discountAmount: Number(it.discountAmount) || 0
+            }));
+
+            const itemsSum = formattedItems.reduce((s: number, i: any) => s + (Number(i.totalPrice) || 0), 0);
+            const detectedTotal = Number(ext.totalAmount) || itemsSum || calculatedExcelTotal || 0;
+            const detectedVendor = String(ext.vendorName || ext.supplier || ext.company || '').trim();
+
+            updatedDocs[idx] = {
+              ...docItem,
+              base64: base64Data,
+              fileUrl: uploadedUrl,
+              fileId: uploadedFileId,
+              status: 'analyzed',
+              errorMsg: undefined,
+              supplier: detectedVendor || docItem.supplier,
+              invoiceNumber: String(ext.invoiceNumber || docItem.invoiceNumber || '').trim(),
+              date: String(ext.date || docItem.date || new Date().toISOString().split('T')[0]).trim(),
+              category: ext.category || docItem.category,
+              totalAmount: detectedTotal,
+              itemsCount: formattedItems.length || Number(ext.itemCount || ext.itemsCount || 0),
+              items: formattedItems,
+              usedModel: data.usedModel || 'gemini-3.8-flash'
+            };
+          } catch (err: any) {
+            console.error(`Error scanning ${docItem.fileName}:`, err);
+            updatedDocs[idx] = {
+              ...docItem,
+              status: 'error',
+              errorMsg: err.message || 'Okuma hatası'
+            };
+          }
+        })
+      );
+
+      // Apply smart sorting if enabled or if prices are inverted (e.g. final_invoice > initial_offer)
+      let finalDocsState = updatedDocs;
+      const analyzedCount = updatedDocs.filter(d => d.totalAmount > 0).length;
+      if (analyzedCount >= 2) {
+        const initPrices = updatedDocs.filter(d => d.role === 'initial_offer' && d.totalAmount > 0).map(d => d.totalAmount);
+        const finPrices = updatedDocs.filter(d => d.role === 'final_invoice' && d.totalAmount > 0).map(d => d.totalAmount);
+        const minInit = initPrices.length > 0 ? Math.min(...initPrices) : 0;
+        const maxFin = finPrices.length > 0 ? Math.max(...finPrices) : 0;
+        const isInverted = (minInit > 0 && maxFin > minInit) || initPrices.length === 0 || finPrices.length === 0;
+
+        if (autoSortByPrice || isInverted) {
+          finalDocsState = applySmartPriceSortToDocs(updatedDocs);
+        }
+      }
+
+      setStagedOfferDocs(finalDocsState);
+      syncStagedDocsToForm(finalDocsState);
+
+      if (analyzedCount > 0) {
+        setNotification({
+          type: 'success',
+          message: `✨ ${analyzedCount} adet teklif/fatura belgesi başarıyla analiz edildi, en düşük ilk teklif baz alınarak pazarlık turları ve şematik indirim tablosu oluşturuldu!`
+        });
+      }
+    } finally {
+      setIsMultiScanning(false);
+    }
+  };
+
+  // Real-time Schematic Negotiation & TDF Canonical Analysis computed from stagedOfferDocs
+  const schematicAnalysis = useMemo(() => {
+    const getEffectiveDocTotal = (d: typeof stagedOfferDocs[0]) => {
+      const raw = Number(d.totalAmount) || 0;
+      return d.isVatIncluded === false ? Number((raw * 1.2).toFixed(2)) : raw;
+    };
+
+    const pricedDocs = stagedOfferDocs
+      .filter(d => d.totalAmount > 0)
+      .map(d => ({
+        ...d,
+        rawTotalAmount: d.totalAmount,
+        totalAmount: getEffectiveDocTotal(d)
+      }));
+    if (pricedDocs.length === 0) return null;
+
+    const initialDocs = pricedDocs
+      .filter(d => d.role === 'initial_offer')
+      .sort((a, b) => a.totalAmount - b.totalAmount); // sorted lowest first so [0] is lowest initial offer!
+
+    const roundDocs = pricedDocs
+      .filter(d => d.role === 'negotiation_round')
+      .sort((a, b) => (a.roundNumber !== b.roundNumber ? a.roundNumber - b.roundNumber : b.totalAmount - a.totalAmount));
+
+    const finalDocs = pricedDocs
+      .filter(d => d.role === 'final_invoice')
+      .sort((a, b) => a.totalAmount - b.totalAmount);
+
+    const minOverallDoc = [...pricedDocs].sort((a, b) => a.totalAmount - b.totalAmount)[0];
+    const maxOverallDoc = [...pricedDocs].sort((a, b) => b.totalAmount - a.totalAmount)[0];
+    const validInitialsAboveMin = initialDocs.filter(d => d.totalAmount > (minOverallDoc?.totalAmount || 0));
+
+    // TDF Rule: Take the lowest initial offer (above final price) as the reference baseline
+    const baselineDoc = validInitialsAboveMin.length > 0
+      ? validInitialsAboveMin[0]
+      : maxOverallDoc;
+
+    const validFinalsBelowBase = finalDocs.filter(d => d.id !== baselineDoc?.id && d.totalAmount <= (baselineDoc?.totalAmount || Infinity));
+    const finalDoc = validFinalsBelowBase.length > 0
+      ? validFinalsBelowBase[0]
+      : minOverallDoc;
+
+    const rawBaselineAmount = baselineDoc?.totalAmount || 0;
+    const deduction = Number(scopeDeductionAmount) || 0;
+    const effectiveBaseline = deduction > 0 ? Math.max(0, rawBaselineAmount - deduction) : rawBaselineAmount;
+    const finalAmount = finalDoc?.totalAmount || 0;
+
+    // Distinct suppliers & TDF Analysis Code
+    const distinctSuppliers = Array.from(
+      new Set(
+        pricedDocs
+          .map(d => normalizeVendorName(d.supplier || vendorName || 'Tedarikçi Firma'))
+          .filter(Boolean)
+      )
+    );
+    const uniqueVendorsCount = Math.max(1, distinctSuppliers.length);
+    const analysisCode = generateAnalysisCode((discounts?.length || 0) + (savedTdfAnalyses?.length || 0));
+
+    // Build step-by-step schematic nodes
+    const steps: Array<{
+      id: string;
+      stageType: 'initial' | 'round' | 'final';
+      badgeLabel: string;
+      title: string;
+      fileName: string;
+      supplier?: string;
+      invoiceNumber?: string;
+      date?: string;
+      previousAmount: number;
+      amount: number;
+      stepDropAmount: number;
+      stepDropPct: number;
+      cumulativeDropAmount: number;
+      roundNumber?: number;
+      vatAdjusted?: boolean;
+    }> = [];
+
+    if (baselineDoc) {
+      steps.push({
+        id: baselineDoc.id,
+        stageType: 'initial',
+        badgeLabel: initialDocs.length > 1 ? '1. İlk Teklif (En Düşük Dip Fiyat)' : '1. İlk Teklif (Başlangıç)',
+        title: baselineDoc.supplier || vendorName || 'Tedarikçi Firma',
+        fileName: baselineDoc.fileName,
+        supplier: baselineDoc.supplier,
+        invoiceNumber: baselineDoc.invoiceNumber,
+        date: baselineDoc.date,
+        previousAmount: effectiveBaseline,
+        amount: effectiveBaseline,
+        stepDropAmount: 0,
+        stepDropPct: 0,
+        cumulativeDropAmount: 0,
+        vatAdjusted: baselineDoc.isVatIncluded === false
+      });
+    }
+
+    let runningPrev = effectiveBaseline;
+    roundDocs.forEach((rd, idx) => {
+      if (rd.id === baselineDoc?.id || rd.id === finalDoc?.id) return;
+      const stepDrop = Math.max(0, runningPrev - rd.totalAmount);
+      const stepPct = runningPrev > 0 ? Number(((stepDrop / runningPrev) * 100).toFixed(2)) : 0;
+      const cumDrop = Math.max(0, effectiveBaseline - rd.totalAmount);
+      steps.push({
+        id: rd.id,
+        stageType: 'round',
+        badgeLabel: `Ara Pazarlık — ${rd.roundNumber || idx + 1}. Tur`,
+        title: `${rd.roundNumber || idx + 1}. Tur İndirimli Fatura / Teklif`,
+        fileName: rd.fileName,
+        supplier: rd.supplier,
+        invoiceNumber: rd.invoiceNumber,
+        date: rd.date,
+        previousAmount: runningPrev,
+        amount: rd.totalAmount,
+        stepDropAmount: stepDrop,
+        stepDropPct: stepPct,
+        cumulativeDropAmount: cumDrop,
+        roundNumber: rd.roundNumber || idx + 1,
+        vatAdjusted: rd.isVatIncluded === false
+      });
+      runningPrev = rd.totalAmount;
+    });
+
+    if (finalDoc && finalDoc.id !== baselineDoc?.id) {
+      const stepDrop = Math.max(0, runningPrev - finalDoc.totalAmount);
+      const stepPct = runningPrev > 0 ? Number(((stepDrop / runningPrev) * 100).toFixed(2)) : 0;
+      const cumDrop = Math.max(0, effectiveBaseline - finalDoc.totalAmount);
+      steps.push({
+        id: finalDoc.id,
+        stageType: 'final',
+        badgeLabel: 'Nihai Anlaşılan Fatura',
+        title: 'Son Anlaşılan Nihai Fatura',
+        fileName: finalDoc.fileName,
+        supplier: finalDoc.supplier,
+        invoiceNumber: finalDoc.invoiceNumber,
+        date: finalDoc.date,
+        previousAmount: runningPrev,
+        amount: finalDoc.totalAmount,
+        stepDropAmount: stepDrop,
+        stepDropPct: stepPct,
+        cumulativeDropAmount: cumDrop,
+        vatAdjusted: finalDoc.isVatIncluded === false
+      });
+    }
+
+    const totalNetDiscount = Math.max(0, effectiveBaseline - finalAmount);
+    const totalNetDiscountPct = effectiveBaseline > 0 ? Number(((totalNetDiscount / effectiveBaseline) * 100).toFixed(2)) : 0;
+
+    // TDF Canonical Item Matching + VAT Normalization + Unit Conversion (Ton ↔ Metre ↔ Adet)
+    const baseItems = baselineDoc?.items || [];
+    const finalItems = finalDoc?.items || [];
+    const maxItemsLen = Math.max(baseItems.length, finalItems.length);
+    const activeRounds = roundDocs.filter(rd => rd.id !== baselineDoc?.id && rd.id !== finalDoc?.id);
+
+    let isAboveBestOfferCount = 0;
+    let unitConversionsCount = 0;
+    const vatNormalizedDocsCount = pricedDocs.filter(d => d.isVatIncluded === false).length;
+
+    const itemEvolution: Array<{
+      materialName: string;
+      canonicalName: string;
+      specsSummary?: string;
+      unit: string;
+      quantity: number;
+      initialUnitPrice: number;
+      marketReferenceSupplier: string;
+      roundUnitPrices: Array<{ roundNumber: number; unitPrice: number; conversionNote?: string }>;
+      finalUnitPrice: number;
+      totalItemSaving: number;
+      conversionFormula?: string;
+      vatAdjusted?: boolean;
+      isAboveBestOffer?: boolean;
+      aboveBestOfferDiff?: number;
+    }> = [];
+
+    const canonicalMaterials: CanonicalMaterial[] = [];
+
+    for (let i = 0; i < maxItemsLen; i++) {
+      const bIt = baseItems[i];
+      const fIt = finalItems[i] || bIt;
+      if (!bIt && !fIt) continue;
+
+      const rawMatName = (fIt || bIt).materialName || `Kalem #${i + 1}`;
+      const specs = extractTechnicalSpecs(rawMatName);
+      const matType = detectMaterialType(rawMatName);
+      const specBadges = [specs.grade, specs.diameter, specs.dimensions, specs.standard].filter(Boolean);
+      const specsSummary = specBadges.length > 0 ? specBadges.join(' • ') : undefined;
+
+      const targetUnit = (fIt || bIt).unit || 'Adet';
+      const qty = Number((fIt || bIt).quantity) || 1;
+
+      // Final item VAT normalization
+      const rawFinalUp = Number(fIt?.unitPrice) || Number(bIt?.unitPrice) || 0;
+      const finalVatRes = normalizeVatPrice(rawFinalUp, finalDoc?.isVatIncluded !== false, true, 0.20);
+      const finUp = finalVatRes.normalizedPrice;
+
+      // Search across all initialDocs for the lowest normalized unit price (Dip Fiyat) for this material
+      let bestInitUp = 0;
+      let bestInitSupplier = baselineDoc?.supplier || vendorName || 'İlk Teklif';
+      let appliedConversionFormula: string | undefined = undefined;
+      let anyVatAdjusted = finalVatRes.vatAdjusted;
+
+      const candidateInitialDocs = initialDocs.length > 0 ? initialDocs : (baselineDoc ? [baselineDoc] : []);
+      candidateInitialDocs.forEach((initD) => {
+        const initItems = initD.items || [];
+        let matchedItem = initItems[i];
+        // Hybrid semantic matching if multiple items exist
+        if (initItems.length > 0) {
+          let bestScore = -1;
+          let bestCandidate = initItems[i] || initItems[0];
+          initItems.forEach((cand) => {
+            const scoreObj = calculateMatchScore(
+              { description: rawMatName, specs, unit: targetUnit },
+              { description: cand.materialName || '', unit: cand.unit }
+            );
+            if (scoreObj.score > bestScore) {
+              bestScore = scoreObj.score;
+              bestCandidate = cand;
+            }
+          });
+          if (bestScore >= 0.55) {
+            matchedItem = bestCandidate;
+          }
+        }
+
+        if (matchedItem) {
+          const rawCandidateUp = Number(matchedItem.unitPrice) || 0;
+          if (rawCandidateUp > 0) {
+            const vatRes = normalizeVatPrice(rawCandidateUp, initD.isVatIncluded !== false, true, 0.20);
+            if (vatRes.vatAdjusted) anyVatAdjusted = true;
+            let normUp = vatRes.normalizedPrice;
+
+            // Automatic unit conversion (Ton ↔ Metre ↔ Adet)
+            if (matchedItem.unit && targetUnit && matchedItem.unit.toLowerCase().trim() !== targetUnit.toLowerCase().trim()) {
+              const conv = convertMaterialUnit({
+                materialName: matchedItem.materialName || rawMatName,
+                category: matType,
+                fromUnit: matchedItem.unit,
+                toUnit: targetUnit,
+                unitPrice: normUp,
+                quantity: Number(matchedItem.quantity) || 1
+              });
+              if (conv.conversionApplied && conv.convertedUnitPrice > 0) {
+                normUp = conv.convertedUnitPrice;
+                appliedConversionFormula = conv.formula;
+              }
+            }
+
+            if (bestInitUp === 0 || normUp < bestInitUp) {
+              bestInitUp = normUp;
+              bestInitSupplier = initD.supplier || vendorName || 'İlk Teklif';
+            }
+          }
+        }
+      });
+
+      if (bestInitUp <= 0) {
+        bestInitUp = finUp;
+      }
+      if (appliedConversionFormula) {
+        unitConversionsCount += 1;
+      }
+
+      // Round unit prices with VAT & unit normalization
+      const roundUps = activeRounds.map((rd, rIdx) => {
+        const rItem = rd.items?.[i];
+        let rUp = Number(rItem?.unitPrice) || 0;
+        let rConvNote: string | undefined = undefined;
+        if (rUp > 0) {
+          const rVat = normalizeVatPrice(rUp, rd.isVatIncluded !== false, true, 0.20);
+          rUp = rVat.normalizedPrice;
+          if (rItem?.unit && targetUnit && rItem.unit.toLowerCase().trim() !== targetUnit.toLowerCase().trim()) {
+            const conv = convertMaterialUnit({
+              materialName: rItem.materialName || rawMatName,
+              category: matType,
+              fromUnit: rItem.unit,
+              toUnit: targetUnit,
+              unitPrice: rUp,
+              quantity: Number(rItem.quantity) || 1
+            });
+            if (conv.conversionApplied && conv.convertedUnitPrice > 0) {
+              rUp = conv.convertedUnitPrice;
+              rConvNote = conv.formula;
+            }
+          }
+        }
+        return {
+          roundNumber: rd.roundNumber || rIdx + 1,
+          unitPrice: rUp,
+          conversionNote: rConvNote
+        };
+      });
+
+      const initTot = bestInitUp * qty;
+      const finTot = finUp * qty;
+      const isItemAboveBest = finUp > bestInitUp + 0.01;
+      const itemAboveDiff = isItemAboveBest ? Number((finUp - bestInitUp).toFixed(2)) : 0;
+      if (isItemAboveBest) {
+        isAboveBestOfferCount += 1;
+      }
+
+      const itemSaving = Math.max(0, initTot - finTot);
+      const itemSavingPct = initTot > 0 ? Number(((itemSaving / initTot) * 100).toFixed(2)) : 0;
+
+      itemEvolution.push({
+        materialName: rawMatName,
+        canonicalName: specsSummary ? `${matType} (${specsSummary})` : rawMatName,
+        specsSummary,
+        unit: targetUnit,
+        quantity: qty,
+        initialUnitPrice: bestInitUp,
+        marketReferenceSupplier: bestInitSupplier,
+        roundUnitPrices: roundUps,
+        finalUnitPrice: finUp,
+        totalItemSaving: itemSaving,
+        conversionFormula: appliedConversionFormula,
+        vatAdjusted: anyVatAdjusted,
+        isAboveBestOffer: isItemAboveBest,
+        aboveBestOfferDiff: itemAboveDiff
+      });
+
+      canonicalMaterials.push({
+        id: `can_mat_${i + 1}_${Date.now()}`,
+        commonName: rawMatName,
+        canonicalName: specsSummary ? `${matType} (${specsSummary})` : rawMatName,
+        materialType: matType,
+        standardUnit: targetUnit,
+        specs,
+        purchasedQuantity: qty,
+        quantity: qty,
+        purchasedUnitPrice: finUp,
+        purchasedSupplier: finalDoc?.supplier || vendorName || 'Nihai Tedarikçi',
+        marketReferenceUnitPrice: bestInitUp,
+        marketReferenceSupplier: bestInitSupplier,
+        winningFirstUnitPrice: bestInitUp,
+        realUnitSavings: Number((bestInitUp - finUp).toFixed(2)),
+        realTotalSavings: Number((initTot - finTot).toFixed(2)),
+        realSavingsAmount: itemSaving,
+        realSavingsPercentage: itemSavingPct,
+        realSavingsRate: itemSavingPct,
+        internalVendorUnitDiscount: Math.max(0, bestInitUp - finUp),
+        internalVendorTotalDiscount: itemSaving,
+        isAboveBestOffer: isItemAboveBest,
+        aboveBestOfferDiff: itemAboveDiff,
+        status: 'confirmed',
+        matchConfidence: 0.96,
+        matchReason: appliedConversionFormula || 'TDF Kanonik Kalem & Birim Eşleştirmesi',
+        lines: []
+      });
+    }
+
+    return {
+      analysisCode,
+      uniqueVendorsCount,
+      distinctSuppliers,
+      isAboveBestOfferCount,
+      unitConversionsCount,
+      vatNormalizedDocsCount,
+      initialDocs,
+      baselineDoc,
+      roundDocs: activeRounds,
+      finalDoc,
+      rawBaselineAmount,
+      effectiveBaseline,
+      finalAmount,
+      totalNetDiscount,
+      totalNetDiscountPct,
+      steps,
+      itemEvolution,
+      canonicalMaterials
+    };
+  }, [stagedOfferDocs, scopeDeductionAmount, vendorName, discounts?.length, savedTdfAnalyses?.length]);
 
   const [firstOfferFileName, setFirstOfferFileName] = useState<string>('');
   const [finalOfferFileName, setFinalOfferFileName] = useState<string>('');
+
+  // Real-time duplicate check across both existing discounts and invoices
+  const effectiveDuplicateWarning = useMemo(() => {
+    const activeNoRaw = String(aiReviewModal?.invoiceNo || invoiceNo || '').trim();
+    const activeVendorRaw = String(aiReviewModal?.vendorName || vendorName || '').trim();
+    const activeAgreed = Number(aiReviewModal?.agreedPrice || agreedPrice || 0);
+    const activeDate = String(aiReviewModal?.orderDate || orderDate || '').trim();
+
+    const cleanNo = activeNoRaw.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+    const isGenericNo = !activeNoRaw || activeNoRaw.startsWith('FT-') || activeNoRaw.startsWith('TKF-') || activeNoRaw.startsWith('ARCH-') || activeNoRaw.startsWith('BLG-');
+    const cleanSup = normalizeVendorName(activeVendorRaw);
+
+    if (cleanNo || cleanSup) {
+      for (const d of (discounts || [])) {
+        if ((d as any).isDeleted) continue;
+        const dNoRaw = String(d.invoiceNo || '').trim();
+        const dNo = dNoRaw.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+        const dSup = normalizeVendorName(d.vendorName || '');
+        const isDGeneric = !dNoRaw || dNoRaw.startsWith('FT-') || dNoRaw.startsWith('TKF-') || dNoRaw.startsWith('ARCH-');
+        if (!isGenericNo && !isDGeneric && cleanNo && dNo && cleanNo === dNo) {
+          const sameSup = areVendorsEqual(cleanSup, dSup) || (cleanSup && dSup && (cleanSup.includes(dSup) || dSup.includes(cleanSup)));
+          const sameAmt = activeAgreed > 0 && Math.abs(activeAgreed - (Number(d.agreedPrice) || 0)) < 5;
+          if (sameSup || (cleanNo.length >= 3 && sameAmt)) {
+            return {
+              isDuplicate: true,
+              message: `Bu fatura sistemde kayıtlı! "${dNoRaw}" numaralı ve "${d.vendorName}" tedarikçili fatura daha önce (${d.orderDate || '-'} / ${d.jobsiteName || 'Şantiye'} - ${formatRuble(d.agreedPrice)}) İndirim Kayıtlarına yüklenmiş.`,
+              existingRecord: d
+            };
+          }
+        }
+      }
+      for (const inv of (invoices || [])) {
+        if ((inv as any).isDeleted) continue;
+        const iNoRaw = String(inv.invoiceNumber || '').trim();
+        const iNo = iNoRaw.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+        const iSup = normalizeVendorName(inv.supplier || '');
+        const isIGeneric = !iNoRaw || iNoRaw.startsWith('FT-') || iNoRaw.startsWith('TKF-') || iNoRaw.startsWith('ARCH-');
+        if (!isGenericNo && !isIGeneric && cleanNo && iNo && cleanNo === iNo) {
+          const sameSup = areVendorsEqual(cleanSup, iSup) || (cleanSup && iSup && (cleanSup.includes(iSup) || iSup.includes(cleanSup)));
+          const sameAmt = activeAgreed > 0 && Math.abs(activeAgreed - (Number(inv.totalAmount) || 0)) < 5;
+          if (sameSup || (cleanNo.length >= 3 && sameAmt)) {
+            return {
+              isDuplicate: true,
+              message: `Bu fatura sistemde kayıtlı! "${iNoRaw}" numaralı ve "${inv.supplier}" tedarikçili fatura daha önce (${inv.date || '-'} / ${inv.jobsiteName || 'Şantiye'} - ${formatRuble(inv.totalAmount)}) sisteme yüklenmiş.`,
+              existingRecord: inv
+            };
+          }
+        }
+        if (activeAgreed > 0 && Math.abs(activeAgreed - (Number(inv.totalAmount) || 0)) < 1 && activeDate && inv.date === activeDate && areVendorsEqual(cleanSup, iSup)) {
+          return {
+            isDuplicate: true,
+            message: `Bu fatura sistemde kayıtlı! "${inv.supplier}" tedarikçisine ait aynı tarih (${inv.date}) ve aynı tutarda (${formatRuble(inv.totalAmount)}) bir fatura zaten sistemde mevcut.`,
+            existingRecord: inv
+          };
+        }
+      }
+    }
+    return duplicateWarning;
+  }, [aiReviewModal, invoiceNo, vendorName, agreedPrice, orderDate, discounts, invoices, duplicateWarning]);
+
+  // Notify parent App when a scanned discount/invoice is waiting for confirmation so user can switch tabs and return
+  useEffect(() => {
+    if (!onPendingDiscountScanChange) return;
+    if (aiReviewModal) {
+      onPendingDiscountScanChange({
+        supplier: aiReviewModal.vendorName || 'Tedarikçi',
+        invoiceNumber: aiReviewModal.invoiceNo || '-',
+        totalAmount: Number(aiReviewModal.agreedPrice || aiReviewModal.offerPrice) || 0,
+        openModal: () => setIsAiModalMinimized(false)
+      });
+    } else if (finalOfferFile || firstOfferFile || Number(agreedPrice) > 0) {
+      onPendingDiscountScanChange({
+        supplier: vendorName || 'Tedarikçi',
+        invoiceNumber: invoiceNo || '-',
+        totalAmount: Number(agreedPrice || offerPrice) || 0,
+        openModal: () => {
+          const el = document.getElementById('discount-entry-main-form');
+          if (el) el.scrollIntoView({ behavior: 'smooth' });
+        }
+      });
+    } else {
+      onPendingDiscountScanChange(null);
+    }
+  }, [aiReviewModal, finalOfferFile, firstOfferFile, vendorName, invoiceNo, agreedPrice, offerPrice]);
 
   const executeSaveDiscount = async (bypass52Check = false) => {
     if (!supervisorId) {
@@ -1519,26 +2524,54 @@ export const DiscountEntryForm: React.FC<Props> = ({
       setNotification({ type: 'error', message: 'Lütfen geçerli İlk Teklif Fiyatı ve Son İndirimli Fiyatı yükleyin veya girin.' });
       return;
     }
-    if (numAgreed > numOffer) {
-      setNotification({ type: 'error', message: 'Anlaşılan Son Fiyat, İlk Teklif Fiyatından büyük olamaz.' });
+
+    // Smart Auto-Correction if Offer and Agreed prices or Rounds are inverted
+    let calcOffer = numOffer;
+    let calcAgreed = numAgreed;
+    if (schematicAnalysis && schematicAnalysis.rawBaselineAmount > 0 && schematicAnalysis.finalAmount > 0) {
+      calcOffer = schematicAnalysis.rawBaselineAmount;
+      calcAgreed = schematicAnalysis.finalAmount;
+    } else {
+      const candidateAmounts = [
+        numOffer,
+        numAgreed,
+        ...(negotiationRounds || []).map(r => Number(r.quotedPrice) || 0),
+        ...(negotiationRounds || []).map(r => Number(r.previousPrice) || 0)
+      ].filter(v => v > 0);
+      if (candidateAmounts.length >= 2) {
+        calcOffer = Math.max(...candidateAmounts);
+        calcAgreed = Math.min(...candidateAmounts);
+      }
+    }
+    if (calcAgreed > calcOffer) {
+      const tmp = calcOffer;
+      calcOffer = calcAgreed;
+      calcAgreed = tmp;
+    }
+    if (effectiveDuplicateWarning?.isDuplicate && !forceSaveDuplicate) {
+      setNotification({
+        type: 'error',
+        message: '⚠️ BU FATURA SİSTEMDE KAYITLI! Mükerrer kaydı onaylamak için lütfen aşağıdaki "Bu faturanın sistemde kayıtlı olduğunu biliyorum, yine de yeni kayıt oluştur" kutucuğunu işaretleyip tekrar Kaydet butonuna basın.'
+      });
       return;
     }
 
-    const calcOffer = numOffer;
-    const calcDeduction = numScopeDeduction;
-    const calcAdjustedOffer = numAdjustedOffer;
-    const calcBaseline = currentBaseline;
-    let calcAgreed = numAgreed;
+    const maxAllowedDeduction = Math.max(0, calcOffer - calcAgreed);
+    const calcDeduction = numScopeDeduction > 0 && numScopeDeduction <= maxAllowedDeduction ? numScopeDeduction : 0;
+    const calcAdjustedOffer = calcDeduction > 0 ? Math.max(calcAgreed, calcOffer - calcDeduction) : calcOffer;
+    const calcBaseline = calcDeduction > 0 ? calcAdjustedOffer : calcOffer;
     const calcAmt = Math.max(0, calcBaseline - calcAgreed);
     const calcPct = calcBaseline > 0 ? Number(((calcAmt / calcBaseline) * 100).toFixed(2)) : 0;
 
     // GERÇEK TUR KONTROLÜ: Ara tur faturası/belgesi yüklenmiş veya notu girilmiş olan turlar geçerlidir
-    const validRounds = (negotiationRounds || []).filter(r => {
-      const qp = Number(r.quotedPrice) || 0;
-      const hasDoc = Boolean(r.documentName || r.documentUrl || (r as any).documentFileName || (r as any).fileName);
-      const hasNotes = Boolean(r.note || r.notes || r.date);
-      return (hasDoc || hasNotes) && (qp > 0 ? qp <= calcBaseline : true);
-    });
+    const validRounds = (negotiationRounds || [])
+      .filter(r => {
+        const qp = Number(r.quotedPrice) || 0;
+        const hasDoc = Boolean(r.documentName || r.documentUrl || (r as any).documentFileName || (r as any).fileName);
+        const hasNotes = Boolean(r.note || r.notes || r.date);
+        return (hasDoc || hasNotes) && (qp > 0 ? qp <= calcBaseline && qp > calcAgreed : true);
+      })
+      .sort((a, b) => (Number(b.quotedPrice) || 0) - (Number(a.quotedPrice) || 0));
 
     const hasRounds = validRounds.length > 0;
     const finalCrossNegotiation = crossNegotiationApplied || (validRounds.length >= 2);
@@ -1556,14 +2589,31 @@ export const DiscountEntryForm: React.FC<Props> = ({
       const finalUrl = await resolveFileUrl(finalOfferFile, finalDocName);
 
       const generatedStageDocs: StageDocument[] = [];
-      generatedStageDocs.push({
-        stageNumber: 1,
-        title: '1. İlk Teklif / Fatura',
-        fileName: firstDocName,
-        fileUrl: firstUrl.url,
-        driveFileId: firstUrl.fileId,
-        amount: calcOffer
-      });
+
+      // If multiple initial offers were staged, record all of them in stageDocuments!
+      if (schematicAnalysis && schematicAnalysis.initialDocs.length > 1) {
+        schematicAnalysis.initialDocs.forEach((initDoc, idx) => {
+          const isLowestBase = initDoc.id === schematicAnalysis.baselineDoc?.id;
+          generatedStageDocs.push({
+            stageNumber: 1,
+            title: isLowestBase ? `1. İlk Teklif (Baz Alınan En Düşük Teklif)` : `1. İlk Teklif (Alternatif #${idx + 1})`,
+            fileName: initDoc.fileName,
+            fileUrl: initDoc.fileUrl || firstUrl.url,
+            driveFileId: initDoc.fileId || firstUrl.fileId,
+            amount: initDoc.totalAmount,
+            date: initDoc.date
+          });
+        });
+      } else {
+        generatedStageDocs.push({
+          stageNumber: 1,
+          title: '1. İlk Teklif / Fatura',
+          fileName: firstDocName,
+          fileUrl: firstUrl.url,
+          driveFileId: firstUrl.fileId,
+          amount: calcOffer
+        });
+      }
 
       if (validRounds.length === 0) {
         generatedStageDocs.push({
@@ -1580,7 +2630,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
           const stageNo = idx + 2;
           generatedStageDocs.push({
             stageNumber: stageNo,
-            title: `${stageNo}. Ara İndirimli Teklif (Tur #${idx + 1})`,
+            title: `${stageNo}. Ara İndirimli Teklif (${r.roundNumber || idx + 1}. Tur)`,
             fileName: r.documentName || `${stageNo}_Ara_Teklif.pdf`,
             fileUrl: r.documentUrl,
             amount: Number(r.quotedPrice) || 0,
@@ -1613,20 +2663,37 @@ export const DiscountEntryForm: React.FC<Props> = ({
         adjustedOfferPrice: calcDeduction > 0 ? calcAdjustedOffer : calcOffer,
         agreedPrice: calcAgreed,
         orderDate,
-        notes: notes.trim() || (calcDeduction > 0 ? `İlk tekliften ${formatRuble(calcDeduction)} düşülerek net indirim hesaplandı.` : 'Teklif belgeleri karşılaştırılarak otomatik kaydedildi.'),
+        notes: notes.trim() || (schematicAnalysis ? `Birleşik TDF & Pazarlık Analizi #${schematicAnalysis.analysisCode}. En düşük ilk teklif (${formatRuble(calcOffer)}) baz alınarak ${validRounds.length} ara pazarlık turu ile nihai fatura (${formatRuble(calcAgreed)}) kaydedildi.` : (calcDeduction > 0 ? `İlk tekliften ${formatRuble(calcDeduction)} düşülerek net indirim hesaplandı.` : 'Teklif belgeleri karşılaştırılarak otomatik kaydedildi.')),
         invoiceNo: generatedInvoiceNo,
         firstOfferFileName: firstDocName,
         firstOfferFileUrl: firstUrl.url,
+        firstOfferFileData: !firstUrl.url && firstOfferFile?.base64 ? firstOfferFile.base64 : undefined,
         firstOfferDriveFileId: firstUrl.fileId,
         finalOfferFileName: finalDocName,
         finalOfferFileUrl: finalUrl.url,
+        finalOfferFileData: !finalUrl.url && finalOfferFile?.base64 ? finalOfferFile.base64 : undefined,
         finalOfferDriveFileId: finalUrl.fileId,
+        forceSave: forceSaveDuplicate,
+        forceSaveDuplicate: forceSaveDuplicate,
         items: extractedItems.length > 0 ? extractedItems as any : undefined,
         negotiationRounds: validRounds.length > 0 ? validRounds : undefined,
         stageDocuments: generatedStageDocs,
         crossNegotiationApplied: isHighValue ? finalCrossNegotiation : false,
-        finalNegotiationDate: finalNegotiationDate || orderDate
-      });
+        finalNegotiationDate: finalNegotiationDate || orderDate,
+        ...(schematicAnalysis ? {
+          analysisCode: schematicAnalysis.analysisCode,
+          calculationMethod: 'MARKET_BASELINE_TO_FINAL' as const,
+          realMarketSavings: calcAmt,
+          marketReferencePrice: calcBaseline,
+          realSavingsPercentage: calcPct,
+          isSingleVendor: schematicAnalysis.uniqueVendorsCount <= 1,
+          isAboveBestOffer: schematicAnalysis.isAboveBestOfferCount > 0,
+          competitorCount: Math.max(0, schematicAnalysis.uniqueVendorsCount - 1),
+          canonicalMaterials: schematicAnalysis.canonicalMaterials
+        } : {})
+      } as any);
+
+      void loadSavedTdfAnalyses();
 
       setSubmittedRecordSummary({
         supervisorName: selectedSup ? selectedSup.name : 'Satınalma Şefi',
@@ -1661,6 +2728,9 @@ export const DiscountEntryForm: React.FC<Props> = ({
       setFirstOfferFileName('');
       setFinalOfferFileName('');
       setExtractedItems([]);
+      setStagedOfferDocs([]);
+      setDuplicateWarning(null);
+      setForceSaveDuplicate(false);
       setPerformedByPersonnelId(user?.role === 'personnel' && user.personnelId ? user.personnelId : '');
       setNegotiationRounds([]);
       setCrossNegotiationApplied(false);
@@ -1669,9 +2739,16 @@ export const DiscountEntryForm: React.FC<Props> = ({
       onSuccess();
     } catch (err: any) {
       console.error('Save discount error:', err);
+      const msg = err.message || 'Kayıt sırasında bir hata oluştu.';
+      if (msg.toLowerCase().includes('kayıtlı') || msg.toLowerCase().includes('mükerrer')) {
+        setDuplicateWarning({
+          isDuplicate: true,
+          message: msg
+        });
+      }
       setNotification({
         type: 'error',
-        message: err.message || 'Kayıt sırasında bir hata oluştu.'
+        message: msg
       });
     } finally {
       setIsProcessingAI(false);
@@ -1833,9 +2910,13 @@ export const DiscountEntryForm: React.FC<Props> = ({
             </div>
           )}
           <div className="flex-1">
-            <h4 className="font-bold text-base text-white">{t('discountSuccessToast')}</h4>
-            <p className="text-xs text-slate-300 mt-1">{notification.message}</p>
-            <p className="text-[11px] text-emerald-300 font-mono mt-1 font-semibold">{t('discountSuccessSub')}</p>
+            <h4 className="font-bold text-base text-white">
+              {notification.type === 'success' ? t('discountSuccessToast') : '⚠️ Kayıt / Doğrulama Uyarısı'}
+            </h4>
+            <p className="text-xs text-slate-200 mt-1 font-medium">{notification.message}</p>
+            {notification.type === 'success' && (
+              <p className="text-[11px] text-emerald-300 font-mono mt-1 font-semibold">{t('discountSuccessSub')}</p>
+            )}
           </div>
           <button
             onClick={() => setNotification(null)}
@@ -1896,8 +2977,9 @@ export const DiscountEntryForm: React.FC<Props> = ({
       )}
 
       {/* Mode Switcher */}
-      <div className="flex items-center space-x-2 bg-slate-200/80 p-1 rounded-xl w-fit">
+      <div className="flex flex-wrap items-center gap-2 bg-slate-200/80 p-1.5 rounded-xl w-fit">
         <button
+          type="button"
           onClick={() => setEntryMode('auto-offers')}
           className={`px-4 py-2 rounded-lg text-xs font-extrabold transition-all flex items-center space-x-2 cursor-pointer ${
             entryMode === 'auto-offers'
@@ -1906,10 +2988,12 @@ export const DiscountEntryForm: React.FC<Props> = ({
           }`}
         >
           <Sparkles className="w-4 h-4 text-amber-500" />
-          <span>{t('autoUploadModeBtn')}</span>
+          <span>🚀 Birleşik Çoklu Belge & TDF Pazarlık Analizi (AI)</span>
+          <span className="bg-indigo-100 text-indigo-800 text-[10px] font-black px-1.5 py-0.5 rounded-full">Ana Ekran</span>
         </button>
 
         <button
+          type="button"
           onClick={() => setEntryMode('manual')}
           className={`px-4 py-2 rounded-lg text-xs font-extrabold transition-all flex items-center space-x-2 cursor-pointer ${
             entryMode === 'manual'
@@ -1923,13 +3007,13 @@ export const DiscountEntryForm: React.FC<Props> = ({
 
         <button
           type="button"
-          onClick={() => setIsComparativeModalOpen(true)}
-          className="px-4 py-2 rounded-lg text-xs font-extrabold transition-all flex items-center space-x-2 cursor-pointer bg-gradient-to-r from-indigo-600 to-indigo-800 hover:from-indigo-700 hover:to-indigo-900 text-white shadow-sm border border-indigo-500/30"
-          title={language === 'ru' ? 'Для закупок от 1 000 000 ₽: расчет реальной экономии на основе единичных расценок нескольких КП' : '1.000.000 ₽ ve üzeri alımlar için: En az 2 tedarikçinin ilk teklif birim fiyatlarına göre gerçek piyasa tasarrufu hesapla'}
+          onClick={() => {
+            document.getElementById('recent-discounts-section')?.scrollIntoView({ behavior: 'smooth' });
+          }}
+          className="px-3.5 py-2 rounded-lg text-xs font-extrabold transition-all flex items-center space-x-1.5 cursor-pointer bg-slate-900 hover:bg-slate-800 text-white shadow-2xs"
         >
-          <Layers className="w-4 h-4 text-indigo-200" />
-          <span>{language === 'ru' ? '1M+ ₽ Сравнительный анализ (TDF)' : '1M+ ₽ Karşılaştırmalı Teklif (TDF)'}</span>
-          <span className="bg-amber-400 text-slate-900 text-[10px] font-black px-1.5 py-0.5 rounded-full uppercase tracking-tight">Yeni Standart</span>
+          <Scale className="w-3.5 h-3.5 text-amber-400" />
+          <span>Kayıtlı İndirimler & TDF Arşivi ({(discounts?.length || 0) + (savedTdfAnalyses?.length || 0)})</span>
         </button>
       </div>
 
@@ -2098,248 +3182,765 @@ export const DiscountEntryForm: React.FC<Props> = ({
           </div>
         </div>
 
-        {/* MODE 1: AUTOMATIC DUAL OFFER UPLOAD */}
+        {/* MODE 1: TDF-STYLE UNIFIED MULTI-DOCUMENT UPLOAD, ROLE/ROUND SELECTION & SCHEMATIC NEGOTIATION ANALYSIS */}
         {entryMode === 'auto-offers' && (
           <div className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-indigo-50/70 p-4 rounded-xl border border-indigo-100">
-              <div>
-                <h3 className="font-extrabold text-indigo-900 text-sm flex items-center space-x-2">
-                  <Sparkles className="w-4 h-4 text-amber-500" />
-                  <span>{t('dualUploadTitle')}</span>
+            {/* Top Instruction & Demo Bar */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-gradient-to-r from-indigo-950 via-slate-900 to-indigo-950 text-white p-5 rounded-2xl border border-indigo-500/30 shadow-md">
+              <div className="space-y-1">
+                <div className="flex items-center space-x-2">
+                  <span className="px-2.5 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black uppercase tracking-wider">
+                    TDF Mantığı • Çoklu Belge & Akıllı Tur Sistemi
+                  </span>
+                  <span className="text-xs font-bold text-indigo-300">
+                    İlk Teklif • 1..5. Tur Ara Pazarlık • Nihai Anlaşılan Fatura
+                  </span>
+                </div>
+                <h3 className="font-black text-base sm:text-lg text-white flex items-center space-x-2">
+                  <Sparkles className="w-5 h-5 text-amber-400 shrink-0" />
+                  <span>Tüm Teklif ve Pazarlık Faturalarını Tek Yerden Yükleyin</span>
                 </h3>
-                <p className="text-xs text-indigo-700 mt-0.5">
-                  {t('dualUploadSub')}
+                <p className="text-xs text-slate-300 max-w-3xl leading-relaxed">
+                  Faturaların tamamını tek seferde veya peş peşe yükleyin. Yanındaki kutucuklardan <strong>İlk Teklif</strong>, varsa <strong>Ara Pazarlık (1. Tur, 2. Tur, 3. Tur, 4. Tur, 5. Tur)</strong> ve <strong>Nihai Anlaşılan Fatura</strong> olarak seçin veya <strong>Otomatik Akıllı Sıralama</strong> ile tek tıkla analiz edin. Birden fazla İlk Teklif varsa en düşük ilk teklif baz alınarak net indirim hesaplanır.
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={handleLoadDemoPreset}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow-xs transition-all flex items-center space-x-1.5 shrink-0 cursor-pointer"
-              >
-                <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />
-                <span>{t('loadDemoPresetBtn')}</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleLoadDemoPreset}
+                  className="bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/40 font-bold text-xs px-3.5 py-2.5 rounded-xl shadow-xs transition-all flex items-center space-x-1.5 cursor-pointer"
+                >
+                  <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
+                  <span>Örnek 3 Aşamalı Pazarlık Yükle</span>
+                </button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Box 1: First Offer Document */}
-              <div className="bg-slate-50 p-5 rounded-2xl border-2 border-dashed border-slate-300 hover:border-slate-400 transition-all space-y-3 relative">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-black uppercase text-slate-700 tracking-wider flex items-center space-x-2">
-                    <FileText className="w-4 h-4 text-slate-500" />
-                    <span>{t('firstOfferDocTitle')}</span>
-                  </span>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-200 text-slate-700">
-                    PDF, Excel, Photo
-                  </span>
+            {/* Unified Multi-File Drag & Drop Upload Zone */}
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsMultiDragOver(true);
+              }}
+              onDragLeave={() => setIsMultiDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsMultiDragOver(false);
+                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                  handleAddStagedFiles(e.dataTransfer.files);
+                }
+              }}
+              className={`relative rounded-2xl border-2 border-dashed p-6 text-center transition-all cursor-pointer ${
+                isMultiDragOver
+                  ? 'border-indigo-500 bg-indigo-50/70 scale-[1.005]'
+                  : 'border-indigo-300 bg-slate-50/90 hover:bg-indigo-50/40 hover:border-indigo-400'
+              }`}
+            >
+              <input
+                type="file"
+                multiple
+                accept="image/*,.pdf,.xlsx,.xls,.csv"
+                onChange={(e) => {
+                  if (e.target.files && e.target.files.length > 0) {
+                    handleAddStagedFiles(e.target.files);
+                    e.target.value = '';
+                  }
+                }}
+                className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10"
+              />
+              <div className="flex flex-col items-center justify-center space-y-2">
+                <div className="w-12 h-12 rounded-2xl bg-indigo-600/10 border border-indigo-500/20 text-indigo-600 flex items-center justify-center shadow-2xs">
+                  <Upload className="w-6 h-6" />
                 </div>
-
-                <div className="border border-slate-200 bg-white rounded-xl p-4 text-center cursor-pointer hover:bg-slate-50 transition-colors relative">
-                  <input
-                    type="file"
-                    accept="image/*,.pdf,.xlsx,.xls,.csv"
-                    onChange={handleFirstOfferUpload}
-                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                  />
-                  {firstOfferFile ? (
-                    <div className="flex items-center justify-between text-xs text-slate-800 font-bold">
-                      <div className="flex items-center space-x-2 truncate">
-                        <FileCheck className="w-5 h-5 text-emerald-600 shrink-0" />
-                        <span className="truncate">{firstOfferFile.name}</span>
-                      </div>
-                      <span className="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                        {t('uploadedBadge')}
-                      </span>
-                    </div>
-                  ) : (
-                    <div className="space-y-1">
-                      <Upload className="w-6 h-6 text-slate-400 mx-auto" />
-                      <p className="text-xs font-bold text-slate-700">{t('dragFirstOffer')}</p>
-                      <p className="text-[10px] text-slate-400">{t('firstOfferSub')}</p>
-                    </div>
-                  )}
-                </div>
-
                 <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="block text-[11px] font-bold text-slate-600">
-                      {t('firstOfferAmountLabel')}
-                    </label>
-                    {firstOfferItemCount > 0 && (
-                      <span className="text-[10px] font-bold bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-200">
-                        📋 {firstOfferItemCount} Kalem Tespit Edildi
-                      </span>
-                    )}
-                  </div>
-                  <input
-                    type="number"
-                    placeholder="1850000"
-                    value={offerPrice}
-                    onChange={(e) => setOfferPrice(e.target.value)}
-                    className="w-full py-2 px-3 bg-white border border-slate-300 rounded-xl font-mono font-bold text-slate-900 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                  />
+                  <p className="text-sm font-black text-slate-900">
+                    Tüm Fatura ve Teklif Belgelerini Buraya Sürükleyin veya Seçmek İçin Tıklayın
+                  </p>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    İlk Teklif, 1..5. Tur Ara Pazarlık ve Nihai Anlaşılan Fatura belgelerini (PDF, Excel, Görsel) aynı anda çoklu seçebilirsiniz
+                  </p>
                 </div>
-              </div>
-
-              {/* Box 2: Final Agreed Offer Document */}
-              <div className="bg-emerald-50/50 p-5 rounded-2xl border-2 border-dashed border-emerald-300 hover:border-emerald-400 transition-all space-y-3 relative">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-black uppercase text-emerald-900 tracking-wider flex items-center space-x-2">
-                    <FileCheck className="w-4 h-4 text-emerald-600" />
-                    <span>{t('finalOfferDocTitle')}</span>
-                  </span>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
-                    {t('postBargainBadge')}
-                  </span>
-                </div>
-
-                <div className="border border-emerald-200 bg-white rounded-xl p-4 text-center cursor-pointer hover:bg-emerald-50/30 transition-colors relative">
-                  <input
-                    type="file"
-                    accept="image/*,.pdf,.xlsx,.xls,.csv"
-                    onChange={handleFinalOfferUpload}
-                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                  />
-                  {finalOfferFile ? (
-                    <div className="flex items-center justify-between text-xs text-slate-800 font-bold">
-                      <div className="flex items-center space-x-2 truncate">
-                        <FileCheck className="w-5 h-5 text-emerald-600 shrink-0" />
-                        <span className="truncate">{finalOfferFile.name}</span>
-                      </div>
-                      <span className="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                        {t('uploadedBadge')}
-                      </span>
-                    </div>
-                  ) : (
-                    <div className="space-y-1">
-                      <Upload className="w-6 h-6 text-emerald-500 mx-auto" />
-                      <p className="text-xs font-bold text-slate-700">{t('dragFinalOffer')}</p>
-                      <p className="text-[10px] text-emerald-600 font-medium">{t('finalOfferSub')}</p>
-                    </div>
-                  )}
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="block text-[11px] font-bold text-slate-600">
-                      {t('finalOfferAmountLabel')}
-                    </label>
-                    {extractedItems.length > 0 && (
-                      <span className="text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded border border-emerald-200">
-                        ✨ {extractedItems.length} Kalem Tarandı
-                      </span>
-                    )}
-                  </div>
-                  <input
-                    type="number"
-                    placeholder="1480000"
-                    value={agreedPrice}
-                    onChange={(e) => handleAgreedPriceChange(e.target.value)}
-                    className="w-full py-2 px-3 bg-white border border-emerald-300 rounded-xl font-mono font-extrabold text-emerald-700 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                  />
+                <div className="flex flex-wrap items-center justify-center gap-2 pt-1 text-[11px] font-bold">
+                  <span className="px-2.5 py-1 rounded-lg bg-slate-200/80 text-slate-700">1. İlk Teklif (En Düşük Baz Alınır)</span>
+                  <span className="text-slate-400">➔</span>
+                  <span className="px-2.5 py-1 rounded-lg bg-indigo-100 text-indigo-800">Ara Pazarlık (1. Tur - 5. Tur)</span>
+                  <span className="text-slate-400">➔</span>
+                  <span className="px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-800">Nihai Anlaşılan Fatura</span>
                 </div>
               </div>
             </div>
 
-            {/* Smart Item Count Comparison Indicator */}
-            {firstOfferItemCount > 0 && extractedItems.length > 0 && (
-              <div className={`p-3 rounded-xl border text-xs font-medium flex items-center justify-between ${
-                firstOfferItemCount === extractedItems.length
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                  : 'bg-amber-50 border-amber-300 text-amber-900'
-              }`}>
-                <div className="flex items-center space-x-2">
-                  {firstOfferItemCount === extractedItems.length ? (
-                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
-                  ) : (
-                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                  )}
-                  <span>
-                    {firstOfferItemCount === extractedItems.length ? (
-                      `Kalem Sayısı Tam Eşleşti: İlk teklif (${firstOfferItemCount} kalem) ve son fatura (${extractedItems.length} kalem) birebir uyumlu.`
+            {/* Staged Documents Table & Role / Round Selector */}
+            {stagedOfferDocs.length > 0 && (
+              <div className="bg-white rounded-2xl border-2 border-indigo-100 shadow-sm overflow-hidden space-y-4 p-4 sm:p-5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                  <div className="flex items-center space-x-2.5">
+                    <span className="w-7 h-7 rounded-xl bg-indigo-600 text-white font-black text-xs flex items-center justify-center">
+                      {stagedOfferDocs.length}
+                    </span>
+                    <div>
+                      <h4 className="text-sm font-black text-slate-900">
+                        Yüklenen Fatura & Teklif Belgeleri — Rol ve Tur Seçimi
+                      </h4>
+                      <p className="text-[11px] text-slate-500">
+                        Her belgenin yanından rolünü (İlk Teklif, Ara Pazarlık 1-5. Tur, Nihai Fatura) seçin ve <strong>Analizi Başlat</strong> butonuna basın.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <label className="flex items-center space-x-2 text-xs font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoSortByPrice}
+                        onChange={(e) => setAutoSortByPrice(e.target.checked)}
+                        className="rounded text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5 cursor-pointer"
+                      />
+                      <span>Tutarlara Göre Otomatik Akıllı Sırala</span>
+                    </label>
+
+                    {stagedOfferDocs.filter(d => d.totalAmount > 0).length >= 2 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const sorted = applySmartPriceSortToDocs(stagedOfferDocs, true);
+                          setStagedOfferDocs(sorted);
+                          syncStagedDocsToForm(sorted);
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-extrabold flex items-center space-x-1.5 cursor-pointer transition-colors"
+                      >
+                        <Wand2 className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Şimdi Tutarlara Göre Sırala</span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStagedOfferDocs([]);
+                        setFirstOfferFile(null);
+                        setFinalOfferFile(null);
+                        setNegotiationRounds([]);
+                      }}
+                      className="px-2.5 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold cursor-pointer"
+                    >
+                      Tümünü Temizle
+                    </button>
+                  </div>
+                </div>
+
+                {/* Document Rows */}
+                <div className="space-y-2.5">
+                  {stagedOfferDocs.map((docItem, idx) => {
+                    const isLowestInitial =
+                      docItem.role === 'initial_offer' &&
+                      docItem.totalAmount > 0 &&
+                      schematicAnalysis?.baselineDoc?.id === docItem.id &&
+                      (schematicAnalysis?.initialDocs.length || 0) > 1;
+
+                    return (
+                      <div
+                        key={docItem.id}
+                        className={`p-3.5 rounded-xl border transition-all flex flex-col lg:flex-row lg:items-center justify-between gap-3 ${
+                          docItem.role === 'initial_offer'
+                            ? 'bg-slate-50 border-slate-300'
+                            : docItem.role === 'negotiation_round'
+                            ? 'bg-indigo-50/50 border-indigo-200'
+                            : 'bg-emerald-50/60 border-emerald-300'
+                        }`}
+                      >
+                        {/* Left: Index, File Name, OCR Status & Supplier */}
+                        <div className="flex items-start sm:items-center space-x-3 min-w-0 flex-1">
+                          <span
+                            className={`w-7 h-7 rounded-lg font-black text-xs flex items-center justify-center shrink-0 ${
+                              docItem.role === 'initial_offer'
+                                ? 'bg-slate-800 text-white'
+                                : docItem.role === 'negotiation_round'
+                                ? 'bg-indigo-600 text-white'
+                                : 'bg-emerald-600 text-white'
+                            }`}
+                          >
+                            {idx + 1}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-bold text-xs sm:text-sm text-slate-900 truncate max-w-[260px] sm:max-w-[360px]">
+                                {docItem.fileName}
+                              </span>
+                              {docItem.status === 'scanning' && (
+                                <span className="inline-flex items-center space-x-1 text-[10px] font-bold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full border border-amber-300">
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                  <span>AI Okuyor...</span>
+                                </span>
+                              )}
+                              {docItem.status === 'analyzed' && (
+                                <span className="inline-flex items-center space-x-1 text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full border border-emerald-300">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                  <span>Okundu ({docItem.itemsCount || docItem.items?.length || 0} Kalem)</span>
+                                </span>
+                              )}
+                              {docItem.status === 'error' && (
+                                <span className="inline-flex items-center space-x-1 text-[10px] font-bold bg-rose-100 text-rose-800 px-2 py-0.5 rounded-full border border-rose-300">
+                                  <AlertCircle className="w-3 h-3 text-rose-600" />
+                                  <span>{docItem.errorMsg || 'Hata'}</span>
+                                </span>
+                              )}
+                              {isLowestInitial && (
+                                <span className="text-[10px] font-black bg-amber-400 text-slate-950 px-2 py-0.5 rounded-full">
+                                  ★ Baz Alınan En Düşük İlk Teklif
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500 mt-0.5">
+                              {docItem.supplier && (
+                                <span>
+                                  Tedarikçi: <strong className="text-slate-800">{docItem.supplier}</strong>
+                                </span>
+                              )}
+                              {docItem.invoiceNumber && (
+                                <span>
+                                  Fatura No: <strong className="font-mono text-slate-800">{docItem.invoiceNumber}</strong>
+                                </span>
+                              )}
+                              {docItem.date && <span>Tarih: {docItem.date}</span>}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Right: Supplier Input, Role Dropdown, Round Dropdown (1..5. Tur), VAT Toggle, Editable Amount & Remove */}
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          {/* Inline Supplier Input for Multi-Supplier TDF Comparison */}
+                          <input
+                            type="text"
+                            list="canonical-vendors-datalist"
+                            placeholder="Tedarikçi Firma..."
+                            value={docItem.supplier || ''}
+                            onChange={(e) => {
+                              const supVal = e.target.value;
+                              const nextDocs = stagedOfferDocs.map(d =>
+                                d.id === docItem.id ? { ...d, supplier: supVal } : d
+                              );
+                              setStagedOfferDocs(nextDocs);
+                              if (docItem.role === 'final_invoice' && supVal.trim()) {
+                                setVendorName(supVal);
+                              }
+                            }}
+                            className="w-36 sm:w-44 py-1.5 px-2.5 bg-white border border-slate-300 rounded-xl text-xs font-semibold text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            title="Bu teklif/fatura belgesine ait tedarikçi firma adı (Çoklu tedarikçi TDF karşılaştırması için)"
+                          />
+
+                          {/* Role Selection Box */}
+                          <select
+                            value={docItem.role}
+                            onChange={(e) => {
+                              const newRole = e.target.value as 'initial_offer' | 'negotiation_round' | 'final_invoice';
+                              const nextDocs = stagedOfferDocs.map(d =>
+                                d.id === docItem.id ? { ...d, role: newRole } : d
+                              );
+                              setStagedOfferDocs(nextDocs);
+                              syncStagedDocsToForm(nextDocs);
+                            }}
+                            className={`py-2 px-3 rounded-xl text-xs font-extrabold border cursor-pointer focus:outline-none focus:ring-2 ${
+                              docItem.role === 'initial_offer'
+                                ? 'bg-white border-slate-300 text-slate-900 focus:ring-slate-500'
+                                : docItem.role === 'negotiation_round'
+                                ? 'bg-indigo-600 text-white border-indigo-700 focus:ring-indigo-500'
+                                : 'bg-emerald-600 text-white border-emerald-700 focus:ring-emerald-500'
+                            }`}
+                          >
+                            <option value="initial_offer" className="bg-white text-slate-900">
+                              📄 İlk Teklif Faturası
+                            </option>
+                            <option value="negotiation_round" className="bg-white text-slate-900">
+                              🔄 Ara Pazarlık Faturası
+                            </option>
+                            <option value="final_invoice" className="bg-white text-slate-900">
+                              ✅ Nihai Anlaşılan Fatura
+                            </option>
+                          </select>
+
+                          {/* Round Number Selector (1. Tur .. 5. Tur) shown when Ara Pazarlık is selected */}
+                          {docItem.role === 'negotiation_round' && (
+                            <select
+                              value={docItem.roundNumber}
+                              onChange={(e) => {
+                                const newRound = Number(e.target.value) as 1 | 2 | 3 | 4 | 5;
+                                const nextDocs = stagedOfferDocs.map(d =>
+                                  d.id === docItem.id ? { ...d, roundNumber: newRound } : d
+                                );
+                                setStagedOfferDocs(nextDocs);
+                                syncStagedDocsToForm(nextDocs);
+                              }}
+                              className="py-2 px-3 rounded-xl text-xs font-black bg-amber-50 border-2 border-amber-400 text-amber-950 cursor-pointer focus:outline-none focus:ring-2 focus:ring-amber-500"
+                            >
+                              <option value={1}>1. Tur Faturası</option>
+                              <option value={2}>2. Tur Faturası</option>
+                              <option value={3}>3. Tur Faturası</option>
+                              <option value={4}>4. Tur Faturası</option>
+                              <option value={5}>5. Tur Faturası</option>
+                            </select>
+                          )}
+
+                          {/* KDV (NDS) Normalization Toggle Button */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextVat = docItem.isVatIncluded === false ? true : false;
+                              const nextDocs = stagedOfferDocs.map(d =>
+                                d.id === docItem.id ? { ...d, isVatIncluded: nextVat } : d
+                              );
+                              setStagedOfferDocs(nextDocs);
+                              syncStagedDocsToForm(nextDocs);
+                            }}
+                            className={`px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold border transition-colors cursor-pointer ${
+                              docItem.isVatIncluded === false
+                                ? 'bg-amber-100 text-amber-950 border-amber-400'
+                                : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
+                            }`}
+                            title="TDF KDV (NDS) Normalizasyonu: Teklif KDV Hariç (Без НДС) ise tıklayın, sistem +%20 KDV ekleyerek eşit bazda kıyaslar"
+                          >
+                            {docItem.isVatIncluded === false ? '⚡ KDV Hariç (+%20 НДС Eklendi)' : '✓ KDV Dahil (С НДС)'}
+                          </button>
+
+                          {/* Amount Input (auto-filled by AI or manually editable) */}
+                          <div className="relative w-36 sm:w-40">
+                            <input
+                              type="number"
+                              step="0.01"
+                              placeholder="Tutar (₽)"
+                              value={docItem.totalAmount || ''}
+                              onChange={(e) => {
+                                const val = Number(e.target.value) || 0;
+                                const nextDocs = stagedOfferDocs.map(d =>
+                                  d.id === docItem.id ? { ...d, totalAmount: val, status: val > 0 ? 'analyzed' as const : d.status } : d
+                                );
+                                setStagedOfferDocs(nextDocs);
+                                syncStagedDocsToForm(nextDocs);
+                              }}
+                              className="w-full py-1.5 pl-3 pr-7 bg-white border border-slate-300 rounded-xl font-mono font-extrabold text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            />
+                            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">
+                              ₽
+                            </span>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextDocs = stagedOfferDocs.filter(d => d.id !== docItem.id);
+                              setStagedOfferDocs(nextDocs);
+                              syncStagedDocsToForm(nextDocs);
+                            }}
+                            className="p-2 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                            title="Belgeyi Kaldır"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Big Action Button: ANALİZİ BAŞLAT */}
+                <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-100">
+                  <p className="text-xs text-slate-500">
+                    <strong>İpucu:</strong> Belgeleri yükledikten sonra <strong>Analizi Başlat</strong> butonuna basın; yapay zeka tüm faturaları okuyup KDV/birim dönüşümüyle pazarlık şemasını çıkarır.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleStartMultiDocAnalysis}
+                    disabled={isMultiScanning || stagedOfferDocs.length === 0}
+                    className="w-full sm:w-auto px-6 py-3 rounded-xl bg-gradient-to-r from-indigo-600 via-indigo-700 to-purple-700 hover:from-indigo-700 hover:to-purple-800 text-white font-black text-xs sm:text-sm shadow-lg shadow-indigo-600/20 flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-60"
+                  >
+                    {isMultiScanning ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin text-amber-300" />
+                        <span>Faturalar Taranıyor ve TDF Pazarlık Akışı Hesaplanıyor...</span>
+                      </>
                     ) : (
-                      `Kalem Sayısı Farkı: İlk teklifte ${firstOfferItemCount} kalem varken son faturada ${extractedItems.length} kalem tespit edildi (${Math.abs(firstOfferItemCount - extractedItems.length)} kalem ${extractedItems.length < firstOfferItemCount ? 'eksik / sepetten çıkarılmış olabilir' : 'ilave edilmiş'}).`
+                      <>
+                        <Sparkles className="w-5 h-5 text-amber-300" />
+                        <span>🚀 Analizi Başlat ve TDF Pazarlık Şemasını Çıkar ({stagedOfferDocs.length} Belge)</span>
+                      </>
                     )}
-                  </span>
+                  </button>
                 </div>
-                {firstOfferItemCount !== extractedItems.length && (
-                  <span className="text-[10px] font-bold bg-amber-200 text-amber-900 px-2 py-0.5 rounded shrink-0 ml-2">
-                    Kapsamı Kontrol Edin
-                  </span>
-                )}
               </div>
             )}
 
-              {/* Scope Deduction Panel (Sepetten Çıkarılan / İptal Edilen Kalemler) */}
-              <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-1.5 text-xs font-bold text-amber-900">
-                    <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
-                    <span>Kapsam Düşümü / Sepetten Çıkarılan Kalemler (Opsiyonel)</span>
+            {/* SCHEMATIC NEGOTIATION & TDF CANONICAL MATRIX DIAGRAM */}
+            {schematicAnalysis && schematicAnalysis.steps.length >= 1 && (
+              <div className="bg-slate-900 text-white rounded-3xl p-5 sm:p-6 border border-slate-800 shadow-xl space-y-5">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-black uppercase">
+                        Canlı Şematik Pazarlık & TDF Özeti
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-400/30 text-[10px] font-mono font-black">
+                        TDF Kodu: {schematicAnalysis.analysisCode}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-[10px] font-bold">
+                        {schematicAnalysis.uniqueVendorsCount} Tedarikçi • {schematicAnalysis.steps.length} Aşama
+                      </span>
+                      {schematicAnalysis.initialDocs.length > 1 && (
+                        <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-black">
+                          ★ {schematicAnalysis.initialDocs.length} İlk Tekliften En Düşüğü (Dip Fiyat) Baz Alındı
+                        </span>
+                      )}
+                      {schematicAnalysis.unitConversionsCount > 0 && (
+                        <span className="px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-400/30 text-[10px] font-bold">
+                          🔄 {schematicAnalysis.unitConversionsCount} Kalemde Birim Dönüşümü (Ton/Metre/Adet)
+                        </span>
+                      )}
+                      {schematicAnalysis.vatNormalizedDocsCount > 0 && (
+                        <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/30 text-[10px] font-bold">
+                          ⚡ {schematicAnalysis.vatNormalizedDocsCount} Belgede +%20 KDV (NDS) Eklendi
+                        </span>
+                      )}
+                    </div>
+                    <h4 className="text-base sm:text-lg font-black text-white mt-1.5">
+                      İlk Tekliften Nihai Faturaya Adım Adım Pazarlık Merdiveni ve TDF Kalem Kıyaslaması
+                    </h4>
                   </div>
-                  {numScopeDeduction > 0 && (
-                    <span className="text-[10px] font-bold bg-amber-200 text-amber-900 px-2 py-0.5 rounded">
-                      Düzeltilmiş Teklif: {formatRuble(numAdjustedOffer)}
+
+                  <div className="bg-emerald-950/90 border-2 border-emerald-500/50 px-4 py-2.5 rounded-2xl flex items-center space-x-4 shrink-0">
+                    <div>
+                      <span className="text-[10px] font-bold uppercase text-emerald-300 block">
+                        Toplam Kazanılan Net İndirim
+                      </span>
+                      <span className="text-xl font-black font-mono text-emerald-400">
+                        +{formatRuble(schematicAnalysis.totalNetDiscount)}
+                      </span>
+                    </div>
+                    <span className="px-2.5 py-1 rounded-xl bg-amber-400 text-slate-950 font-mono font-black text-xs">
+                      %{schematicAnalysis.totalNetDiscountPct}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Above Best Offer Warning Banner (En İyi Teklif Üstü Alım Uyarısı) */}
+                {schematicAnalysis.isAboveBestOfferCount > 0 && (
+                  <div className="p-3.5 rounded-2xl bg-rose-950/90 border border-rose-500/60 text-rose-100 flex items-start space-x-3 text-xs">
+                    <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-black text-rose-300 uppercase block">
+                        ⚠️ TDF Denetim Uyarısı: {schematicAnalysis.isAboveBestOfferCount} Kalemde En İyi İlk Teklif Üstü Alım Tespit Edildi!
+                      </span>
+                      <span className="text-rose-200/90">
+                        Aşağıdaki kanonik kalem tablosunda bazı kalemlerin nihai birim fiyatı, ilk teklif havuzundaki en düşük birim fiyatın üzerindedir. Lütfen birim/kalite farkını kontrol edin.
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* If multiple initial offers exist, show comparison pills */}
+                {schematicAnalysis.initialDocs.length > 1 && (
+                  <div className="bg-slate-950/80 p-3.5 rounded-2xl border border-slate-800 space-y-2">
+                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+                      Yüklenen İlk Teklifler Havuzu (TDF Kuralı: En Düşük İlk Teklif Baz Alındı):
+                    </span>
+                    <div className="flex flex-wrap gap-2">
+                      {schematicAnalysis.initialDocs.map((initDoc, iIdx) => {
+                        const isLowest = initDoc.id === schematicAnalysis.baselineDoc?.id;
+                        return (
+                          <div
+                            key={initDoc.id}
+                            className={`px-3 py-2 rounded-xl border text-xs flex items-center space-x-2 ${
+                              isLowest
+                                ? 'bg-amber-500/15 border-amber-400 text-amber-200 font-bold'
+                                : 'bg-slate-900 border-slate-800 text-slate-400'
+                            }`}
+                          >
+                            <span>{initDoc.supplier || `İlk Teklif #${iIdx + 1}`} ({initDoc.fileName}):</span>
+                            <span className="font-mono font-black text-white">{formatRuble(initDoc.totalAmount)}</span>
+                            {initDoc.isVatIncluded === false && (
+                              <span className="text-[10px] text-amber-300">(+%20 НДС Dahil)</span>
+                            )}
+                            {isLowest && (
+                              <span className="bg-amber-400 text-slate-950 text-[10px] font-black px-1.5 py-0.5 rounded">
+                                DIP FİYAT BAZ ALINDI
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Visual Schematic Cards (İlk Teklif -> 1. Tur -> 2. Tur -> Nihai Fatura) */}
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3.5">
+                  {schematicAnalysis.steps.map((step, sIdx) => (
+                    <div
+                      key={step.id}
+                      className={`p-4 rounded-2xl border relative flex flex-col justify-between space-y-3 ${
+                        step.stageType === 'initial'
+                          ? 'bg-slate-950 border-slate-700'
+                          : step.stageType === 'round'
+                          ? 'bg-indigo-950/60 border-indigo-500/40'
+                          : 'bg-emerald-950/70 border-2 border-emerald-500/60'
+                      }`}
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className={`text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full ${
+                              step.stageType === 'initial'
+                                ? 'bg-slate-800 text-slate-200 border border-slate-600'
+                                : step.stageType === 'round'
+                                ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-400/30'
+                                : 'bg-emerald-500 text-slate-950'
+                            }`}
+                          >
+                            {step.badgeLabel}
+                          </span>
+                          <span className="text-[11px] font-mono text-slate-400">#{sIdx + 1}</span>
+                        </div>
+                        <p className="text-xs font-bold text-slate-200 truncate" title={step.fileName}>
+                          {step.fileName}
+                        </p>
+                        {step.supplier && (
+                          <p className="text-[11px] text-indigo-300 font-semibold truncate">
+                            🏢 {step.supplier}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="space-y-1 pt-2 border-t border-slate-800/80">
+                        {step.stageType !== 'initial' && (
+                          <div className="flex items-center justify-between text-[11px] text-slate-400">
+                            <span>Önceki Tutar:</span>
+                            <span className="font-mono line-through">{formatRuble(step.previousAmount)}</span>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-slate-300 font-semibold">
+                            {step.stageType === 'initial' ? 'Baz Teklif Tutarı:' : 'Yeni Tutar:'}
+                          </span>
+                          <span
+                            className={`text-base font-mono font-black ${
+                              step.stageType === 'initial'
+                                ? 'text-white'
+                                : step.stageType === 'round'
+                                ? 'text-indigo-300'
+                                : 'text-emerald-400'
+                            }`}
+                          >
+                            {formatRuble(step.amount)}
+                          </span>
+                        </div>
+
+                        {step.stageType !== 'initial' && (
+                          <div className="flex items-center justify-between pt-1">
+                            <span className="text-[10px] text-emerald-300 font-bold">
+                              Bu Adımda Düşüş:
+                            </span>
+                            <span className="text-xs font-mono font-black text-emerald-400">
+                              -{formatRuble(step.stepDropAmount)} (%{step.stepDropPct})
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* TDF Canonical Item, Unit Conversion & Multi-Supplier Unit Price Evolution Table */}
+                {schematicAnalysis.itemEvolution.length > 0 && (
+                  <div className="bg-slate-950/90 rounded-2xl border border-slate-800 overflow-hidden">
+                    <div className="px-4 py-2.5 bg-slate-900 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-extrabold text-slate-200 flex items-center space-x-2">
+                        <span>📋 TDF Kanonik Kalem, Birim Dönüşümü & Birim Fiyat Matrisi ({schematicAnalysis.itemEvolution.length} Kalem)</span>
+                      </span>
+                      <span className="text-[11px] text-slate-400">
+                        En Düşük İlk Teklif (Dip Fiyat) → 1..5. Tur → Nihai Fatura (KDV & Birim Normalize)
+                      </span>
+                    </div>
+                    <div className="overflow-x-auto max-h-72">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-800 text-[10px] text-slate-400 uppercase">
+                            <th className="py-2 px-3">Kanonik Malzeme & Teknik Özellik</th>
+                            <th className="py-2 px-3 text-right">Miktar & Birim</th>
+                            <th className="py-2 px-3 text-right">En Düşük İlk Teklif (Dip Baz)</th>
+                            {schematicAnalysis.roundDocs.map((rd, rIdx) => (
+                              <th key={rd.id} className="py-2 px-3 text-right text-indigo-300">
+                                {rd.roundNumber || rIdx + 1}. Tur Birim Fiyat
+                              </th>
+                            ))}
+                            <th className="py-2 px-3 text-right text-emerald-400">Nihai Birim Fiyat</th>
+                            <th className="py-2 px-3 text-right text-amber-300">Kalem Net Tasarruf / Durum</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/60">
+                          {schematicAnalysis.itemEvolution.map((row, rIdx) => (
+                            <tr key={rIdx} className={`hover:bg-slate-900/50 ${row.isAboveBestOffer ? 'bg-rose-950/30' : ''}`}>
+                              <td className="py-2 px-3 font-medium text-slate-200">
+                                <div>{row.materialName}</div>
+                                <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                                  {row.specsSummary && (
+                                    <span className="text-[10px] font-mono bg-slate-800 text-indigo-300 px-1.5 py-0.2 rounded border border-slate-700">
+                                      {row.specsSummary}
+                                    </span>
+                                  )}
+                                  {row.conversionFormula && (
+                                    <span className="text-[10px] font-bold bg-purple-500/20 text-purple-300 px-1.5 py-0.2 rounded border border-purple-500/30" title={row.conversionFormula}>
+                                      🔄 {row.conversionFormula}
+                                    </span>
+                                  )}
+                                  {row.vatAdjusted && (
+                                    <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded border border-amber-500/30">
+                                      +%20 KDV Normalize
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="py-2 px-3 text-right font-mono text-slate-300">
+                                {row.quantity} {row.unit}
+                              </td>
+                              <td className="py-2 px-3 text-right font-mono text-slate-300">
+                                <div>{formatRuble(row.initialUnitPrice)}</div>
+                                {row.marketReferenceSupplier && (
+                                  <div className="text-[10px] text-slate-400 font-sans truncate max-w-[140px] ml-auto">
+                                    {row.marketReferenceSupplier}
+                                  </div>
+                                )}
+                              </td>
+                              {schematicAnalysis.roundDocs.map((rd, idx2) => {
+                                const matchUp = row.roundUnitPrices[idx2]?.unitPrice;
+                                return (
+                                  <td key={rd.id} className="py-2 px-3 text-right font-mono font-bold text-indigo-300">
+                                    {matchUp ? formatRuble(matchUp) : '-'}
+                                  </td>
+                                );
+                              })}
+                              <td className="py-2 px-3 text-right font-mono font-extrabold text-emerald-400">
+                                {formatRuble(row.finalUnitPrice)}
+                              </td>
+                              <td className="py-2 px-3 text-right font-mono font-bold">
+                                {row.isAboveBestOffer ? (
+                                  <span className="text-rose-400 font-black">
+                                    ⚠️ +{formatRuble(row.aboveBestOfferDiff || 0)}/br (En İyi Teklif Üstü)
+                                  </span>
+                                ) : row.totalItemSaving > 0 ? (
+                                  <span className="text-amber-300">+{formatRuble(row.totalItemSaving)}</span>
+                                ) : (
+                                  <span className="text-slate-400">0,00 ₽</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Direct 1-Click Save Action inside Schematic Negotiation Summary */}
+                <div className="pt-3 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="text-xs text-slate-300">
+                    <span>TDF Kodu: <strong className="font-mono text-indigo-300">{schematicAnalysis.analysisCode}</strong></span>
+                    <span className="mx-2 text-slate-500">•</span>
+                    <span>Baz İlk Teklif: <strong className="font-mono text-white">{formatRuble(schematicAnalysis.effectiveBaseline)}</strong></span>
+                    <span className="mx-2 text-slate-500">➔</span>
+                    <span>Nihai Anlaşılan: <strong className="font-mono text-emerald-400">{formatRuble(schematicAnalysis.finalAmount)}</strong></span>
+                    <span className="mx-2 text-slate-500">•</span>
+                    <span>Net Kazanç: <strong className="font-mono text-amber-300">+{formatRuble(schematicAnalysis.totalNetDiscount)} (%{schematicAnalysis.totalNetDiscountPct})</strong></span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isProcessingAI}
+                    onClick={() => executeSaveDiscount(false)}
+                    className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-slate-950 font-black text-xs sm:text-sm shadow-lg shadow-emerald-500/20 flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-60"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>✅ Pazarlık Şemasını ve TDF İndirimini Kaydet</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Quick Summary Inputs (Offer Price & Final Agreed Price - auto-filled or manually adjustable) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Baz Alınan İlk Teklif Fiyatı (₽) *
+                  </label>
+                  {firstOfferFile && (
+                    <span className="text-[10px] font-bold text-slate-600 bg-white px-2 py-0.5 rounded border border-slate-200 truncate max-w-[180px]">
+                      📄 {firstOfferFile.name}
                     </span>
                   )}
                 </div>
-                <p className="text-[11px] text-amber-800 leading-snug">
-                  İlk teklifte yer alan ancak son faturada alımdan vazgeçilip sepetten çıkarılan ürün varsa tutarını girin. Gerçek net indiriminiz doğru hesaplansın.
-                </p>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
-                  <div>
-                    <label className="block text-[10px] font-bold text-amber-900 mb-0.5">Çıkarılan Kalem Tutarı (₽)</label>
-                    <input
-                      type="number"
-                      placeholder="0.00"
-                      value={scopeDeductionAmount}
-                      onChange={(e) => setScopeDeductionAmount(e.target.value)}
-                      className="w-full py-1.5 px-2.5 bg-white border border-amber-300 rounded-lg text-amber-950 font-bold text-xs focus:ring-2 focus:ring-amber-500"
-                    />
-                  </div>
-                  <div className="sm:col-span-2">
-                    <label className="block text-[10px] font-bold text-amber-900 mb-0.5">Çıkarılma Nedeni / Malzeme Adı</label>
-                    <input
-                      type="text"
-                      placeholder="Örn: 17.939,86 ₽ değerindeki çay kalemi son faturada sepetten çıkarıldı"
-                      value={scopeDeductionReason}
-                      onChange={(e) => setScopeDeductionReason(e.target.value)}
-                      className="w-full py-1.5 px-2.5 bg-white border border-amber-300 rounded-lg text-slate-800 text-xs focus:ring-2 focus:ring-amber-500"
-                    />
-                  </div>
-                </div>
+                <input
+                  type="number"
+                  step="0.01"
+                  placeholder="675547.14"
+                  value={offerPrice}
+                  onChange={(e) => setOfferPrice(e.target.value)}
+                  className="w-full py-2.5 px-3 bg-white border border-slate-300 rounded-xl font-mono font-bold text-slate-900 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
               </div>
 
-            {/* Live Comparison Result Card */}
-            <div className="bg-gradient-to-r from-slate-900 to-indigo-950 text-white p-5 rounded-2xl border border-slate-800 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="space-y-1">
-                <span className="text-[10px] font-bold uppercase text-amber-400 tracking-wider flex items-center space-x-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Firestore Veritabanı Otomatik Arşivleme Aktif</span>
-                </span>
-                <p className="text-sm font-extrabold text-slate-100">
-                  {vendorName ? `${vendorName}` : t('formTitle')}
-                </p>
-                <p className="text-xs text-slate-300">
-                  {numScopeDeduction > 0
-                    ? `Kapsam Düşümü Aktif: ${formatRuble(numOffer)} - ${formatRuble(numScopeDeduction)} = ${formatRuble(numAdjustedOffer)} düzeltilmiş teklif üzerinden net indirim hesaplandı.`
-                    : 'Tüm teklifler ve fatura belgeleri Firestore veritabanına ve sunucuya yüksek güvenlikli olarak kaydedilir.'}
-                </p>
-              </div>
-
-              <div className="flex items-center space-x-4 bg-slate-800/80 p-3 rounded-xl border border-slate-700 shrink-0">
-                <div className="text-right">
-                  <span className="text-[10px] text-slate-400 block font-medium">{t('netSavedDiscount')}</span>
-                  <span className="text-xl font-black text-emerald-400 font-mono">
-                    +{formatRuble(currentFormDiscount)}
-                  </span>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-bold text-emerald-800">
+                    Nihai Anlaşılan Fatura Tutarı (₽) *
+                  </label>
+                  {finalOfferFile && (
+                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 truncate max-w-[180px]">
+                      ✅ {finalOfferFile.name}
+                    </span>
+                  )}
                 </div>
-                <div className="pl-3 border-l border-slate-700 text-center">
-                  <span className="text-[10px] text-slate-400 block font-medium">{t('discountRatio')}</span>
-                  <span className="text-base font-black text-amber-300 font-mono">
-                    %{currentFormPercentage}
+                <input
+                  type="number"
+                  step="0.01"
+                  placeholder="672190.50"
+                  value={agreedPrice}
+                  onChange={(e) => handleAgreedPriceChange(e.target.value)}
+                  className="w-full py-2.5 px-3 bg-white border border-emerald-300 rounded-xl font-mono font-extrabold text-emerald-700 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            {/* Scope Deduction Panel (Sepetten Çıkarılan / İptal Edilen Kalemler) */}
+            <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-1.5 text-xs font-bold text-amber-900">
+                  <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>Kapsam Düşümü / Sepetten Çıkarılan Kalemler (Opsiyonel)</span>
+                </div>
+                {numScopeDeduction > 0 && (
+                  <span className="text-[10px] font-bold bg-amber-200 text-amber-900 px-2 py-0.5 rounded">
+                    Düzeltilmiş Teklif: {formatRuble(numAdjustedOffer)}
                   </span>
+                )}
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+                <div>
+                  <label className="block text-[10px] font-bold text-amber-900 mb-0.5">Çıkarılan Kalem Tutarı (₽)</label>
+                  <input
+                    type="number"
+                    placeholder="0.00"
+                    value={scopeDeductionAmount}
+                    onChange={(e) => setScopeDeductionAmount(e.target.value)}
+                    className="w-full py-1.5 px-2.5 bg-white border border-amber-300 rounded-lg text-amber-950 font-bold text-xs focus:ring-2 focus:ring-amber-500"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-[10px] font-bold text-amber-900 mb-0.5">Çıkarılma Nedeni / Malzeme Adı</label>
+                  <input
+                    type="text"
+                    placeholder="Örn: İptal edilen kalem tutarı"
+                    value={scopeDeductionReason}
+                    onChange={(e) => setScopeDeductionReason(e.target.value)}
+                    className="w-full py-1.5 px-2.5 bg-white border border-amber-300 rounded-lg text-slate-800 text-xs focus:ring-2 focus:ring-amber-500"
+                  />
                 </div>
               </div>
             </div>
@@ -2830,6 +4431,77 @@ export const DiscountEntryForm: React.FC<Props> = ({
           </div>
         )}
 
+        {/* Minimized AI Review Modal Return Banner */}
+        {aiReviewModal && isAiModalMinimized && (
+          <div className="p-4 rounded-2xl bg-indigo-950 text-white border-2 border-indigo-400 shadow-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div className="flex items-center space-x-3">
+              <Sparkles className="w-6 h-6 text-amber-400 animate-pulse shrink-0" />
+              <div>
+                <h4 className="text-sm font-black text-white">
+                  Taranan Fatura / Teklif Onay Bekliyor: {aiReviewModal.vendorName || 'Tedarikçi'} ({aiReviewModal.invoiceNo || '-'})
+                </h4>
+                <p className="text-xs text-indigo-200">
+                  Kontrollerinizi tamamladıysanız onay ekranını tekrar açıp kaydı tamamlayabilirsiniz.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsAiModalMinimized(false)}
+              className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs shadow-md cursor-pointer shrink-0"
+            >
+              🔍 Kontrol Paneline Dön & Kaydet
+            </button>
+          </div>
+        )}
+
+        {/* Duplicate Warning Banner right above Save Button */}
+        {effectiveDuplicateWarning?.isDuplicate && (
+          <div className="p-4 rounded-2xl bg-rose-50 border-2 border-rose-400 text-rose-950 shadow-sm space-y-3">
+            <div className="flex items-start space-x-3">
+              <ShieldAlert className="w-6 h-6 text-rose-600 shrink-0 mt-0.5" />
+              <div className="flex-1 space-y-1">
+                <h4 className="text-sm font-black text-rose-900 uppercase">
+                  ⚠️ UYARI: BU FATURA SİSTEMDE KAYITLI! (MÜKERRER KAYIT TESPİTİ)
+                </h4>
+                <p className="text-xs font-bold text-rose-800">{effectiveDuplicateWarning.message}</p>
+              </div>
+            </div>
+            <div className="pt-2 border-t border-rose-200 flex items-center justify-end">
+              <label className="flex items-center space-x-2 text-xs font-extrabold text-rose-950 cursor-pointer bg-white px-3.5 py-2 rounded-xl border-2 border-rose-400 shadow-2xs hover:bg-rose-100 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={forceSaveDuplicate}
+                  onChange={(e) => {
+                    setForceSaveDuplicate(e.target.checked);
+                    if (e.target.checked && notification?.type === 'error') setNotification(null);
+                  }}
+                  className="rounded text-rose-600 focus:ring-rose-500 w-4 h-4 cursor-pointer"
+                />
+                <span>Bu faturanın sistemde kayıtlı olduğunu biliyorum, yine de yeni kayıt oluştur</span>
+              </label>
+            </div>
+          </div>
+        )}
+
+        {/* Inline Error / Success Notification right above Save Button */}
+        {notification && (
+          <div
+            className={`p-4 rounded-xl flex items-start space-x-3 border-2 shadow-sm ${
+              notification.type === 'error'
+                ? 'bg-rose-50 text-rose-900 border-rose-300'
+                : 'bg-emerald-50 text-emerald-900 border-emerald-300'
+            }`}
+          >
+            {notification.type === 'error' ? (
+              <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+            ) : (
+              <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+            )}
+            <div className="flex-1 text-xs font-bold">{notification.message}</div>
+          </div>
+        )}
+
         {/* Submit Button */}
         <div className="flex items-center justify-between pt-4 border-t border-slate-200">
           <div className="flex items-center space-x-2 text-xs text-slate-500">
@@ -3213,7 +4885,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
       )}
 
       {/* AI Extracted Data Review & Approval Modal (Exact match to InvoiceScannerAI flow) */}
-      {aiReviewModal && (
+      {aiReviewModal && !isAiModalMinimized && (
         <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto animate-in fade-in duration-200">
           <div className="bg-slate-900 border border-slate-700 rounded-3xl max-w-3xl w-full p-6 sm:p-8 shadow-2xl space-y-6 text-white text-left my-8">
             {/* Modal Header */}
@@ -3233,18 +4905,57 @@ export const DiscountEntryForm: React.FC<Props> = ({
                     </span>
                   </div>
                   <p className="text-xs text-slate-300 mt-0.5">
-                    Yapay zeka faturadaki tüm bilgileri çıkardı. Lütfen kontrol edip onaylayın.
+                    Yapay zeka faturadaki tüm bilgileri çıkardı. Diğer sekmeleri kontrol etmek için pencereyi küçültebilir veya doğrudan kaydedebilirsiniz.
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setAiReviewModal(null)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg cursor-pointer"
-              >
-                <X className="w-6 h-6" />
-              </button>
+              <div className="flex items-center space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAiModalMinimized(true)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 text-xs font-bold cursor-pointer"
+                  title="Diğer sekmeleri kontrol etmek için küçült (Veriler kaybolmaz)"
+                >
+                  🗕 Küçült
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAiReviewModal(null)}
+                  className="text-slate-400 hover:text-white p-1 rounded-lg cursor-pointer"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
             </div>
+
+            {/* Prominent Duplicate Invoice Warning inside AI Review Modal */}
+            {effectiveDuplicateWarning?.isDuplicate && (
+              <div className="p-4 rounded-2xl bg-rose-950/90 border-2 border-rose-500 text-rose-100 shadow-lg space-y-3">
+                <div className="flex items-start space-x-3">
+                  <ShieldAlert className="w-6 h-6 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="flex-1 space-y-1">
+                    <h4 className="text-sm font-black text-rose-300 uppercase">
+                      ⚠️ BU FATURA SİSTEMDE KAYITLI! (MÜKERRER FATURA UYARISI)
+                    </h4>
+                    <p className="text-xs font-bold text-rose-100">{effectiveDuplicateWarning.message}</p>
+                  </div>
+                </div>
+                <div className="pt-2 border-t border-rose-800/80 flex items-center justify-end">
+                  <label className="flex items-center space-x-2 text-xs font-extrabold text-amber-200 cursor-pointer bg-slate-900 px-3.5 py-2 rounded-xl border border-amber-500/50 hover:bg-slate-800 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={forceSaveDuplicate}
+                      onChange={(e) => {
+                        setForceSaveDuplicate(e.target.checked);
+                        if (e.target.checked && notification?.type === 'error') setNotification(null);
+                      }}
+                      className="rounded text-amber-500 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                    />
+                    <span>Bu faturanın sistemde kayıtlı olduğunu biliyorum, yine de yeni kayıt oluştur</span>
+                  </label>
+                </div>
+              </div>
+            )}
 
             {/* Document Meta Banner */}
             <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
@@ -3776,25 +5487,56 @@ export const DiscountEntryForm: React.FC<Props> = ({
                   </div>
                 )}
               </div>
+            {/* Inline Error & Duplicate Confirmation right above the Save button inside Modal */}
+            {notification?.type === 'error' && (
+              <div className="p-4 rounded-xl bg-rose-950/90 text-rose-200 border-2 border-rose-500 flex items-start space-x-3 shadow-md">
+                <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1 text-xs font-bold">{notification.message}</div>
+              </div>
+            )}
+
             {/* Validation Logic and Save Button Area */}
-            <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-3 pt-4 border-t border-slate-800">
-              <button
-                type="button"
-                disabled={isProcessingAI}
-                onClick={() => {
-                  setAiReviewModal(null);
-                  setExtractedItems([]);
-                }}
-                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition-all text-xs disabled:opacity-60"
-              >
-                Vazgeç / Kapat
-              </button>
+            <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3 pt-4 border-t border-slate-800">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isProcessingAI}
+                  onClick={() => setIsAiModalMinimized(true)}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 font-bold transition-all text-xs cursor-pointer"
+                >
+                  🗕 Küçült & Sekmeleri Kontrol Et
+                </button>
+                <button
+                  type="button"
+                  disabled={isProcessingAI}
+                  onClick={() => {
+                    // Transfer extracted fields to main form without losing them
+                    setSupervisorId(aiReviewModal.supervisorId);
+                    setJobsiteId(aiReviewModal.jobsiteId);
+                    setVendorName(aiReviewModal.vendorName);
+                    setCategory(aiReviewModal.category);
+                    if (Number(aiReviewModal.offerPrice) > 0) setOfferPrice(String(aiReviewModal.offerPrice));
+                    if (Number(aiReviewModal.agreedPrice) > 0) setAgreedPrice(String(aiReviewModal.agreedPrice));
+                    setInvoiceNo(aiReviewModal.invoiceNo);
+                    setOrderDate(aiReviewModal.orderDate);
+                    setNotes(aiReviewModal.notes);
+                    if (aiReviewModal.items && aiReviewModal.items.length > 0) {
+                      setExtractedItems(aiReviewModal.items);
+                    }
+                    setAiReviewModal(null);
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold transition-all text-xs cursor-pointer"
+                >
+                  Forma Aktar / Kapat
+                </button>
+              </div>
               
               <button
                   type="button"
                   disabled={isProcessingAI}
                   onClick={async () => {
                     if (isProcessingAI) return;
+                    setNotification(null);
                     const calcOffer = Number(aiReviewModal.offerPrice) || 0;
                     const calcDeduction = Number(aiReviewModal.scopeDeductionAmount) || 0;
                     const calcAdjusted = calcDeduction > 0 ? Math.max(0, calcOffer - calcDeduction) : calcOffer;
@@ -3806,37 +5548,63 @@ export const DiscountEntryForm: React.FC<Props> = ({
                     
                     let calcAgreed = modalAgreed > 0 ? modalAgreed : (lastRoundPrice > 0 ? lastRoundPrice : 0);
 
-                    // STRICT VALIDATION FOR DECREASING PRICES
+                    if (effectiveDuplicateWarning?.isDuplicate && !forceSaveDuplicate) {
+                      setNotification({
+                        type: 'error',
+                        message: '⚠️ BU FATURA SİSTEMDE KAYITLI! Mükerrer kaydı onaylamak için lütfen yukarıdaki "Bu faturanın sistemde kayıtlı olduğunu biliyorum, yine de yeni kayıt oluştur" kutucuğunu işaretleyip tekrar Kaydet butonuna basın.'
+                      });
+                      return;
+                    }
+
+                    // SMART AUTO-SORTING FOR DECREASING PRICES (Prevents false "Fiyat Sıralaması Geçersiz" when 3rd round is lower than agreedPrice)
+                    let sortedModalRounds = [...currentRounds];
+                    let effectiveCalcOffer = calcOffer;
                     if (aiReviewModal.offerType !== 'first') {
-                      let isValidSequence = true;
-                      let prevStep = calcBaseline;
-
-                      for (let i = 0; i < currentRounds.length; i++) {
-                        const rP = Number(currentRounds[i].quotedPrice) || 0;
-                        if (rP <= 0 || rP >= prevStep) {
-                          isValidSequence = false;
-                          break;
-                        }
-                        prevStep = rP;
+                      const allCandidatePrices: number[] = [];
+                      if (calcOffer > 0) allCandidatePrices.push(calcOffer);
+                      if (modalAgreed > 0) allCandidatePrices.push(modalAgreed);
+                      for (const r of currentRounds) {
+                        const rp = Number(r.quotedPrice) || 0;
+                        if (rp > 0) allCandidatePrices.push(rp);
+                        const pp = Number(r.previousPrice) || 0;
+                        if (pp > 0) allCandidatePrices.push(pp);
                       }
 
-                      if (calcAgreed <= 0 || calcAgreed >= prevStep) {
-                        isValidSequence = false;
-                      }
-
-                      if (!isValidSequence) {
-                        setNotification({type: 'error', message: 'Fiyat Sıralaması Geçersiz! Her yeni indirim turundaki teklif/fatura fiyatı bir öncekinden kesinlikle daha DÜŞÜK olmalıdır. Lütfen fiyatları (ilk teklif > ara indirimli teklifler > nihai son fatura) şeklinde güncelleyin. Aynı tutar girilemez.'});
+                      if (allCandidatePrices.length === 0) {
+                        setNotification({type: 'error', message: 'Lütfen anlaşılan son indirimli tutarı girin.'});
                         return;
                       }
-                       
-                       if (calcAgreed <= 0) {
-                         setNotification({type: 'error', message: 'Lütfen anlaşılan son indirimli tutarı girin.'});
-                         return;
-                       }
+
+                      effectiveCalcOffer = Math.max(...allCandidatePrices);
+                      calcAgreed = Math.min(...allCandidatePrices);
+
+                      // Collect all intermediate candidate documents strictly between effectiveCalcOffer and calcAgreed
+                      const midCandidates: NegotiationRound[] = [];
+                      if (modalAgreed > calcAgreed && modalAgreed < effectiveCalcOffer) {
+                        midCandidates.push({
+                          id: `rnd_auto_mid_${Date.now()}`,
+                          roundNumber: 1,
+                          date: aiReviewModal.orderDate || new Date().toISOString().split('T')[0],
+                          vendorName: aiReviewModal.vendorName || 'Tedarikçi Firma',
+                          previousPrice: effectiveCalcOffer,
+                          quotedPrice: modalAgreed,
+                          discountThisRound: Math.max(0, effectiveCalcOffer - modalAgreed),
+                          documentName: aiReviewModal.fileName || '2_Ara_Pazarlik_Faturasi.pdf',
+                          note: `Ara Pazarlık Turu: ${formatRuble(effectiveCalcOffer)} → ${formatRuble(modalAgreed)}`
+                        });
+                      }
+                      for (const r of currentRounds) {
+                        const rp = Number(r.quotedPrice) || 0;
+                        if (rp > calcAgreed && rp < effectiveCalcOffer && !midCandidates.some(m => Math.abs((Number(m.quotedPrice) || 0) - rp) < 0.01)) {
+                          midCandidates.push(r);
+                        }
+                      }
+                      sortedModalRounds = midCandidates
+                        .sort((a, b) => (Number(b.quotedPrice) || 0) - (Number(a.quotedPrice) || 0))
+                        .map((r, idx) => ({ ...r, roundNumber: idx + 1 }));
                     }
 
                     // ALWAYS handle 1st offer step cleanly: transfer data to form and ask for 2nd document
-
                     if (aiReviewModal.offerType === 'first') {
                       setSupervisorId(aiReviewModal.supervisorId);
                       setJobsiteId(aiReviewModal.jobsiteId);
@@ -3865,16 +5633,30 @@ export const DiscountEntryForm: React.FC<Props> = ({
 
                     const selectedSup = activeSupervisors.find(s => s.id === aiReviewModal.supervisorId);
                     const selectedJob = activeJobsites.find(j => j.id === aiReviewModal.jobsiteId);
-                    const calcAmt = Math.max(0, calcBaseline - calcAgreed);
-                    const calcPct = calcBaseline > 0 ? Number(((calcAmt / calcBaseline) * 100).toFixed(2)) : 0;
+                    const maxDed = Math.max(0, effectiveCalcOffer - calcAgreed);
+                    const safeDeduction = calcDeduction > 0 && calcDeduction <= maxDed ? calcDeduction : 0;
+                    const safeAdjusted = safeDeduction > 0 ? Math.max(calcAgreed, effectiveCalcOffer - safeDeduction) : effectiveCalcOffer;
+                    const safeBaseline = safeDeduction > 0 ? safeAdjusted : effectiveCalcOffer;
+                    const calcAmt = Math.max(0, safeBaseline - calcAgreed);
+                    const calcPct = safeBaseline > 0 ? Number(((calcAmt / safeBaseline) * 100).toFixed(2)) : 0;
 
                     const firstDocName = firstOfferFile?.name || '1_Teklif_Gelen_Liste.pdf';
                     const finalDocName = finalOfferFile?.name || aiReviewModal.fileName || '2_Son_Indirimli_Proforma.xlsx';
 
                     try {
                       setIsProcessingAI(true);
-                      const firstUrl = await resolveFileUrl(firstOfferFile, firstDocName);
-                      const finalUrl = await resolveFileUrl(finalOfferFile, finalDocName);
+                      let firstUrl = { url: '', fileId: undefined as string | undefined };
+                      let finalUrl = { url: '', fileId: undefined as string | undefined };
+                      try {
+                        firstUrl = await resolveFileUrl(firstOfferFile, firstDocName);
+                      } catch (e) {
+                        console.warn('firstUrl resolve fallback to inline base64:', e);
+                      }
+                      try {
+                        finalUrl = await resolveFileUrl(finalOfferFile, finalDocName);
+                      } catch (e) {
+                        console.warn('finalUrl resolve fallback to inline base64:', e);
+                      }
 
                       // Build stageDocuments array
                       const generatedStageDocs: StageDocument[] = [];
@@ -3884,24 +5666,21 @@ export const DiscountEntryForm: React.FC<Props> = ({
                         fileName: firstDocName,
                         fileUrl: firstUrl.url,
                         driveFileId: firstUrl.fileId,
-                        amount: calcOffer
+                        amount: effectiveCalcOffer
                       });
 
                       const validRounds: NegotiationRound[] = [];
-                      for (let i = 0; i < currentRounds.length; i++) {
-                        const r = { ...currentRounds[i] };
+                      for (let i = 0; i < sortedModalRounds.length; i++) {
+                        const r = { ...sortedModalRounds[i] };
                         let rUrl = r.documentUrl || '';
-                        let rId: string | undefined = undefined;
                         if (r.documentName && (!rUrl || rUrl.startsWith('data:'))) {
                           const up = await resolveFileUrl({ name: r.documentName, url: rUrl }, r.documentName);
                           rUrl = up.url;
-                          rId = up.fileId;
                         }
                         r.documentUrl = rUrl;
                         const qp = Number(r.quotedPrice) || 0;
-                        // SADECE ara tur belgesi olanlar geçerli ara turdur
-                        const hasDoc = Boolean(r.documentName || rUrl || (r as any).fileName);
-                        if (hasDoc && (qp > 0 ? qp <= calcBaseline : true)) {
+                        const hasDoc = Boolean(r.documentName || rUrl || (r as any).fileName || r.note);
+                        if (hasDoc && qp > calcAgreed && qp <= safeBaseline) {
                           validRounds.push(r);
                         }
                       }
@@ -3949,20 +5728,24 @@ export const DiscountEntryForm: React.FC<Props> = ({
                         vendorName: aiReviewModal.vendorName,
                         isNewVendor: aiReviewModal.isNewVendor,
                         category: aiReviewModal.category,
-                        offerPrice: calcOffer,
-                        scopeDeductionAmount: calcDeduction > 0 ? calcDeduction : undefined,
-                        scopeDeductionReason: calcDeduction > 0 ? (aiReviewModal.scopeDeductionReason ? String(aiReviewModal.scopeDeductionReason).trim() : undefined) : undefined,
-                        adjustedOfferPrice: calcDeduction > 0 ? calcAdjusted : calcOffer,
+                        offerPrice: effectiveCalcOffer,
+                        scopeDeductionAmount: safeDeduction > 0 ? safeDeduction : undefined,
+                        scopeDeductionReason: safeDeduction > 0 ? (aiReviewModal.scopeDeductionReason ? String(aiReviewModal.scopeDeductionReason).trim() : undefined) : undefined,
+                        adjustedOfferPrice: safeDeduction > 0 ? safeAdjusted : effectiveCalcOffer,
                         agreedPrice: calcAgreed,
                         orderDate: aiReviewModal.orderDate,
                         notes: aiReviewModal.notes || (calcDeduction > 0 ? `İlk tekliften ${formatRuble(calcDeduction)} düşülerek net indirim hesaplandı.` : 'Teklif belgeleri karşılaştırılarak otomatik kaydedildi.'),
                         invoiceNo: aiReviewModal.invoiceNo,
                         firstOfferFileName: firstDocName,
                         firstOfferFileUrl: firstUrl.url,
+                        firstOfferFileData: !firstUrl.url && firstOfferFile?.base64 ? firstOfferFile.base64 : undefined,
                         firstOfferDriveFileId: firstUrl.fileId,
                         finalOfferFileName: finalDocName,
                         finalOfferFileUrl: finalUrl.url,
+                        finalOfferFileData: !finalUrl.url && finalOfferFile?.base64 ? finalOfferFile.base64 : undefined,
                         finalOfferDriveFileId: finalUrl.fileId,
+                        forceSave: forceSaveDuplicate,
+                        forceSaveDuplicate: forceSaveDuplicate,
                         items: aiReviewModal.items,
                         negotiationRounds: validRounds.length > 0 ? validRounds : undefined,
                         stageDocuments: generatedStageDocs,
@@ -4002,14 +5785,23 @@ export const DiscountEntryForm: React.FC<Props> = ({
                       setFinalOfferFile(null);
                       setExtractedItems([]);
                       setNegotiationRounds([]);
+                      setDuplicateWarning(null);
+                      setForceSaveDuplicate(false);
 
                       setAiReviewModal(null);
                       onSuccess();
                     } catch (err: any) {
                       console.error('Error saving discount:', err);
+                      const msg = err.message || 'Kayıt sırasında bir hata oluştu.';
+                      if (msg.toLowerCase().includes('kayıtlı') || msg.toLowerCase().includes('mükerrer')) {
+                        setDuplicateWarning({
+                          isDuplicate: true,
+                          message: msg
+                        });
+                      }
                       setNotification({
                         type: 'error',
-                        message: err.message || 'Kayıt sırasında bir hata oluştu.'
+                        message: msg
                       });
                     } finally {
                       setIsProcessingAI(false);

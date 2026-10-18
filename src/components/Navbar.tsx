@@ -124,18 +124,9 @@ export const Navbar: React.FC<NavbarProps> = ({
           label: t('navDiscountEntry'),
           desc: t('subDescDiscountEntry'),
           icon: PlusCircle,
-          badge: t('badgeEntry'),
+          badge: 'İndirim & TDF',
           iconBg: 'bg-amber-500/15 border border-amber-500/30',
           iconColor: 'text-amber-400'
-        },
-        {
-          id: 'comparative-offers',
-          label: t('navComparativeOffers'),
-          desc: t('subDescComparativeOffers'),
-          icon: Scale,
-          badge: t('badgeComparativeOffers'),
-          iconBg: 'bg-indigo-500/20 border border-indigo-500/40',
-          iconColor: 'text-indigo-400'
         },
         {
           id: 'pre-approval-audit',
