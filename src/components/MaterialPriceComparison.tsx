@@ -796,9 +796,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
         const mergedName = data.targetName || manualTarget;
         setSelectedMaterialName(mergedName);
         setExpandedMaterialName(mergedName);
-        if (data.warning) {
-          alert(data.warning);
-        }
+        alert(data.warning ? `${data.message}\n\n⚠️ ${data.warning}` : data.message);
         setShowManualMergeModal(false);
         setManualSource('');
         setManualTarget('');
@@ -927,6 +925,14 @@ export const MaterialPriceComparison: React.FC<Props> = ({
               <span className="text-[10px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200 shrink-0">
                 {mat.unit}
               </span>
+              {mat.catalogLocked && (
+                <span
+                  className="text-[9px] font-extrabold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full border border-emerald-200 shrink-0"
+                  title="Bu malzeme elle birleştirildi. Aynı satırlar yeni faturalarda (OCR veya Prizma) gelince otomatik olarak bu kayda eklenir."
+                >
+                  Elle Birleştirildi
+                </span>
+              )}
               {(mat.hasMultipleUnits || (mat.detectedUnits && mat.detectedUnits.length > 1)) && (
                 <span
                   className="text-[9px] font-extrabold text-purple-800 bg-purple-100 px-2 py-0.5 rounded-full border border-purple-200 flex items-center space-x-1 shrink-0"
