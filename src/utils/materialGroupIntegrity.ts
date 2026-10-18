@@ -1199,9 +1199,11 @@ export function splitGroupBySpec<T>(entries: T[], getText: (e: T) => string, get
     }
   }
 
-  // Kaliteyi ve fiyatı doğrudan belirleyen özellik (marka, ürün serisi/yoğunluk, mikron, mukavemet sınıfı, harç M-sınıfı)
+  // Kaliteyi ve fiyatı doğrudan belirleyen özellik (ürün serisi/yoğunluk, mikron, mukavemet sınıfı, harç M-sınıfı)
   // bir kümede yazılıysa, bu özelliği HİÇ belirtmeyen satır o kümeyle kıyaslanamaz → ayrı kümeye ayrılır.
-  const CRITICAL: Array<keyof SpecSignature> = ['brand', 'series', 'micron', 'strength', 'grade'];
+  // Marka burada yok: farklı markalar getSpecConflicts ile zaten ayrılır, ama markası yazılmamış satır
+  // (ör. 'Эконом' poşet vs Luscan poşet, ölçü/mikron/litre aynı) aynı ürün kabul edilir.
+  const CRITICAL: Array<keyof SpecSignature> = ['series', 'micron', 'strength', 'grade'];
   const unspecMembers: T[] = [];
   const unspecSigs: SpecSignature[] = [];
   for (const c of clusters) {
