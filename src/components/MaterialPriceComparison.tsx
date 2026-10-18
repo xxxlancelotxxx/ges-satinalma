@@ -5,6 +5,7 @@ import {
   DualComparisonLens,
   CrossBrandEquivalentFamily,
   buildMode1AppleToAppleComparisons,
+  getSynchronizedAppleToAppleComparisons,
   buildMode2CrossBrandFamilies,
   findCheaperEquivalentBrandSuggestion,
   isPrizmaHistoryRecord,
@@ -17,7 +18,7 @@ import { materialFingerprint } from '../utils/materialFingerprint';
 import { DateRangeFilterDropdown } from './DateRangeFilterDropdown';
 import { DateFilterState, matchesDateFilter } from '../utils/filterHelpers';
 import { normalizeVendorName, areVendorsEqual, extractCanonicalVendors } from '../utils/vendorNormalizer';
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { MaterialComparison, Jobsite, InvoiceRecord, PurchasingSupervisor } from '../types';
 import { formatRuble, openOriginalFileViewer, formatUploadDate } from '../utils/format';
@@ -94,10 +95,14 @@ interface Props {
   initialMaterialId?: string;
   initialCategory?: string;
   initialSourceFilter?: 'all' | 'prizma_only' | 'local_only';
+  /** Changes on every external navigation so the same target can be opened again. */
+  navRequestSeq?: number;
   onRefreshData?: () => Promise<void>;
   onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => void | Promise<void>;
   onDeleteInvoice?: (id: string) => void | Promise<void>;
 }
+
+const ROWS_PER_GROUP = 25;
 
 export const MaterialPriceComparison: React.FC<Props> = ({
   comparisons,
@@ -108,6 +113,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   initialMaterialId,
   initialCategory,
   initialSourceFilter,
+  navRequestSeq,
   onRefreshData,
   onUpdateInvoice,
   onDeleteInvoice
@@ -117,9 +123,8 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const [selectedMaterialName, setSelectedMaterialName] = useState<string>(
     initialMaterialId || initialMaterialName || comparisons[0]?.materialName || ''
   );
-  const [expandedMaterialName, setExpandedMaterialName] = useState<string | null>(
-    initialMaterialId || initialMaterialName || null
-  );
+  // Detail modal is opened only by the user or by an explicit navigation target (applied below).
+  const [expandedMaterialName, setExpandedMaterialName] = useState<string | null>(null);
 
   const [selectedInvoiceForModal, setSelectedInvoiceForModal] = useState<InvoiceRecord | null>(null);
 
@@ -148,12 +153,16 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const [simCustomQty, setSimCustomQty] = useState<string>('');
   const [mode2SearchTerm, setMode2SearchTerm] = useState<string>('');
 
-  // Sync source filter when navigated from Dashboard
+  // External navigation is a one-shot request: it is applied once, then the user's own
+  // filter changes (or a data refresh) must never bring it back.
+  const navRequestKey = `${navRequestSeq || 0}|${initialMaterialId || ''}|${initialMaterialName || ''}|${initialCategory || ''}`;
+  const appliedNavKeyRef = useRef<string | null>(null);
+
   useEffect(() => {
     if (initialSourceFilter) {
       setPrizmaSourceFilter(initialSourceFilter);
     }
-  }, [initialSourceFilter, initialMaterialName, initialMaterialId]);
+  }, [navRequestKey]);
 
   // AI & Manual Merge States
   const [isAnalyzingAI, setIsAnalyzingAI] = useState<boolean>(false);
@@ -318,6 +327,8 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   // View Mode & Category Accordion Collapsed States
   const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('grouped');
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
+  // Rendering every row of ~2,000 groups at once froze the tab; show the top rows per group first.
+  const [visibleRowsByCategory, setVisibleRowsByCategory] = useState<Record<string, number>>({});
 
   const toggleCategoryCollapse = (catName: string) => {
     setCollapsedCategories(prev => {
@@ -371,8 +382,10 @@ export const MaterialPriceComparison: React.FC<Props> = ({
     }).map(c => ({...c, category: normalizeCategoryName(c.category, c.materialName)}));
   }, [comparisons]);
 
-  // Counts for each source toggle
-  const sourceCounts = useMemo(() => {
+  // Counts for each source toggle. They count the same apple-to-apple groups the list shows
+  // (and the dashboard's "Fiyat Kıyas (N)" button), not raw catalog rows. The two inactive
+  // sources are computed after first paint so opening the tab is not delayed.
+  const rawSourceCounts = useMemo(() => {
     let all = baseComparisons.length;
     let prizma = 0;
     let ges = 0;
@@ -382,6 +395,18 @@ export const MaterialPriceComparison: React.FC<Props> = ({
     });
     return { all, prizma, ges };
   }, [baseComparisons]);
+  const [groupSourceCounts, setGroupSourceCounts] = useState<{ all: number; prizma: number; ges: number } | null>(null);
+  useEffect(() => {
+    setGroupSourceCounts(null);
+    const timer = window.setTimeout(() => {
+      setGroupSourceCounts({
+        all: getSynchronizedAppleToAppleComparisons(comparisons, 'all').length,
+        prizma: getSynchronizedAppleToAppleComparisons(comparisons, 'prizma_only').length,
+        ges: getSynchronizedAppleToAppleComparisons(comparisons, 'local_only').length
+      });
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [comparisons]);
 
   // Source-filtered raw comparisons (also normalizes pack-vs-piece unit outliers)
   const sourceFilteredRawComparisons = useMemo(() => {
@@ -400,6 +425,12 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const validComparisons = useMemo(() => {
     return buildMode1AppleToAppleComparisons(sourceFilteredRawComparisons);
   }, [sourceFilteredRawComparisons]);
+
+  const sourceCounts = {
+    all: prizmaSourceFilter === 'all' ? validComparisons.length : (groupSourceCounts?.all ?? rawSourceCounts.all),
+    prizma: prizmaSourceFilter === 'prizma_only' ? validComparisons.length : (groupSourceCounts?.prizma ?? rawSourceCounts.prizma),
+    ges: prizmaSourceFilter === 'local_only' ? validComparisons.length : (groupSourceCounts?.ges ?? rawSourceCounts.ges)
+  };
 
   // Mode 2 (Cross-Brand Equivalent Economy): Groups identical original technical specs across different brands
   const mode2CrossBrandFamilies = useMemo<CrossBrandEquivalentFamily[]>(() => {
@@ -427,67 +458,69 @@ export const MaterialPriceComparison: React.FC<Props> = ({
     }
   }, [mode2CrossBrandFamilies, simSelectedFamilyId]);
 
-  // Handle external navigation (from Dashboard, Prizma Invoices, Drive, Pre-Approval, etc.)
+  // Handle external navigation (from Dashboard, Prizma Invoices, Drive, Anomalies, etc.)
   // Matches directly against `validComparisons` (Apple-to-Apple Mode 1) so the selected row & modal match 100%!
   useEffect(() => {
-    if (initialCategory && initialCategory.trim() && initialCategory !== 'ALL') {
-      setSelectedCategory(normalizeCategoryName(initialCategory.trim()));
-      if (!initialMaterialName || !initialMaterialName.trim()) {
+    if (appliedNavKeyRef.current !== navRequestKey && validComparisons.length > 0) {
+      appliedNavKeyRef.current = navRequestKey;
+      const q = (initialMaterialName || '').trim();
+      const targetId = (initialMaterialId || '').trim();
+      const cat = (initialCategory || '').trim();
+
+      if (q || targetId) {
+        const lower = q.toLowerCase();
+        let match = targetId ? validComparisons.find(c => c.id === targetId) : undefined;
+
+        if (!match && lower) {
+          match = validComparisons.find(c => c.materialName.toLowerCase() === lower);
+        }
+
+        if (!match && lower) {
+          const candidates = validComparisons.filter(
+            c =>
+              c.materialName.toLowerCase().includes(lower) ||
+              lower.includes(c.materialName.toLowerCase()) ||
+              c.history.some(
+                h =>
+                  (h.originalName && h.originalName.toLowerCase().includes(lower)) ||
+                  ((h as any).materialName && String((h as any).materialName).toLowerCase().includes(lower))
+              )
+          );
+          if (candidates.length > 0) {
+            // Prefer candidates that actually have a price gap and highest totalSpend
+            candidates.sort((a, b) => {
+              if ((b.priceDifferencePercentage > 0 ? 1 : 0) !== (a.priceDifferencePercentage > 0 ? 1 : 0)) {
+                return (b.priceDifferencePercentage > 0 ? 1 : 0) - (a.priceDifferencePercentage > 0 ? 1 : 0);
+              }
+              return (b.totalSpend || 0) - (a.totalSpend || 0);
+            });
+            match = candidates[0];
+          }
+        }
+
+        setSelectedCategory('ALL');
+        if (match) {
+          // Open the target's detail directly; the list itself stays unfiltered.
+          const key = match.id || `${match.materialName}___${match.unit}`;
+          setSearchTerm('');
+          setSelectedMaterialName(key);
+          setExpandedMaterialName(key);
+          setCollapsedCategories(prev => ({
+            ...prev,
+            [match!.category]: false
+          }));
+          setVisibleRowsByCategory(prev => ({ ...prev, [match!.category]: Number.MAX_SAFE_INTEGER }));
+          return;
+        }
+        // No exact group: show the closest results through the (visible, clearable) search box.
+        setSearchTerm(q);
+      } else if (cat && cat !== 'ALL') {
+        setSelectedCategory(normalizeCategoryName(cat));
         setSearchTerm('');
       }
-    } else if (initialMaterialName && initialMaterialName.trim()) {
-      setSelectedCategory('ALL');
     }
 
-    if ((initialMaterialName && initialMaterialName.trim()) || (initialMaterialId && initialMaterialId.trim())) {
-      const q = (initialMaterialName || '').trim();
-      if (q) setSearchTerm(q);
-      const lower = q.toLowerCase();
-
-      // Find in validComparisons (Mode 1 Apple-to-Apple)
-      let match = initialMaterialId
-        ? validComparisons.find(c => c.id === initialMaterialId)
-        : undefined;
-
-      if (!match && lower) {
-        match = validComparisons.find(c => c.materialName.toLowerCase() === lower);
-      }
-
-      if (!match && lower) {
-        const candidates = validComparisons.filter(
-          c =>
-            c.materialName.toLowerCase().includes(lower) ||
-            lower.includes(c.materialName.toLowerCase()) ||
-            c.history.some(
-              h =>
-                (h.originalName && h.originalName.toLowerCase().includes(lower)) ||
-                ((h as any).materialName && String((h as any).materialName).toLowerCase().includes(lower))
-            )
-        );
-        if (candidates.length > 0) {
-          // Prefer candidates that actually have a price gap and highest totalSpend
-          candidates.sort((a, b) => {
-            if ((b.priceDifferencePercentage > 0 ? 1 : 0) !== (a.priceDifferencePercentage > 0 ? 1 : 0)) {
-              return (b.priceDifferencePercentage > 0 ? 1 : 0) - (a.priceDifferencePercentage > 0 ? 1 : 0);
-            }
-            return (b.totalSpend || 0) - (a.totalSpend || 0);
-          });
-          match = candidates[0];
-        }
-      }
-
-      if (match) {
-        const key = match.id || `${match.materialName}___${match.unit}`;
-        setSelectedMaterialName(key);
-        setExpandedMaterialName(key);
-        setCollapsedCategories(prev => ({
-          ...prev,
-          [match!.category]: false
-        }));
-        return;
-      }
-    }
-
+    // Keep a valid row selected after data/source changes, without opening the detail modal.
     if (validComparisons.length > 0) {
       const exists = validComparisons.some(
         c =>
@@ -497,12 +530,10 @@ export const MaterialPriceComparison: React.FC<Props> = ({
       );
       if (!exists || !selectedMaterialName) {
         const firstWithGap = validComparisons.find(c => c.priceDifferencePercentage > 0) || validComparisons[0];
-        const firstKey = firstWithGap.id || `${firstWithGap.materialName}___${firstWithGap.unit}`;
-        setSelectedMaterialName(firstKey);
-        setExpandedMaterialName(firstKey);
+        setSelectedMaterialName(firstWithGap.id || `${firstWithGap.materialName}___${firstWithGap.unit}`);
       }
     }
-  }, [initialMaterialName, initialMaterialId, initialCategory, validComparisons]);
+  }, [navRequestKey, validComparisons]);
 
   const categories = useMemo<string[]>(() => {
     const uniqueCats = Array.from(new Set(validComparisons.map(c => c.category))) as string[];
@@ -653,7 +684,18 @@ export const MaterialPriceComparison: React.FC<Props> = ({
     return Array.from(set).sort();
   }, [validComparisons]);
 
+  // Segment analysis is pure per comparison object; cache it so filtering, counts and
+  // row rendering don't re-run the text analysis for every row on every keystroke.
+  const segmentInfoCache = useMemo(() => new WeakMap<MaterialComparison, ReturnType<typeof computeMaterialSegmentInfo>>(), [validComparisons]);
   const getMaterialSegmentInfo = (c: MaterialComparison) => {
+    let info = segmentInfoCache.get(c);
+    if (!info) {
+      info = computeMaterialSegmentInfo(c);
+      segmentInfoCache.set(c, info);
+    }
+    return info;
+  };
+  function computeMaterialSegmentInfo(c: MaterialComparison) {
     const firstOrig = c.history?.[0]?.originalName || c.materialName;
     const computed = analyzeMaterialSegment(c.materialName, firstOrig, c.category, c.avgUnitPrice);
     return {
@@ -664,7 +706,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
       brand: c.brand || computed.brand,
       comparisonRuleSummary: computed.segmentReason
     };
-  };
+  }
 
   const segmentModeCounts = useMemo(() => {
     let commodityCount = 0;
@@ -719,11 +761,11 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   };
 
   // Filtered & Sorted materials for table
-  const filteredMaterials = validComparisons
-    .filter(c => {
-      const q = searchTerm.trim().toLowerCase();
-      const segInfo = getMaterialSegmentInfo(c);
-      const matchesSearch = !q ||
+  const materialMatchesSearch = (c: MaterialComparison, rawQuery: string) => {
+    const q = rawQuery.trim().toLowerCase();
+    if (!q) return true;
+    const segInfo = getMaterialSegmentInfo(c);
+    return (
         c.materialName.toLowerCase().includes(q) ||
         c.category.toLowerCase().includes(q) ||
         (segInfo.brand && segInfo.brand.toLowerCase().includes(q)) ||
@@ -737,7 +779,14 @@ export const MaterialPriceComparison: React.FC<Props> = ({
             (h.originalName && h.originalName.toLowerCase().includes(q)) ||
             (h.prizmaRequestCode && h.prizmaRequestCode.toLowerCase().includes(q)) ||
             (h.prizmaOrderCode && h.prizmaOrderCode.toLowerCase().includes(q))
-        );
+        )
+    );
+  };
+
+  const filteredMaterials = useMemo(() => validComparisons
+    .filter(c => {
+      const segInfo = getMaterialSegmentInfo(c);
+      const matchesSearch = materialMatchesSearch(c, searchTerm);
 
       const matchesCat = selectedCategory === 'ALL' || c.category === selectedCategory;
       const matchesJob = selectedJobsite === 'ALL' || c.history.some(h => h.jobsiteName === selectedJobsite || h.jobsiteId === selectedJobsite);
@@ -766,7 +815,16 @@ export const MaterialPriceComparison: React.FC<Props> = ({
         return b.totalQuantityPurchased - a.totalQuantityPurchased;
       }
       return a.materialName.localeCompare(b.materialName, 'tr');
+    }), [validComparisons, searchTerm, selectedCategory, selectedJobsite, selectedVendor, selectedSupervisor, prizmaSourceFilter, invoiceNoFilter, dateFilter, onlyWithPriceGap, onlyMultipleUnits, comparisonModeFilter, qualitySegmentFilter, sortBy, segmentInfoCache]);
+
+  const quickPillCounts = useMemo(() => {
+    const terms = ['İnşaat Demiri', 'Ankraj', 'Donatı', 'Kutu Profil', 'Köşebent', 'Çelik Hasır', 'Membran', 'Gazbeton'];
+    const counts: Record<string, number> = {};
+    terms.forEach(term => {
+      counts[term] = validComparisons.filter(c => materialMatchesSearch(c, term)).length;
     });
+    return counts;
+  }, [validComparisons, segmentInfoCache]);
 
   const groupedFilteredMaterials = useMemo(() => {
     const groups: Record<string, MaterialComparison[]> = {};
@@ -2881,15 +2939,15 @@ export const MaterialPriceComparison: React.FC<Props> = ({
           <span>Hızlı Kıyaslama:</span>
         </span>
         {[
-          { label: '🏗️ İnşaat Demiri', term: 'İnşaat Demiri', count: comparisons.filter(c => c.category === 'İnşaat Demiri' && !c.materialName.toLowerCase().includes('hasır')).length },
-          { label: '🔩 Ankraj Sistemleri', term: 'Ankraj', count: comparisons.filter(c => c.category === 'Ankraj Sistemleri' || c.materialName.toLowerCase().includes('ankraj')).length },
-          { label: '⛓️ Donatı Malzemeleri', term: 'Donatı', count: comparisons.filter(c => c.category === 'Donatı Malzemeleri').length },
-          { label: '📦 Kutu Profil & Boru', term: 'Kutu Profil', count: comparisons.filter(c => c.category === 'Çelik Borular' || c.materialName.toLowerCase().includes('kutu profil') || c.materialName.toLowerCase().includes('profil boru')).length },
-          { label: '📐 Köşebent (L-Demir)', term: 'Köşebent', count: comparisons.filter(c => c.materialName.toLowerCase().includes('köşebent')).length },
-          { label: '🕸️ Çelik Hasır', term: 'Çelik Hasır', count: comparisons.filter(c => c.materialName.toLowerCase().includes('hasır')).length },
-          { label: '🛡️ Yalıtım & Membran', term: 'Membran', count: comparisons.filter(c => c.materialName.toLowerCase().includes('membran') || c.materialName.toLowerCase().includes('geotekstil')).length },
-          { label: '🧱 Gazbeton Blok', term: 'Gazbeton', count: comparisons.filter(c => c.materialName.toLowerCase().includes('gazbeton')).length }
-        ].map(pill => {
+          { label: '🏗️ İnşaat Demiri', term: 'İnşaat Demiri' },
+          { label: '🔩 Ankraj Sistemleri', term: 'Ankraj' },
+          { label: '⛓️ Donatı Malzemeleri', term: 'Donatı' },
+          { label: '📦 Kutu Profil & Boru', term: 'Kutu Profil' },
+          { label: '📐 Köşebent (L-Demir)', term: 'Köşebent' },
+          { label: '🕸️ Çelik Hasır', term: 'Çelik Hasır' },
+          { label: '🛡️ Yalıtım & Membran', term: 'Membran' },
+          { label: '🧱 Gazbeton Blok', term: 'Gazbeton' }
+        ].map(p => ({ ...p, count: quickPillCounts[p.term] || 0 })).map(pill => {
           const isActive = searchTerm === pill.term;
           return (
             <button
@@ -3377,9 +3435,18 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-200 text-xs">
-                          {matList.map((mat, index) => renderMaterialRow(mat, index))}
+                          {matList.slice(0, visibleRowsByCategory[catName] || ROWS_PER_GROUP).map((mat, index) => renderMaterialRow(mat, index))}
                         </tbody>
                       </table>
+                      {matList.length > (visibleRowsByCategory[catName] || ROWS_PER_GROUP) && (
+                        <button
+                          type="button"
+                          onClick={() => setVisibleRowsByCategory(prev => ({ ...prev, [catName]: matList.length }))}
+                          className="w-full py-2.5 text-xs font-bold text-indigo-700 hover:text-indigo-900 bg-slate-50 hover:bg-slate-100 border-t border-slate-200 cursor-pointer"
+                        >
+                          Tümünü göster ({matList.length - (visibleRowsByCategory[catName] || ROWS_PER_GROUP)} kalem daha)
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -3428,9 +3495,18 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 text-xs">
-                  {filteredMaterials.map((mat, index) => renderMaterialRow(mat, index))}
+                  {filteredMaterials.slice(0, visibleRowsByCategory['__flat__'] || ROWS_PER_GROUP * 4).map((mat, index) => renderMaterialRow(mat, index))}
                 </tbody>
               </table>
+              {filteredMaterials.length > (visibleRowsByCategory['__flat__'] || ROWS_PER_GROUP * 4) && (
+                <button
+                  type="button"
+                  onClick={() => setVisibleRowsByCategory(prev => ({ ...prev, __flat__: filteredMaterials.length }))}
+                  className="w-full py-2.5 text-xs font-bold text-indigo-700 hover:text-indigo-900 bg-slate-50 hover:bg-slate-100 border-t border-slate-200 cursor-pointer"
+                >
+                  Tümünü göster ({filteredMaterials.length - (visibleRowsByCategory['__flat__'] || ROWS_PER_GROUP * 4)} kalem daha)
+                </button>
+              )}
             </div>
           )}
         </div>

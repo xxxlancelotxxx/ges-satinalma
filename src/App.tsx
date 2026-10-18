@@ -34,6 +34,14 @@ import {
   SupervisorPerformance
 } from './types';
 
+type CompareNavRequest = {
+  materialName: string;
+  materialId: string;
+  category: string;
+  sourceFilter?: 'all' | 'prizma_only' | 'local_only';
+  seq: number;
+};
+
 function AppContent() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<string>('dashboard');
@@ -72,10 +80,17 @@ function AppContent() {
   const [trashDiscounts, setTrashDiscounts] = useState<DiscountRecord[]>([]);
   const [materialComparisons, setMaterialComparisons] = useState<MaterialComparison[]>([]);
   const [performances, setPerformances] = useState<SupervisorPerformance[]>([]);
-  const [targetCompareMaterial, setTargetCompareMaterial] = useState<string>('');
-  const [targetCompareMaterialId, setTargetCompareMaterialId] = useState<string>('');
-  const [targetCompareCategory, setTargetCompareCategory] = useState<string>('');
-  const [targetCompareSourceFilter, setTargetCompareSourceFilter] = useState<'all' | 'prizma_only' | 'local_only'>('local_only');
+  // Malzeme Karşılaştırma'ya başka sekmeden yapılan tek seferlik yönlendirme.
+  // Sekmeye menüden girilince temizlenir; böylece eski bir hedef filtre olarak kalmaz.
+  const [compareNav, setCompareNav] = useState<CompareNavRequest | null>(null);
+  const openMaterialCompare = (nav: Omit<CompareNavRequest, 'seq'>) => {
+    setCompareNav({ ...nav, seq: Date.now() });
+    setActiveTab('material-compare');
+  };
+  const openTab = (tabId: string) => {
+    if (tabId === 'material-compare') setCompareNav(null);
+    setActiveTab(tabId);
+  };
 
   const totalTrashCount = trashInvoices.length + trashDiscounts.length;
 
@@ -619,7 +634,7 @@ function AppContent() {
       {/* Top Navbar */}
       <Navbar
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={openTab}
         onOpenNewDiscountModal={() => setShowQuickDiscountModal(true)}
         onOpenTrashModal={() => setShowTrashModal(true)}
         onOpenBackupModal={user?.role === 'admin' ? () => setShowBackupModal(true) : undefined}
@@ -711,15 +726,14 @@ function AppContent() {
                 personnel={personnel}
                 onOpenNewDiscountModal={() => setShowQuickDiscountModal(true)}
                 onOpenBackupModal={user?.role === 'admin' ? () => setShowBackupModal(true) : undefined}
-                onNavigateToTab={(tabId) => setActiveTab(tabId)}
+                onNavigateToTab={openTab}
                 onNavigateToMaterial={(matName, category, sourceFilter, materialId) => {
-                  setTargetCompareMaterial(matName || '');
-                  setTargetCompareMaterialId(materialId || '');
-                  setTargetCompareCategory(category || '');
-                  if (sourceFilter) {
-                    setTargetCompareSourceFilter(sourceFilter);
-                  }
-                  setActiveTab('material-compare');
+                  openMaterialCompare({
+                    materialName: matName || '',
+                    materialId: materialId || '',
+                    category: category || '',
+                    sourceFilter
+                  });
                 }}
                 onRefreshData={() => loadData(false)}
                 onUpdateInvoice={handleUpdateInvoice}
@@ -761,9 +775,7 @@ function AppContent() {
                 jobsites={jobsites}
                 supervisors={supervisors}
                 onNavigateToMaterial={(matName) => {
-                  setTargetCompareMaterial(matName);
-                  setTargetCompareMaterialId('');
-                  setActiveTab('material-compare');
+                  openMaterialCompare({ materialName: matName, materialId: '', category: '' });
                 }}
                 onUpdateInvoice={handleUpdateInvoice}
                 onDeleteInvoice={handleDeleteInvoice}
@@ -818,10 +830,7 @@ function AppContent() {
                 onUpdateInvoice={handleUpdateInvoice}
                 onDeleteInvoice={handleDeleteInvoice}
                 onNavigateToCompare={(matName) => {
-                  setTargetCompareMaterial(matName);
-                  setTargetCompareMaterialId('');
-                  setTargetCompareSourceFilter('local_only');
-                  setActiveTab('material-compare');
+                  openMaterialCompare({ materialName: matName, materialId: '', category: '', sourceFilter: 'local_only' });
                 }}
                 onNavigateToPrizma={() => setActiveTab('prizma-invoices')}
                 onOpenTrashModal={() => setShowTrashModal(true)}
@@ -832,10 +841,7 @@ function AppContent() {
             {activeTab === 'prizma-invoices' && (
               <PrizmaInvoicesView
                 onNavigateToCompare={(matName) => {
-                  setTargetCompareMaterial(matName);
-                  setTargetCompareMaterialId('');
-                  setTargetCompareSourceFilter('all');
-                  setActiveTab('material-compare');
+                  openMaterialCompare({ materialName: matName, materialId: '', category: '', sourceFilter: 'all' });
                 }}
               />
             )}
@@ -846,10 +852,11 @@ function AppContent() {
                 invoices={invoices}
                 jobsites={jobsites}
                 supervisors={supervisors}
-                initialMaterialName={targetCompareMaterial}
-                initialMaterialId={targetCompareMaterialId}
-                initialCategory={targetCompareCategory}
-                initialSourceFilter={targetCompareSourceFilter}
+                initialMaterialName={compareNav?.materialName}
+                initialMaterialId={compareNav?.materialId}
+                initialCategory={compareNav?.category}
+                initialSourceFilter={compareNav?.sourceFilter}
+                navRequestSeq={compareNav?.seq}
                 onRefreshData={loadData}
                 onUpdateInvoice={handleUpdateInvoice}
                 onDeleteInvoice={handleDeleteInvoice}
