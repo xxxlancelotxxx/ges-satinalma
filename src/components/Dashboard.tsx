@@ -41,7 +41,7 @@ import {
   exportDashboardToExcel,
   exportDashboardToHtml
 } from '../utils/dashboardStats';
-import { verifyProcurementDataIntegrity, getNormalizedProcurementItems } from '../utils/procurementAnalyticsCore';
+import { verifyProcurementDataIntegrity, getDashboardSpendItems, sumSpend, resolveSpendJobsite } from '../utils/procurementAnalyticsCore';
 import {
   ResponsiveContainer,
   AreaChart,
@@ -407,6 +407,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
     };
   }, [anomaliesList]);
 
+  // Tek harcama defteri: KPI, kategori, şantiye, aylık trend, tedarikçi ve Şantiye Bazlı İcmal aynı kalemlerden beslenir.
+  const currentSpendItems = useMemo(() => {
+    return getDashboardSpendItems(currentFilteredInvoices, filter);
+  }, [currentFilteredInvoices, filter]);
+
+  const previousSpendTotal = useMemo(() => {
+    return sumSpend(getDashboardSpendItems(previousFilteredInvoices, filter));
+  }, [previousFilteredInvoices, filter]);
+
   // Chart Data: Category Spending Distribution (synchronized with 28 Canonical Categories & Material Price Comparison)
   const categorySpendingData = useMemo(() => {
     return getCategorySpendingDistribution(currentFilteredInvoices, 50, materialComparisons, filter);
@@ -422,7 +431,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
       jobsites,
       supervisors,
       anomaliesCount: anomaliesList.length,
-      categorySpending: categorySpendingData
+      categorySpending: categorySpendingData,
+      currentSpendTotal: sumSpend(currentSpendItems),
+      previousSpendTotal
     });
   }, [
     currentFilteredInvoices,
@@ -432,18 +443,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
     jobsites,
     supervisors,
     anomaliesList,
-    categorySpendingData
+    categorySpendingData,
+    currentSpendItems,
+    previousSpendTotal
   ]);
 
   // Chart Data: Monthly Spending & Discount Trend
   const monthlyTrendData = useMemo(() => {
-    return getMonthlySpendingTrend(currentFilteredInvoices, currentFilteredDiscounts, 12);
-  }, [currentFilteredInvoices, currentFilteredDiscounts]);
+    return getMonthlySpendingTrend(currentFilteredInvoices, currentFilteredDiscounts, 12, filter);
+  }, [currentFilteredInvoices, currentFilteredDiscounts, filter]);
 
   // Chart Data: Jobsite Spending Distribution
   const jobsiteSpendingData = useMemo(() => {
-    return getJobsiteSpendingDistribution(currentFilteredInvoices, jobsites, 8);
-  }, [currentFilteredInvoices, jobsites]);
+    return getJobsiteSpendingDistribution(currentFilteredInvoices, jobsites, 8, filter);
+  }, [currentFilteredInvoices, jobsites, filter]);
 
   // Key Category Highlights: Dynamic top 4 categories by spending in current view
   const topCategoriesStats = useMemo(() => {
@@ -548,8 +561,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   // Normalized items for active period (ignoring category filter so category drilldown works seamlessly)
   const normalizedPeriodItems = useMemo(() => {
-    const baseFiltered = filterInvoices(effectiveInvoices, { ...filter, selectedCategory: 'ALL' }, currentBounds);
-    return getNormalizedProcurementItems(baseFiltered);
+    const periodFilter = { ...filter, selectedCategory: 'ALL' };
+    const baseFiltered = filterInvoices(effectiveInvoices, periodFilter, currentBounds);
+    return getDashboardSpendItems(baseFiltered, periodFilter);
   }, [effectiveInvoices, filter, currentBounds]);
 
   const activeDrillCategory = useMemo(() => {
@@ -600,9 +614,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         vendorMap.set(vName, { name: vName, rawName: rawVen, totalSpend: it.totalPrice, count: 1 });
       }
 
-      const matchedJobsite = jobsites.find(j => j.id === it.jobsiteId || (it.jobsiteName && j.name.toLowerCase() === it.jobsiteName.toLowerCase()));
-      const sId = matchedJobsite ? matchedJobsite.id : (it.jobsiteId || it.jobsiteName || 'Genel');
-      const sName = matchedJobsite ? matchedJobsite.name : (it.jobsiteName || 'Genel Şantiye');
+      const { id: sId, name: sName } = resolveSpendJobsite(it, jobsites);
       const existingSite = siteMap.get(sId);
       if (existingSite) {
         existingSite.totalSpend += it.totalPrice;
@@ -652,22 +664,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const topVendorsSummary = useMemo(() => {
     const map = new Map<string, { name: string; rawName: string; totalSpend: number; invoiceCount: number; totalDiscount: number; discountCount: number }>();
 
-    currentFilteredInvoices.forEach(inv => {
-      const raw = (inv.supplier || (inv as any).vendorName || 'Bilinmeyen Tedarikçi').trim();
+    const vendorInvoiceIds = new Map<string, Set<string>>();
+    currentSpendItems.forEach(it => {
+      const raw = (it.supplier || 'Bilinmeyen Tedarikçi').trim();
       const norm = normalizeVendorName(raw) || raw;
-      const items = Array.isArray(inv.items) ? inv.items : [];
-      const invSpend = items.length > 0
-        ? items.reduce((s, it) => s + (Number(it.totalPrice) || (Number(it.quantity) || 1) * (Number(it.unitPrice) || 0)), 0)
-        : (Number(inv.totalAmount) || 0);
+      const ids = vendorInvoiceIds.get(norm) || new Set<string>();
+      ids.add(it.invoiceId);
+      vendorInvoiceIds.set(norm, ids);
       const cur = map.get(norm);
       if (cur) {
-        cur.totalSpend += invSpend;
-        cur.invoiceCount += 1;
+        cur.totalSpend += it.totalPrice;
+        cur.invoiceCount = ids.size;
       } else {
         map.set(norm, {
           name: norm,
           rawName: raw,
-          totalSpend: invSpend,
+          totalSpend: it.totalPrice,
           invoiceCount: 1,
           totalDiscount: 0,
           discountCount: 0
@@ -699,7 +711,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     return Array.from(map.values())
       .sort((a, b) => b.totalSpend - a.totalSpend)
       .slice(0, 5);
-  }, [currentFilteredInvoices, currentFilteredDiscounts]);
+  }, [currentSpendItems, currentFilteredDiscounts]);
 
   // Export to Excel Handler
   const handleExportExcel = () => {
@@ -1753,7 +1765,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       {/* Şantiye Genel Harcamaları & Hangi Malzemeye Ne Kadar Harcandı Detay İstihbarat Masası */}
       <SmartDashboardInsights
-        invoices={currentFilteredInvoices}
+        spendItems={currentSpendItems}
         jobsites={jobsites}
         selectedJobsiteId={filter.selectedJobsiteId}
         onNavigateToTab={onNavigateToTab}

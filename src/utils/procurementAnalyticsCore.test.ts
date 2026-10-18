@@ -5,8 +5,13 @@ import {
   getSpecialMaterialAnalyticsData,
   verifyProcurementDataIntegrity,
   isValidProcurementInvoice,
-  SPECIAL_CATEGORY_MAP
+  SPECIAL_CATEGORY_MAP,
+  getDashboardSpendItems,
+  resolveSpendJobsite,
+  sumSpend,
+  UNASSIGNED_JOBSITE_ID
 } from './procurementAnalyticsCore';
+import { calculateKPIStats, getJobsiteSpendingDistribution, getMonthlySpendingTrend, getCategorySpendingDistribution } from './dashboardStats';
 import { InvoiceRecord } from '../types';
 
 console.log('=== RUNNING PROCUREMENT ANALYTICS CORE INTEGRITY TESTS ===');
@@ -134,5 +139,42 @@ const integrity = verifyProcurementDataIntegrity(mockInvoices);
 assert.equal(integrity.isValid, true, 'Integrity check must return isValid = true');
 assert.equal(integrity.discrepancies.length, 0, 'There must be zero discrepancies');
 console.log('✓ Test 5 Passed: verifyProcurementDataIntegrity succeeded with zero discrepancies');
+
+// Test 6: Genel Bakış panelleri tek defterden — net kalemler KDV dahil fatura toplamına ölçeklenir
+const ledgerInvoices: InvoiceRecord[] = [
+  {
+    id: 'inv_vat_1', invoiceNumber: 'V-1', date: '2026-09-10', supplier: 'Beton OOO', jobsiteId: 'site_1', jobsiteName: 'Riva Konutları',
+    totalAmount: 122_000, // KDV dahil
+    items: [
+      { id: 'v1', materialName: 'Бетон B25 W6 F150', category: 'Hazır Beton', quantity: 10, unit: 'm3', unitPrice: 6_000, totalPrice: 60_000 },
+      { id: 'v2', materialName: 'Арматура A500C d12', category: 'İnşaat Demiri', quantity: 1, unit: 'tn', unitPrice: 40_000, totalPrice: 40_000 }
+    ]
+  } as any,
+  {
+    id: 'inv_vat_2', invoiceNumber: 'V-2', date: '2026-09-12', supplier: 'Metal OOO', jobsiteName: 'riva konutları',
+    totalAmount: 24_400,
+    items: [{ id: 'v3', materialName: 'Арматура A500C d16', category: 'İnşaat Demiri', quantity: 1, unit: 'tn', unitPrice: 20_000, totalPrice: 20_000 }]
+  } as any,
+  { id: 'inv_vat_3', invoiceNumber: 'V-3', date: '2026-09-15', supplier: 'Hırdavat OOO', totalAmount: 5_000, items: [] } as any
+];
+const ledgerSites = [{ id: 'site_1', name: 'Riva Konutları', budget: 1_000_000 }];
+const ledger = getDashboardSpendItems(ledgerInvoices);
+assert.equal(sumSpend(ledger), 151_400, 'Defter toplamı = faturaların KDV dahil toplamı');
+const kpi6 = calculateKPIStats({ currentInvoices: ledgerInvoices, currentSpendTotal: sumSpend(ledger), previousSpendTotal: 0 });
+const sites6 = getJobsiteSpendingDistribution(ledgerInvoices, ledgerSites, 8);
+const months6 = getMonthlySpendingTrend(ledgerInvoices.map(i => ({ ...i, date: new Date().toISOString().slice(0, 10) })), [], 12);
+const cats6 = getCategorySpendingDistribution(ledgerInvoices, 50);
+assert.equal(kpi6.totalSpend, 151_400);
+assert.equal(Math.round(sites6.reduce((a: number, r: any) => a + r.spend, 0)), 151_400, 'Şantiye dağılımı toplamı = KPI');
+assert.equal(Math.round(months6.reduce((a: number, r: any) => a + r.spend, 0)), 151_400, 'Aylık trend toplamı = KPI');
+assert.equal(Math.round(cats6.reduce((a: number, r: any) => a + r.spend, 0)), 151_400, 'Kategori toplamı = KPI');
+const riva = sites6.find((r: any) => r.jobsiteId === 'site_1');
+assert.equal(Math.round(riva.spend), 146_400, 'İsimle eşleşen fatura aynı şantiyeye yazılır');
+assert.equal(riva.invoiceCount, 2);
+assert.ok(sites6.some((r: any) => r.jobsiteId === UNASSIGNED_JOBSITE_ID && Math.round(r.spend) === 5_000), 'Şantiyesiz fatura kaybolmaz');
+assert.deepEqual(resolveSpendJobsite({ jobsiteName: 'Merkez', rawInvoice: {} }, ledgerSites), { id: UNASSIGNED_JOBSITE_ID, name: 'Şantiye Belirtilmemiş' });
+const rebarOnly = getDashboardSpendItems(ledgerInvoices, { selectedCategory: 'İnşaat Demiri' });
+assert.equal(Math.round(sumSpend(rebarOnly)), 73_200, 'Kategori filtresinde yalnızca o kategorinin kalemleri sayılır');
+console.log('✓ Test 6 Passed: KPI = kategori = şantiye = aylık trend (KDV dahil fatura toplamı)');
 
 console.log('>>> ALL PROCUREMENT ANALYTICS CORE TESTS PASSED SUCCESSFULLY! <<<');

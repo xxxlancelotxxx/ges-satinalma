@@ -3,7 +3,7 @@ import { formatRuble } from './format';
 import { processItem } from './aiDecisionEngine';
 import { areVendorsEqual } from './vendorNormalizer';
 import { CANONICAL_28_CATEGORIES, normalizeCategoryName, sortCategoriesByPriority } from './categoryClassifier';
-import { getCategorySpendingSummary, verifyProcurementDataIntegrity, isPrizmaAutoSyncedInvoice } from './procurementAnalyticsCore';
+import { getCategorySpendingSummary, verifyProcurementDataIntegrity, isPrizmaAutoSyncedInvoice, getDashboardSpendItems, resolveSpendJobsite, toProcurementFilterOptions } from './procurementAnalyticsCore';
 import { detectSuperIntelligentProcurementAnomalies } from './aiForensicAuditor';
 import { isLowPriorityConsumable } from './lowPriorityConsumables';
 import { getSynchronizedAppleToAppleComparisons } from './dualMaterialComparisonEngine';
@@ -153,13 +153,13 @@ export function calculateKPIStats(params: any): any {
   return bY(params);
 }
 
-export function getMonthlySpendingTrend(invoices: any[] = [], discounts: any[] = [], monthsCount: number = 12): any[] {
-  const list = SY(invoices, discounts, monthsCount);
+export function getMonthlySpendingTrend(invoices: any[] = [], discounts: any[] = [], monthsCount: number = 12, filter?: any): any[] {
+  const list = SY(invoices, discounts, monthsCount, filter);
   return list.map((m: any) => ({ ...m, month: m.monthLabel, spending: m.spend }));
 }
 
-export function getJobsiteSpendingDistribution(invoices: any[] = [], jobsites: any[] = [], limit: number = 8): any[] {
-  return kY(invoices, jobsites, limit);
+export function getJobsiteSpendingDistribution(invoices: any[] = [], jobsites: any[] = [], limit: number = 8, filter?: any): any[] {
+  return kY(invoices, jobsites, limit, filter);
 }
 
 export function getCategorySpendingDistribution(
@@ -438,14 +438,16 @@ function bY(e: any ): any {
   const catTotalSpend = Array.isArray(categorySpending) && categorySpending.length > 0
     ? categorySpending.reduce((acc: number, curr: any) => acc + (Number(curr.spend) || 0), 0)
     : 0;
-  const f = invoiceTotalSum > 0 ? invoiceTotalSum : catTotalSpend;
+  // Toplam Harcama = paylaşılan harcama defteri (kategori/şantiye/aylık panellerle aynı kalemler).
+  const hasLedgerTotal = typeof e.currentSpendTotal === 'number';
+  const f = hasLedgerTotal ? e.currentSpendTotal : (invoiceTotalSum > 0 ? invoiceTotalSum : catTotalSpend);
   const m=c.reduce((F: any,ae: any)=>{const ue=Array.isArray(ae.items)?ae.items.reduce((re: any,Z: any)=>re+(Number(Z.discountAmount)||0),0):0;return F+(Number(ae.discount)||ue||0)},0);
   const p=a.reduce((F: any,ae: any)=>{const ue=Math.max(0,(Number(ae.offerPrice)||0)-(Number(ae.agreedPrice)||0));return F+(Number(ae.discountAmount)||ue||0)},0);
   const h=p>0?p:m;
   const v=a.reduce((F: any,ae: any)=>{const ue=Number(ae.offerPrice)||0,re=Number(ae.agreedPrice)||0,Z=Number(ae.discountAmount)||0;return F+(ue>0?ue:re+Z)},0);
   const N=v>0?v:f+h;
   const y=N>0&&h>0?Number((h/N*100).toFixed(2)):0;
-  const S=i.reduce((F: any,ae: any)=>F+(Number(ae.totalAmount)||0),0);
+  const S=typeof e.previousSpendTotal === 'number' ? e.previousSpendTotal : i.reduce((F: any,ae: any)=>F+(Number(ae.totalAmount)||0),0);
   const T=r.reduce((F: any,ae: any)=>F+(Number(ae.discountAmount)||0),0);
   const k=r.reduce((F: any,ae: any)=>F+(Number(ae.offerPrice)||Number(ae.agreedPrice)+Number(ae.discountAmount)||0),0)||S+T;
   const w=k>0&&T>0?Number((T/k*100).toFixed(2)):0;
@@ -458,23 +460,73 @@ function bY(e: any ): any {
   const K=c.length+a.length;
   return{totalSpend:f,spendChangePercentage:M,totalDiscount:h,discountChangePercentage:D,avgDiscountRate:y,discountRateChangePercentage:E,activeJobsitesCount:L,supervisorsCount:C,anomaliesCount:u,pendingTransactionsCount:B,totalTransactionsCount:K,invoicesCount:c.length,discountsCount:a.length};
 }
-function SY(e: any ,t: any ,a: any =12): any {const i=[],r=new Date;for(let o=a-1;o>=0;o--){const u=new Date(r.getFullYear(),r.getMonth()-o,1),c=u.getFullYear(),f=u.getMonth(),m=`${c}-${String(f+1).padStart(2,"0")}`,p=`${AY[f]} ${c}`;i.push({monthKey:m,monthLabel:p,spend:0,discount:0,netSpend:0,transactionCount:0})}const n=new Map;return i.forEach(o=>n.set(o.monthKey,o)),Array.isArray(e)&&e.forEach(o=>{if(!o.date)return;const u=qN(o.date);if(!u)return;const c=n.get(u);if(c){const f=Number(o.totalAmount)||0;c.spend+=f,c.netSpend+=f,c.transactionCount+=1}}),Array.isArray(t)&&t.forEach(o=>{if(!o.orderDate)return;const u=qN(o.orderDate);if(!u)return;const c=n.get(u);if(c){const f=Number(o.discountAmount)||0;c.discount+=f,c.transactionCount+=1}}),i}
-function kY(e: any ,t: any ,a: any =8): any {const i=new Map;Array.isArray(t)&&t.forEach(h=>{i.set(h.id,{spend:0,count:0,name:h.name})});let r=0;Array.isArray(e)&&e.forEach(h=>{if(h.test||(!h.jobsiteId&&!h.jobsiteName))return;const v=Number(h.totalAmount)||0;r+=v;let N=h.jobsiteId,y=N?i.get(N):null;if(!y&&h.jobsiteName){const found=Array.isArray(t)?t.find(s=>s.name===h.jobsiteName||s.name.toLowerCase()===h.jobsiteName.toLowerCase()):null;if(found){N=found.id;y=i.get(N)}}if(y){y.spend+=v;y.count+=1}else if(h.jobsiteName&&!h.jobsiteName.toLowerCase().includes("bilinmeyen")&&!h.jobsiteName.toLowerCase().includes("belirtilme")){i.set(N||h.jobsiteName,{spend:v,count:1,name:h.jobsiteName})}});const n=new Map;Array.isArray(t)&&t.forEach(h=>{n.set(h.id,Number(h.budget)||0)});const o=Array.from(i.entries()).filter(([h,v])=>v.spend>0).map(([h,v])=>{const N=n.get(h)||0,y=N>0?Number((v.spend/N*100).toFixed(1)):0,b=r>0?Number((v.spend/r*100).toFixed(1)):0;return{jobsiteId:h,jobsiteName:v.name,spend:v.spend,percentage:b,invoiceCount:v.count,budget:N,budgetUsagePercentage:y}}).sort((h,v)=>v.spend-h.spend);if(o.length<=a)return o;const u=o.slice(0,a),c=o.slice(a),f=c.reduce((h,v)=>h+v.spend,0),m=c.reduce((h,v)=>h+v.invoiceCount,0),p=r>0?Number((f/r*100).toFixed(1)):0;return u.push({jobsiteId:"others",jobsiteName:`Diğer Şantiyeler (${c.length})`,spend:f,percentage:p,invoiceCount:m,budget:0,budgetUsagePercentage:0}),u}
+function SY(e: any ,t: any ,a: any =12, filter?: any): any {
+  const months: any[] = [], now = new Date;
+  for (let o = a - 1; o >= 0; o--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - o, 1), y = d.getFullYear(), m = d.getMonth();
+    months.push({ monthKey: `${y}-${String(m + 1).padStart(2, "0")}`, monthLabel: `${AY[m]} ${y}`, spend: 0, discount: 0, netSpend: 0, transactionCount: 0 });
+  }
+  const byKey = new Map(months.map(m => [m.monthKey, m]));
+  const countedInvoices = new Set<string>();
+  getDashboardSpendItems(Array.isArray(e) ? e : [], filter).forEach(it => {
+    const key = qN(it.rawInvoice?.date || it.date);
+    const row = key ? byKey.get(key) : null;
+    if (!row) return;
+    row.spend += it.totalPrice;
+    row.netSpend += it.totalPrice;
+    if (!countedInvoices.has(it.invoiceId)) { countedInvoices.add(it.invoiceId); row.transactionCount += 1; }
+  });
+  Array.isArray(t) && t.forEach((o: any) => {
+    const key = o.orderDate ? qN(o.orderDate) : null;
+    const row = key ? byKey.get(key) : null;
+    if (row) { row.discount += Number(o.discountAmount) || 0; row.transactionCount += 1; }
+  });
+  return months;
+}
+function kY(e: any ,t: any ,a: any =8, filter?: any): any {
+  const jobsites = Array.isArray(t) ? t : [];
+  const sites = new Map<string, { name: string; spend: number; invoiceIds: Set<string> }>();
+  let total = 0;
+  getDashboardSpendItems(Array.isArray(e) ? e : [], filter).forEach(it => {
+    const ref = resolveSpendJobsite(it, jobsites);
+    const row = sites.get(ref.id) || { name: ref.name, spend: 0, invoiceIds: new Set<string>() };
+    row.spend += it.totalPrice;
+    row.invoiceIds.add(it.invoiceId);
+    sites.set(ref.id, row);
+    total += it.totalPrice;
+  });
+  const budgets = new Map(jobsites.map((j: any) => [j.id, Number(j.budget) || 0]));
+  const list = Array.from(sites.entries())
+    .filter(([, v]) => v.spend > 0)
+    .map(([id, v]) => {
+      const budget = budgets.get(id) || 0;
+      return {
+        jobsiteId: id,
+        jobsiteName: v.name,
+        spend: v.spend,
+        percentage: total > 0 ? Number(((v.spend / total) * 100).toFixed(1)) : 0,
+        invoiceCount: v.invoiceIds.size,
+        budget,
+        budgetUsagePercentage: budget > 0 ? Number(((v.spend / budget) * 100).toFixed(1)) : 0
+      };
+    })
+    .sort((x, y) => y.spend - x.spend);
+  // Tek kalan şantiyeyi "Diğer (1)" diye gizleme; adıyla göster.
+  if (list.length <= a + 1) return list;
+  const head = list.slice(0, a), rest = list.slice(a), restSpend = rest.reduce((s, v) => s + v.spend, 0);
+  head.push({
+    jobsiteId: "others",
+    jobsiteName: `Diğer Şantiyeler (${rest.length})`,
+    spend: restSpend,
+    percentage: total > 0 ? Number(((restSpend / total) * 100).toFixed(1)) : 0,
+    invoiceCount: rest.reduce((s, v) => s + v.invoiceCount, 0),
+    budget: 0,
+    budgetUsagePercentage: 0
+  });
+  return head;
+}
 function PY(e: any = [], t: any = 30, _comparisons?: any[], filter?: any): any {
-  const options = filter ? {
-    selectedJobsiteId: filter.selectedJobsiteId,
-    selectedJobsite: filter.selectedJobsite,
-    selectedVendor: filter.selectedVendor,
-    selectedSupervisorId: filter.selectedSupervisorId,
-    selectedSupervisor: filter.selectedSupervisor,
-    selectedCategory: filter.selectedCategory,
-    searchTerm: filter.searchTerm,
-    invoiceNoFilter: filter.invoiceNoFilter || filter.invoiceNo,
-    customStartDate: filter.customStartDate,
-    customEndDate: filter.customEndDate
-  } : undefined;
-
-  const summary = getCategorySpendingSummary(e, options);
+  const summary = getCategorySpendingSummary(e, toProcurementFilterOptions(filter));
   const nonZeroCategories = summary.categoriesList.filter(c => c.spend > 0);
   return t > 0 ? nonZeroCategories.slice(0, t) : nonZeroCategories;
 }
