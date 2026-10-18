@@ -1237,8 +1237,15 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
   const invTotal = Number(inv.totalAmount) || 0;
   const invTax = Number(inv.taxAmount) || 0;
 
-  let excludedFreightNetSum = Number(inv.excludedFreightAmount || pMatch?.excludedFreightAmount) || 0;
-  let excludedFreightGrossSum = Number(inv.excludedFreightGrossAmount || pMatch?.excludedFreightGrossAmount) || 0;
+  // Prizma faturasında nakliye yalnızca belgedeki / STF'deki açık nakliye satırlarından gelir. Fatura kaydında
+  // eskiden "toplam farkı = nakliye" diye yazılmış tutar artık kullanılmaz (bkz. aşağıdaki kalem/toplam kontrolü).
+  const usePrizmaFreightOnly = Boolean(pMatch && String(inv.id || '').startsWith('inv_prizma_'));
+  let excludedFreightNetSum = (usePrizmaFreightOnly
+    ? Number(pMatch?.excludedFreightAmount)
+    : Number(inv.excludedFreightAmount || pMatch?.excludedFreightAmount)) || 0;
+  let excludedFreightGrossSum = (usePrizmaFreightOnly
+    ? Number(pMatch?.excludedFreightGrossAmount)
+    : Number(inv.excludedFreightGrossAmount || pMatch?.excludedFreightGrossAmount)) || 0;
   let trackedFreightRow = false;
 
   const isPrizmaOrigin = Boolean(
@@ -1254,7 +1261,7 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
     if (!it || typeof it !== 'object') return false;
     const itemText = `${it.materialName || ''} ${it.originalName || ''}`;
     if ((rawItems.length > 1 || isPrizmaOrigin) && isFreightOrServiceLineItemServer(itemText, it.unit)) {
-      if (!inv.excludedFreightAmount && !pMatch?.excludedFreightAmount) {
+      if (!excludedFreightNetSum && !excludedFreightGrossSum) {
         trackedFreightRow = true;
         const fQty = Number(it.quantity) || 1;
         const fRawPrice = Number(it.grossUnitPrice || it.unitPrice) || 0;
@@ -1297,7 +1304,7 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
   const storedNormItems = effectiveRawItems.filter((x: any) => x?.isNetNormalized && Number(x?.unitPriceNet) > 0 && Number(x?.grossUnitPrice) > 0);
   const storedNetSum = storedNormItems.reduce((s: number, x: any) => s + Number(x.unitPriceNet) * (Number(x?.quantity) || 1), 0);
   const storedGrossSum = storedNormItems.reduce((s: number, x: any) => s + Number(x.grossUnitPrice) * (Number(x?.quantity) || 1), 0);
-  const storedFreightGross = Number(inv.excludedFreightGrossAmount || pMatch?.excludedFreightGrossAmount) || 0;
+  const storedFreightGross = excludedFreightGrossSum;
   const matchesInvoiceTotal = (sum: number) =>
     invTotal > 0 && sum > 0 && (
       Math.abs(sum - invTotal) / invTotal <= 0.015 ||
@@ -1380,8 +1387,10 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
       }
     }
 
-    const netTotalPrice = Number((unitPriceNet * qty).toFixed(2));
-    const grossTotalPrice = Number((grossUnitPrice * qty).toFixed(2));
+    // Fatura belgesinden okunan satırda tutarlar belgedeki gibi kalır (yuvarlanmış birim fiyat × miktar kuruş kaydırır)
+    const isDocumentLine = it.lineSource === 'invoice_pdf' && Number(it.totalPrice) > 0 && Number(it.grossTotalPrice) > 0;
+    const netTotalPrice = isDocumentLine ? Number(it.totalPrice) : Number((unitPriceNet * qty).toFixed(2));
+    const grossTotalPrice = isDocumentLine ? Number(it.grossTotalPrice) : Number((grossUnitPrice * qty).toFixed(2));
 
     return {
       ...it,
@@ -1412,22 +1421,27 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
   const matGrossSubtotal = normItems.reduce((s: number, x: any) => s + (Number(x?.grossTotalPrice) || 0), 0);
   // KDV dahil kalem toplamı (+ açık nakliye satırı) fatura toplamını tutuyorsa net/brüt ayrımı kesindir;
   // böyle kalemler faturalar arası "1,20x / 1,22x oran" tahminleriyle bir daha değiştirilmez.
+  // Prizma fiyatı (STF "price" / fatura belgesi) KDV dahil olarak gelir; kalemler eksik/fazla olsa bile fiyat
+  // tabanı bellidir. Toplam farkı önceki sürümde nakliye sayılan aralıktaysa (0–%35) fiyatlar oran tahminine sokulmaz.
+  const prizmaGapGross = invTotal - matGrossSubtotal - excludedFreightGrossSum;
+  const prizmaPriceBasisKnown = isPrizmaOrigin && invTotal > 0 &&
+    prizmaGapGross >= -invTotal * 0.015 && prizmaGapGross <= invTotal * 0.35;
   const vatBasisVerified = invTotal > 0 && matGrossSubtotal > 0 && (
     Math.abs(matGrossSubtotal - invTotal) / invTotal <= 0.015 ||
-    (excludedFreightGrossSum > 0 && Math.abs(matGrossSubtotal + excludedFreightGrossSum - invTotal) / invTotal <= 0.015)
+    (excludedFreightGrossSum > 0 && Math.abs(matGrossSubtotal + excludedFreightGrossSum - invTotal) / invTotal <= 0.015) ||
+    prizmaPriceBasisKnown
   );
   if (vatBasisVerified) {
     normItems.forEach((x: any) => { if (x && typeof x === 'object') x.vatBasisVerified = true; });
   }
-  if (excludedFreightGrossSum === 0 && normItems.length > 0 && invTotal > matGrossSubtotal + 500) {
-    const diffGross = invTotal - matGrossSubtotal;
-    if (diffGross >= 500 && diffGross <= invTotal * 0.35) {
-      excludedFreightGrossSum = Number(diffGross.toFixed(2));
-      excludedFreightNetSum = invoiceLevelVat > 0
-        ? Number((diffGross / (1 + invoiceLevelVat / 100)).toFixed(2))
-        : excludedFreightGrossSum;
-    }
-  }
+  // Kalemler (+ açık nakliye satırları) fatura toplamını tutmuyorsa fark artık "nakliye" diye UYDURULMAZ;
+  // fatura "kalemler doğrulanmadı" olarak işaretlenir. (Örn. 20560: eksik kalem + ambalaj farkı nakliye sanılıyordu.)
+  const lineTotalGapGross = invTotal > 0 && normItems.length > 0
+    ? Number((invTotal - matGrossSubtotal - excludedFreightGrossSum).toFixed(2))
+    : 0;
+  const prizmaLineCheck = pMatch?.lineCheck || inv.lineCheck;
+  const linesSource = pMatch?.linesSource || inv.linesSource;
+  const linesReconciled = invTotal > 0 && Math.abs(lineTotalGapGross) <= Math.max(1, invTotal * 0.015);
 
   const invCat = (normItems.length > 0 && normItems[0]?.category)
     ? normItems[0].category
@@ -1444,10 +1458,12 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
     netSubtotalAmount: Number(matNetSubtotal.toFixed(2)),
     vatTotalAmount: Number(Math.max(0, matGrossSubtotal - matNetSubtotal).toFixed(2)),
     vatRate: invoiceLevelVat,
-    ...(excludedFreightNetSum > 0 ? {
-      excludedFreightAmount: Number(excludedFreightNetSum.toFixed(2)),
-      excludedFreightGrossAmount: Number(excludedFreightGrossSum.toFixed(2))
-    } : {}),
+    excludedFreightAmount: excludedFreightNetSum > 0 ? Number(excludedFreightNetSum.toFixed(2)) : 0,
+    excludedFreightGrossAmount: excludedFreightGrossSum > 0 ? Number(excludedFreightGrossSum.toFixed(2)) : 0,
+    linesReconciled,
+    lineTotalGapGross,
+    ...(linesSource ? { linesSource } : {}),
+    ...(prizmaLineCheck ? { lineCheck: prizmaLineCheck } : {}),
     ...(pMatch ? {
       prizmaLinked: true,
       prizmaDemandId: pMatch.prizmaDemandId || inv.prizmaDemandId,
@@ -6759,8 +6775,11 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
             }
             // If existingMatch is an auto-synced Prizma invoice, refresh its items with the latest enriched items from prizmaSyncService
             if (String(existingMatch.id || '').startsWith('inv_prizma_')) {
+              const basisVerified = Array.isArray(existingMatch.items) && existingMatch.items.length > 0 &&
+                existingMatch.items.every((it: any) => it?.vatBasisVerified);
               existingMatch.items = pInv.items.map(it => ({
                 ...it,
+                ...(basisVerified ? { vatBasisVerified: true } : {}),
                 prizmaRequestCode: pInv.prizmaRequestCode,
                 prizmaOrderCode: pInv.prizmaOrderCode,
                 prizmaBtfUrl: pInv.prizmaBtfUrl,
@@ -7117,7 +7136,11 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
       const baseParen = baseParenRaw && /^[\d.,x×хX*\s-]+(?:mm|m|мм)?$/i.test(baseParenRaw.trim()) ? baseParenRaw.trim() : undefined;
       parts.forEach((part, idx) => {
         const isForeignType = part.signature.type && part.signature.type !== hostType;
-        let partName = `${grp.canonName} [${part.label}]`;
+        // Grup adı başka bir parçanın satırından geldiyse (ör. 4,8x25 adı altında 4,8x35 satırı) parçanın kendi adını kullan
+        const partNames = part.entries.map((e: any) => String(e.item?.materialName || '').trim()).filter(Boolean);
+        const ownName = partNames.length > 0 && partNames.every((n: string) => n === partNames[0]) ? partNames[0] : '';
+        const partBase = ownName && !part.entries.some((e: any) => String(e.item?.materialName || '').trim() === grp.canonName) ? ownName : grp.canonName;
+        let partName = `${partBase} [${part.label}]`;
         if (part.label === 'Spesifikasyon Belirtilmemiş') {
           partName = `${grp.canonName.replace(/\s*\(\s*\d+(?:[.,]\d+)?\s*mikron[^)]*\)/i, ' (mikron belirtilmemiş)')} [${part.label}]`;
         }
@@ -7399,6 +7422,8 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
           fileUrl: inv.fileUrl,
           excludedFreightAmount: inv.excludedFreightAmount,
           excludedFreightGrossAmount: inv.excludedFreightGrossAmount,
+          invoiceLinesVerified: inv.linesReconciled !== false,
+          invoiceLinesSource: inv.linesSource || undefined,
           origin: Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))) ? 'prizma' : 'ges_archive',
           prizmaSource: Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))),
           gesArchiveSource: !Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))),
@@ -10126,6 +10151,7 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
             grossTotalPrice: Number(it.grossTotalPrice ?? it.totalPrice) || 0,
             vatPercentage: it.vatPercentage !== undefined ? Number(it.vatPercentage) : 22,
             isNetNormalized: Boolean(it.isNetNormalized),
+            ...(it.lineSource ? { lineSource: it.lineSource, invoiceLineNo: it.invoiceLineNo ?? null, article: it.article ?? null } : {}),
             category: cat,
             prizmaRequestCode: pInv.prizmaRequestCode,
             prizmaOrderCode: pInv.prizmaOrderCode,
@@ -10136,6 +10162,13 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
         });
         enrichPayload.items = refreshedItems;
         enrichPayload.category = pInv.category || (refreshedItems[0]?.category) || match.category;
+        // Nakliye yalnızca belgedeki/STF'deki açık nakliye satırlarından gelir; eski "fark = nakliye" değeri temizlenir.
+        enrichPayload.excludedFreightAmount = Number((pInv as any).excludedFreightAmount) || 0;
+        enrichPayload.excludedFreightGrossAmount = Number((pInv as any).excludedFreightGrossAmount) || 0;
+        if ((pInv as any).lineCheck) {
+          enrichPayload.lineCheck = (pInv as any).lineCheck;
+          enrichPayload.linesSource = (pInv as any).linesSource || 'stf_order';
+        }
       }
       updatesToSave.push({ id: match.id, payload: enrichPayload });
       enrichedCount++;
@@ -10159,6 +10192,7 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
           grossTotalPrice: Number(it.grossTotalPrice ?? it.totalPrice) || 0,
           vatPercentage: it.vatPercentage !== undefined ? Number(it.vatPercentage) : 22,
           isNetNormalized: Boolean(it.isNetNormalized),
+          ...(it.lineSource ? { lineSource: it.lineSource, invoiceLineNo: it.invoiceLineNo ?? null, article: it.article ?? null } : {}),
           category: cat,
           prizmaRequestCode: pInv.prizmaRequestCode,
           prizmaOrderCode: pInv.prizmaOrderCode,
@@ -10199,7 +10233,8 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any): Promise<
         prizmaUrl: pInv.prizmaBtfUrl || pInv.prizmaUrl,
         prizmaStatus: pInv.prizmaStatus,
         rawFileName: `prizma_${pInv.prizmaDemandId}.pdf`,
-        fileUrl: `/api/prizma/invoice-file/${pInv.prizmaDemandId}?type=schet`
+        fileUrl: `/api/prizma/invoice-file/${pInv.prizmaDemandId}?type=schet`,
+        ...((pInv as any).lineCheck ? { lineCheck: (pInv as any).lineCheck, linesSource: (pInv as any).linesSource || 'stf_order' } : {})
       };
 
       newInvoicesToSave.push(newInvDoc);
@@ -11751,6 +11786,59 @@ app.post('/api/prizma/integrate-invoices', async (_req, res) => {
   }
 });
 
+// Prizma fatura kalemlerini "Счет на оплату" belgesiyle doğrular (STF sipariş satırları ≠ fatura).
+// apply=false: yalnızca rapor. apply=true: değişen her prizma_invoices ve invoices kaydı önce
+// `invoice_line_backups` koleksiyonuna yedeklenir, sonra kalemler belgedeki satırlarla güncellenir.
+let invoiceLineReconcileRunning = false;
+async function reconcilePrizmaInvoiceLines(options: { apply: boolean; limit?: number; recheck?: boolean }) {
+  if (invoiceLineReconcileRunning) throw new Error('Fatura kalemi doğrulaması zaten çalışıyor.');
+  invoiceLineReconcileRunning = true;
+  try {
+    const report = await prizmaSyncService.reconcileStoredInvoiceLines(options);
+    let invoiceBackups = 0;
+    let integration: any = null;
+    if (options.apply && db && report.changedIds.length > 0) {
+      const stamp = new Date().toISOString();
+      for (let i = 0; i < report.changedIds.length; i += 50) {
+        const batch = writeBatch(db);
+        let pending = 0;
+        for (const pid of report.changedIds.slice(i, i + 50)) {
+          const invId = `inv_${pid}`;
+          const snap = await getDoc(doc(db, 'invoices', invId));
+          if (!snap.exists()) continue;
+          batch.set(doc(db, 'invoice_line_backups', `${invId}__${stamp.replace(/[:.]/g, '-')}`), cleanComparativeData({
+            collection: 'invoices', docId: invId, backedUpAt: stamp, reason: 'invoice_line_reconcile', data: snap.data()
+          }));
+          pending++;
+        }
+        if (pending > 0) { await batch.commit(); invoiceBackups += pending; }
+      }
+      integration = await integratePrizmaInvoicesInternal(db);
+      memoryStore.invoices = undefined;
+      memoryStore.materialComparisons = undefined;
+    }
+    return { ...report, invoiceBackups, integration };
+  } finally {
+    invoiceLineReconcileRunning = false;
+  }
+}
+
+app.post('/api/prizma/reconcile-invoice-lines', async (req, res) => {
+  const role = decodeURIComponent(String(req.headers['x-user-role'] || ''));
+  const apply = req.body?.apply === true || req.query.apply === '1';
+  if (apply && role !== 'admin') return res.status(403).json({ error: 'Kalemleri güncellemek için yönetici oturumu gerekir.' });
+  try {
+    const result = await reconcilePrizmaInvoiceLines({
+      apply,
+      limit: Number(req.body?.limit || req.query.limit) || undefined,
+      recheck: req.body?.recheck === true || req.query.recheck === '1'
+    });
+    res.json({ success: true, apply, ...result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/api/prizma/demand-files/:demandId', async (req, res) => {
   try {
     const demandId = Number(req.params.demandId);
@@ -12007,6 +12095,17 @@ async function startServer() {
         await fetch(`http://127.0.0.1:${PORT}/api/materials/compare`).catch(() => {});
       } catch (_) {}
     }, 100);
+
+    // Kalemleri henüz fatura belgesiyle doğrulanmamış Prizma faturalarını arka planda bir kez doğrula.
+    // Yalnızca belgeden kuruşu kuruşuna doğrulanan satırlar yazılır; her değişiklik önce yedeklenir.
+    if (process.env.DISABLE_INVOICE_LINE_RECONCILE !== '1') {
+      setTimeout(() => {
+        if (!db) return;
+        reconcilePrizmaInvoiceLines({ apply: true })
+          .then(r => console.log(`[INVOICE LINE RECONCILE] ${r.scanned} fatura tarandı: ${r.verifiedFromDocument} belgeden doğrulandı, ${r.stfMatchesTotal} STF toplamı tutuyor, ${r.mismatch} doğrulanamadı, ${r.errors} erişim hatası; ${r.backups + r.invoiceBackups} kayıt yedeklendi.`))
+          .catch(err => console.warn('[INVOICE LINE RECONCILE] Hata:', err.message));
+      }, 90 * 1000);
+    }
 
     // Sunucu başlangıcında bugünün bulut yedeği yoksa arka planda otomatik yedek al ve doğrula
     setTimeout(async () => {

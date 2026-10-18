@@ -2038,6 +2038,14 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                                     🚚 Nakliye Hariç ({formatRuble(Number((hist as any).excludedFreightAmount) || Number(targetInvoice?.excludedFreightAmount) || 0)})
                                   </div>
                                 )}
+                                {(hist as any).invoiceLinesVerified === false && (
+                                  <div
+                                    className="text-[9px] font-bold text-amber-800 bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded inline-block mt-0.5"
+                                    title="Bu faturanın kalemleri fatura belgesinden doğrulanamadı; kalem toplamı fatura tutarını tutmuyor. Fiyat siparişten (STF) geliyor olabilir."
+                                  >
+                                    ⚠ Faturayla doğrulanmadı
+                                  </div>
+                                )}
                                 {hist.conversionApplied && (
                                   <div
                                     className="text-[10px] font-normal text-amber-700 mt-0.5 flex items-center justify-end space-x-1"

@@ -258,10 +258,28 @@ export const InvoiceDetailModal: React.FC<Props> = ({
 
   // Financial metrics
   const grandTotal = invoice.totalAmount || 0;
-  const subTotal = grandTotal / 1.2;
-  const vatAmount = grandTotal - subTotal;
-
   const allItems: InvoiceItem[] = invoice.items || [];
+  // KDV oranı faturanın kendi kalemlerinden gelir (2026: %22). Sabit %20 ile bölmek net tutarı yanlış gösteriyordu.
+  const itemVatRates = Array.from(new Set(
+    allItems.map(it => Number(it.vatPercentage)).filter(v => Number.isFinite(v) && v >= 0)
+  ));
+  const defaultVatRate = String(invoice.date || '').startsWith('2025') ? 20 : 22;
+  const invoiceVatRate = itemVatRates.length === 1
+    ? itemVatRates[0]
+    : (Number.isFinite(Number(invoice.vatRate)) && Number(invoice.vatRate) > 0 ? Number(invoice.vatRate) : defaultVatRate);
+  const linesFromDocumentRaw = (invoice as any).linesSource === 'invoice_pdf' && (invoice as any).linesReconciled !== false;
+  // Belgeden doğrulanmış faturada net matrah satırların toplamıdır (belgedeki "В т.ч. НДС" ile kuruşu kuruşuna aynı)
+  const subTotal = linesFromDocumentRaw
+    ? allItems.reduce((s, it) => s + (Number(it.totalPrice) || 0), 0) + (Number(invoice.excludedFreightAmount) || 0)
+    : grandTotal / (1 + invoiceVatRate / 100);
+  const vatAmount = grandTotal - subTotal;
+  const itemGrossTotal = (item: InvoiceItem) =>
+    Number(item.grossTotalPrice) || (Number(item.grossUnitPrice) || Number(item.unitPrice) || 0) * (Number(item.quantity) || 1);
+  const itemGrossUnit = (item: InvoiceItem) =>
+    Number(item.grossUnitPrice) || itemGrossTotal(item) / (Number(item.quantity) || 1);
+  const linesGap = Number((invoice as any).lineTotalGapGross) || 0;
+  const linesNotReconciled = (invoice as any).linesReconciled === false;
+  const linesFromDocument = (invoice as any).linesSource === 'invoice_pdf' && !linesNotReconciled;
   const filteredItems = itemSearch.trim()
     ? allItems.filter(item =>
         (item.materialName || '').toLowerCase().includes(itemSearch.toLowerCase()) ||
@@ -627,7 +645,7 @@ export const InvoiceDetailModal: React.FC<Props> = ({
             {/* 2. KDV Tutarı */}
             <div className="bg-white px-3 py-2 rounded-xl border-2 border-slate-300 flex flex-col justify-between shadow-xs">
               <div className="flex items-center justify-between text-[10px] text-slate-600 font-bold uppercase border-b border-slate-100 pb-1 mb-1">
-                <span>2. KDV (%20)</span>
+                <span>2. KDV (%{invoiceVatRate})</span>
                 <span className="text-[9px] px-1.5 py-0.2 bg-indigo-50 text-indigo-700 rounded font-bold">Vergi</span>
               </div>
               <span className="text-sm sm:text-base font-mono font-bold text-slate-800 tracking-tight">
@@ -715,6 +733,19 @@ export const InvoiceDetailModal: React.FC<Props> = ({
         {/* Tab 1: Fatura Kalemleri Table */}
         {activeTab === 'items' && (
           <div className="flex-1 min-h-0 flex flex-col p-3 sm:p-5 bg-slate-100/70">
+            {linesFromDocument && (
+              <div className="shrink-0 mb-2.5 px-3 py-2 rounded-xl border border-emerald-300 bg-emerald-50 text-[11px] font-semibold text-emerald-900">
+                ✓ Kalemler fatura belgesinden (Счет на оплату) okundu ve fatura toplamıyla kuruşu kuruşuna doğrulandı.
+              </div>
+            )}
+            {linesNotReconciled && (
+              <div className="shrink-0 mb-2.5 px-3 py-2 rounded-xl border border-amber-300 bg-amber-50 text-[11px] font-semibold text-amber-900">
+                ⚠ Kalemlerin KDV dahil toplamı fatura tutarını tutmuyor (fark {formatTL(linesGap)}).{' '}
+                {String(invoice.id || '').startsWith('inv_prizma_')
+                  ? 'Kalemler Prizma sipariş (STF) satırlarından geliyor ve fatura belgesinden doğrulanamadı; miktar/fiyat faturadakinden farklı olabilir.'
+                  : 'Eksik/yanlış okunmuş kalem olabilir; orijinal belgeyle kontrol edin.'}
+              </div>
+            )}
             {/* Search & Count Bar */}
             <div className="shrink-0 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-3">
               <div className="flex items-center space-x-2">
@@ -774,8 +805,8 @@ export const InvoiceDetailModal: React.FC<Props> = ({
                     <th className="py-2.5 px-2 w-28 text-center border-r border-slate-700">Kategori</th>
                     <th className="py-2.5 px-2 w-16 text-center border-r border-slate-700">Birim</th>
                     <th className="py-2.5 px-2 w-24 text-right border-r border-slate-700">Miktar</th>
-                    <th className="py-2.5 px-2 w-28 text-right border-r border-slate-700">Birim Fiyat</th>
-                    <th className="py-2.5 px-2.5 w-28 text-right border-r border-slate-700">Toplam Tutar</th>
+                    <th className="py-2.5 px-2 w-28 text-right border-r border-slate-700">Birim Fiyat (KDV Dahil)</th>
+                    <th className="py-2.5 px-2.5 w-28 text-right border-r border-slate-700">Toplam (KDV Dahil)</th>
                     {onNavigateToCompare && <th className="py-2.5 px-2 w-24 text-center">Aksiyon</th>}
                   </tr>
                 </thead>
@@ -805,10 +836,16 @@ export const InvoiceDetailModal: React.FC<Props> = ({
                             {Number(item.quantity || 1).toLocaleString('tr-TR')}
                           </td>
                           <td className="py-2 px-2 text-right font-mono text-indigo-900 font-black bg-indigo-50/30 border-r border-b border-slate-300">
-                            {formatTL(item.unitPrice)}
+                            {formatTL(itemGrossUnit(item))}
+                            <div className="text-[10px] font-semibold text-slate-500">
+                              KDV Hariç: {formatTL(Number(item.unitPriceNet) || Number(item.unitPrice) || 0)}
+                            </div>
                           </td>
                           <td className="py-2 px-2.5 text-right font-mono font-black text-emerald-800 bg-emerald-50/30 border-r border-b border-slate-300">
-                            {formatTL(item.totalPrice)}
+                            {formatTL(itemGrossTotal(item))}
+                            {item.vatPercentage !== undefined && (
+                              <div className="text-[10px] font-semibold text-slate-500">%{item.vatPercentage} НДС</div>
+                            )}
                           </td>
                           {onNavigateToCompare && (
                             <td className="py-2 px-2 text-center border-b border-slate-300">
