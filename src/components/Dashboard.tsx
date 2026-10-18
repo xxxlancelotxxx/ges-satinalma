@@ -383,17 +383,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
       a.type === 'PRICE_CREEP' ||
       a.type === 'BASKET_SHRINKAGE'
     );
-    const totalPotentialSavings = items.reduce((sum, a) => sum + (Number(a.impactAmount) || 0), 0);
     const criticalCount = items.filter(a => a.severity === 'CRITICAL').length;
     const arbitrageItems = items.filter(a => a.type === 'CROSS_JOBSITE_ARBITRAGE');
     const smurfingItems = items.filter(a => a.type === 'SPLIT_INVOICE_SMURFING');
     const creepItems = items.filter(a => a.type === 'PRICE_CREEP');
     const shrinkageItems = items.filter(a => a.type === 'BASKET_SHRINKAGE');
 
+    // Headline numbers cover every dashboard anomaly so the desk card, the
+    // "Anomali Radarı (N)" button and the KPI card all show the same count.
+    const otherItems = anomaliesList.filter(a => !items.includes(a));
     return {
       items,
-      totalCount: items.length,
-      totalPotentialSavings,
+      totalCount: anomaliesList.length,
+      totalPotentialSavings: anomaliesList.reduce((sum, a) => sum + (Number(a.impactAmount) || 0), 0),
+      otherCount: otherItems.length,
       criticalCount,
       arbitrageCount: arbitrageItems.length,
       arbitrageSavings: arbitrageItems.reduce((s, a) => s + (Number(a.impactAmount) || 0), 0),
@@ -1472,7 +1475,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 {formatRuble(superIntelligentInsights.totalPotentialSavings)} <span className="text-[11px] font-sans font-normal text-slate-300">potansiyel iade/tasarruf</span>
               </p>
               <p className="text-[11px] text-slate-300 mt-1 truncate">
-                Arbitraj: {superIntelligentInsights.arbitrageCount} • Parçalı: {superIntelligentInsights.smurfingCount} • Zam: {superIntelligentInsights.creepCount}
+                Fiyat: {superIntelligentInsights.otherCount} • Arbitraj: {superIntelligentInsights.arbitrageCount} • Parçalı: {superIntelligentInsights.smurfingCount} • Zam: {superIntelligentInsights.creepCount}{superIntelligentInsights.shrinkageCount > 0 ? ` • Sepet: ${superIntelligentInsights.shrinkageCount}` : ''}
               </p>
             </div>
             <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-rose-300 font-semibold">
