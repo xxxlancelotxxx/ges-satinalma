@@ -73,7 +73,9 @@ function AppContent() {
   const [materialComparisons, setMaterialComparisons] = useState<MaterialComparison[]>([]);
   const [performances, setPerformances] = useState<SupervisorPerformance[]>([]);
   const [targetCompareMaterial, setTargetCompareMaterial] = useState<string>('');
+  const [targetCompareMaterialId, setTargetCompareMaterialId] = useState<string>('');
   const [targetCompareCategory, setTargetCompareCategory] = useState<string>('');
+  const [targetCompareSourceFilter, setTargetCompareSourceFilter] = useState<'all' | 'prizma_only' | 'local_only'>('local_only');
 
   const totalTrashCount = trashInvoices.length + trashDiscounts.length;
 
@@ -710,9 +712,13 @@ function AppContent() {
                 onOpenNewDiscountModal={() => setShowQuickDiscountModal(true)}
                 onOpenBackupModal={user?.role === 'admin' ? () => setShowBackupModal(true) : undefined}
                 onNavigateToTab={(tabId) => setActiveTab(tabId)}
-                onNavigateToMaterial={(matName, category) => {
+                onNavigateToMaterial={(matName, category, sourceFilter, materialId) => {
                   setTargetCompareMaterial(matName || '');
+                  setTargetCompareMaterialId(materialId || '');
                   setTargetCompareCategory(category || '');
+                  if (sourceFilter) {
+                    setTargetCompareSourceFilter(sourceFilter);
+                  }
                   setActiveTab('material-compare');
                 }}
                 onRefreshData={() => loadData(false)}
@@ -756,6 +762,7 @@ function AppContent() {
                 supervisors={supervisors}
                 onNavigateToMaterial={(matName) => {
                   setTargetCompareMaterial(matName);
+                  setTargetCompareMaterialId('');
                   setActiveTab('material-compare');
                 }}
                 onUpdateInvoice={handleUpdateInvoice}
@@ -812,6 +819,8 @@ function AppContent() {
                 onDeleteInvoice={handleDeleteInvoice}
                 onNavigateToCompare={(matName) => {
                   setTargetCompareMaterial(matName);
+                  setTargetCompareMaterialId('');
+                  setTargetCompareSourceFilter('local_only');
                   setActiveTab('material-compare');
                 }}
                 onNavigateToPrizma={() => setActiveTab('prizma-invoices')}
@@ -824,6 +833,8 @@ function AppContent() {
               <PrizmaInvoicesView
                 onNavigateToCompare={(matName) => {
                   setTargetCompareMaterial(matName);
+                  setTargetCompareMaterialId('');
+                  setTargetCompareSourceFilter('all');
                   setActiveTab('material-compare');
                 }}
               />
@@ -836,7 +847,9 @@ function AppContent() {
                 jobsites={jobsites}
                 supervisors={supervisors}
                 initialMaterialName={targetCompareMaterial}
+                initialMaterialId={targetCompareMaterialId}
                 initialCategory={targetCompareCategory}
+                initialSourceFilter={targetCompareSourceFilter}
                 onRefreshData={loadData}
                 onUpdateInvoice={handleUpdateInvoice}
                 onDeleteInvoice={handleDeleteInvoice}

@@ -1,95 +1,50 @@
-# Genel Bakış ve Dashboard: Profesyonel Komuta Merkezi & Canlı Sekme Entegrasyonu
+# Prizma Fatura PDF Okuma Motoru, AI Yedek Okuyucu ve Kalınlık Bazlı Ürün Ayrıştırma Planı
 
-Genel Bakış ve Dashboard ekranını tüm sekmelerle canlı konuşan, 28 güncel kategori standardıyla kuruşu kuruşuna aynı veriyi taşıyan, gereksiz kalabalıktan arındırılmış ve üst düzey yönetici ergonomisine sahip bir satınalma komuta merkezine dönüştürüyoruz.
-
-### User Review & Critical Decisions
-
-> [!IMPORTANT]
-> Dashboard üzerindeki dört temel yapısal iyileştirme kullanıcı geri bildirimleri doğrultusunda netleştirilmiştir. Onayınızla birlikte doğrudan uygulamaya geçilecektir.
-
-- **Karar 1 — Yapay Zeka Karar & Canlı Senkronizasyon Masasının Yeniden Kurgulanması**: Statik "23 Kategori Çözümlendi" rozeti ve pasif butonlar kaldırılarak; **Canlı Sekme Senkronizasyon Köprüsü** (Malzeme Fiyat Karşılaştırma, Anomali Radarı, Şef Performans Masası, İndirim Kayıtları, AI Fatura Okuma ve TDF 1M+ ₽ Ön Onay sekmelerine canlı sayaçlı ve bağlamsal geçiş) ile **Akıllı Satınalma Aksiyon Kartları** (En Yüksek Fiyat Makası, Çapraz Şantiye Arbitraj Fırsatı, En Başarılı Güncel Pazarlık ve Kritik Tedarikçi Uyarısı) birleştirilecektir.
-- **Karar 2 — Kategori Bazlı Harcama Dağılımının 28 Güncel Kategoriyle Tam Senkronizasyonu ve Alt Kırılım**: Kategori hesaplama motoru, Malzeme Fiyat Karşılaştırma ve Prizma eşleştirme motorunun kullandığı merkezi 28 kanonik kategori çözücü (`resolveItemCategory`) ile birebir eşitlenecek; ayrıca herhangi bir kategoriye tıklandığında o kategorideki **en çok harcama yapılan malzemeleri, tedarikçileri, şantiye dağılımını ve Malzeme Fiyat Karşılaştırma sekmesine doğrudan geçişi** gösteren etkileşimli bir **Kategori Alt Kırılım Paneli** açılacaktır.
-- **Karar 3 — Mükerrer "Veri Güvenliği & Yedek" Kartının Kaldırılması**: Üst navigasyon çubuğunda zaten yer alan yedekleme kontrolünün Dashboard alt bölümünde tekrar eden büyük kartı kaldırılacak; açılan alan **Son Satınalma ve İndirim İşlemleri** tablosu ile **En Yüksek İskonto & Tedarikçi Performans Özeti** için değerlendirilecektir.
+Prizma'dan gelen faturaların yanlış okunması, KDV durumunun tespit edilememesi, taranmış PDF'lerin STF'deki bozuk birim/miktar verisine düşmesi ve farklı kalınlıktaki yalıtım levhalarının tek kalemde birleştirilmesi sorunlarını kalıcı olarak çözen mimari plan aşağıdadır.
 
 ---
 
-### 1. Overview & Core Concept
+## 1. Tespit Edilen Kök Nedenler ve Kalıcı Çözümler
 
-- **Ne Yapar**: Şantiye satınalma harcamalarını, şef pazarlık/indirim başarılarını, malzeme birim fiyat makaslarını ve tespit edilen gizli anomalileri tek bir doğruluk kaynağından (Firestore + merkezi kategori ve birim fiyat motoru) beslenerek canlı olarak sunar ve her karttan ilgili sekmeye tek tıkla derin geçiş sağlar.
-- **Hedef Kullanıcı**: Üst Yönetim, Satınalma Şefleri ve Satınalma Personeli.
-- **Temel Değer**:
-  - Sekmeler arası kopuklukların giderilmesi (Dashboard'da görülen bir malzeme farkı, anomali veya kategori harcamasına tıklandığında doğrudan ilgili sekmede veya alt kırılımda açılması).
-  - Tüm ekranlarda 28 standart kategorinin kuruşu kuruşuna aynı harcama ve kalem sayısını göstermesi.
-  - Mükerrer bileşenlerin temizlenerek veri yoğunluğu yüksek, taranabilir ve profesyonel bir kurumsal arayüz elde edilmesi.
+### A. PDF KDV (НДС) ve Dip Toplam Okuma Hatası (218 Prizma Faturası)
+- **Sorun:** `src/utils/invoiceLineParser.ts` içerisindeki `detectVatIncluded` fonksiyonu, Rusça 1C faturalarında çok yaygın olan `В том числе НДС:` (KDV dahil), `Итого НДС`, `Сумма НДС` ve `Всего к оплате` ifadelerini yakalayamıyordu. Bu nedenle 218 faturada `vatIncluded = null` dönüyor ve `server/invoiceDocumentLines.ts` KDV durumu belirsiz olduğu için gerçek PDF kalemlerini (`9.675,00 ₽ / m³`) çöpe atıp Prizma STF'nin bozuk verisine (`806,25 ₽`) geri dönüyordu.
+- **Kalıcı Çözüm:**
+  - `detectVatIncluded` fonksiyonu tüm Rusça/Türkçe fatura dipnot formatlarını (`в том числе ндс`, `итого ндс`, `сумма ндс`, `без налога (ндс)`, `ндс не облагается`, tablo başlıklarında `цена с ндс` / `цена без ндс` + dip toplam eşleşmesi) kapsayacak şekilde güncellenecek.
+  - Satır toplamlarının (`Σ satır tutarı`) faturanın genel toplamına (`Всего к оплате` / `Итого`) matematiksel yakınlığı kontrol edilerek KDV'nin satır fiyatlarına dahil olup olmadığı otomatik doğrulanacak.
+  - `extractGrandTotalFromText` fonksiyonunda ağırlık toplamlarını (`Всего наименований 4, на сумму...` veya `Масса брутто`) para toplamı sanan regex hatası giderilecek.
 
----
+### B. Çok Satırlı ve Farklı Sütun Düzenli PDF Tablolarının Okunamaması (177 Prizma Faturası)
+- **Sorun:** Bazı tedarikçi faturalarında (ör. `BTF.032246`, `BTF.032372`, `BTF.032228`) sıra numarası ile ürün adı bitişik yazılmakta (`1Гидроизоляционная...`), birimler noktalı/bileşik gelmekte (`пог. м`, `м.п.`, `уп.`, `компл`, `тыс. шт`) veya miktar ile birim sütunu yer değiştirmektedir (`шт 300`).
+- **Kalıcı Çözüm:**
+  - `src/utils/invoiceLineParser.ts` satır ayrıştırıcısı; bitişik sıra numaralarını, bileşik Rusça/Türkçe ölçü birimlerini (`м3`, `м2`, `м.п.`, `пог. м`, `кв. м`, `куб. м`, `уп`, `рул`, `компл`, `пач`), 6+ sütunlu (KDV hariç fiyat + KDV dahil fiyat birlikte bulunan) tabloları ve `Birim -> Miktar` ters dizilimini tam doğrulukla okuyacak şekilde genişletilecek.
 
-### 2. User Experience & Visual Design
+### C. Taranmış (Resim) PDF'ler İçin Gemini AI Okuma Katmanı ve Doğrulama Kilidi
+- **Sorun:** Taranmış (metin katmanı olmayan) PDF'lerde veya PDF metni bozuk olan belgelerde sistem doğrudan Prizma STF satırlarını kullanıyordu. STF'de m³ yerine paket fiyatı veya hatalı miktar girildiğinde tüm piyasa analizi ve anomali motoru yanılıyordu.
+- **Kalıcı Çözüm:**
+  - `server/invoiceDocumentLines.ts` içerisine **Gemini (`gemini-2.5-flash`) PDF Okuma Yedek Katmanı** eklenecek: Metin tabanlı ayrıştırıcı kalem bulamadığında veya toplam doğrulaması (`status !== 'verified'`) başarısız olduğunda, PDF dosyası doğrudan Gemini'ye (`application/pdf` inlineData olarak) gönderilerek kalemler, birimler (`m³`, `m²`, `paket` vb.), birim fiyatlar ve KDV durumu yapılandırılmış JSON olarak çıkarılacak ve önbelleğe (`prizma_invoice_doc_lines.json` + Firestore) kaydedilecek.
+  - **Kesin Doğrulama Kilidi:** Hem metin ayrıştırıcı hem de AI okuyucu sonrasında hala doğrulanamayan (`lineCheck.status !== 'verified'` veya belge eki hiç olmayan) Prizma STF kayıtları `isPdfVerified: false` olarak işaretlenecek ve **Anomali Teşhisi, Piyasa Analizi ve Yapay Zeka Karar Masası fiyat kıyaslamalarından tamamen hariç tutulacak.**
 
-- **Temel Kullanıcı Akışları**:
-  1. **Üst Komuta & Filtre Deneyimi**: Kullanıcı tarih aralığı, şantiye, kategori, tedarikçi veya şef seçtiğinde; KPI kartları, Yapay Zeka Komuta Masası, Şantiye Dağılımı, Kategori Dağılımı ve Son İşlemler tablosu eşzamanlı olarak filtrelenir.
-  2. **Yenilenen Yapay Zeka Karar & Canlı Senkronizasyon Masası**:
-     - **Üst Bant (Canlı Sekme Köprüleri)**: Sistemdeki 28 kanonik kategori kapsamını, aktif fatura/indirim senkronizasyonunu ve 6 ana sekmeye (Malzeme Fiyat Karşılaştırma, Anomali Radarı, Şef Performans Masası, İndirim & Pazarlıklar, Fatura Drive, Şantiye Yönetimi) canlı metriklerle tek tıkla geçişi sunar.
-     - **Alt Bant (4 Akıllı Karar & Aksiyon Kartı)**:
-       1. *Çapraz Şantiye & Fiyat Makası Fırsatı*: En yüksek birim fiyat farkına sahip malzemeyi ve potansiyel tasarruf tutarını gösterir; tıklandığında Malzeme Fiyat Karşılaştırma sekmesine yönlendirir.
-       2. *Anomali & Risk Radarı*: Çapraz şantiye arbitrajı, parçalı alım (smurfing), sinsi fiyat artışı (creep) ve sepet küçültme tespitlerinin toplam finansal etkisini sunar; tıklandığında Anomali Radarı sekmesini açar.
-       3. *Günün / Dönemin Lider Pazarlığı*: Seçili dönemde en yüksek iskonto sağlayan şef ve tedarikçi işlemini öne çıkarır; tıklandığında işlem detay modalını veya Şef Masasını açar.
-       4. *Kategori & Bütçe Yoğunlaşma Analizi*: Harcamanın en çok yoğunlaştığı lider kategoriyi ve şantiyeyi gösterir; tıklandığında Dashboard filtresini anında o kategoriye/şantiyeye odaklar.
-  3. **Kategori Bazlı Harcama Dağılımı & Tıklanabilir Alt Kırılım (Drill-Down)**:
-     - 28 kanonik kategoriyle %100 senkronize çalışır.
-     - Kullanıcı bir kategori kartına, grafik sütununa veya matris satırına tıkladığında, hemen altında **Seçili Kategori İstihbarat Çekmecesi** açılır: o kategorideki toplam harcama, kalem sayısı, en çok alınan ilk 6 malzeme (birim fiyat ve miktarlarıyla), en büyük 4 tedarikçi, şantiye dağılımı ve *"Bu Kategoriyi Malzeme Fiyat Karşılaştırmada İncele →"* aksiyon butonu yer alır.
-  4. **Alt Bölüm (Mükerrer Yedek Kartı Kaldırılmış Yeni Düzen)**:
-     - Üst barda zaten bulunan *Veri Güvenliği & Yedek* kutusu Dashboard gövdesinden tamamen kaldırılır.
-     - Sol 8 sütunda zenginleştirilmiş **Son Satınalma ve İndirim İşlemleri** tablosu, sağ 4 sütunda ise **En Yüksek İskonto Oranlı Alımlar** ve **En Yüksek Hacimli Tedarikçiler (Top 5 Tedarikçi & İndirim Özeti)** kartları yer alır.
-
-- **Görsel Kimlik & Tema**:
-  - *Estetik Yönelim*: Kurumsal, yüksek yoğunluklu finansal ve mühendislik analitiği (Clean Enterprise SaaS).
-  - *Renk Paleti*: Açık ve ferah `#F8FAFC` / `#FFFFFF` zemin (`60%`), ince `#E2E8F0` sınır çizgileri (`30%`), yalnızca aksiyon ve durum vurgularında kullanılan İndigo (`#4F46E5`), Zümrüt (`#059669`), Kehribar (`#D97706`) ve Kırmızı (`#E11D48`) (`10%`).
-  - *Tipografi & Tabular-Nums Disiplini*: Tüm parasal değerler (`₽`), yüzdeler, miktarlar ve tarihler dikey hizalamayı koruyan `font-mono tabular-nums` ile gösterilir.
+### D. Taşyünü / Yalıtım Levhalarında Kalınlık ve Birim Birleştirme Hatasının Kaldırılması
+- **Sorun:** `server.ts` (satır 3615-3625) içindeki sabit kural, tüm `Технофас Оптима` ve `Техноблок Стандарт` ürünlerini kalınlığına bakmaksızın `1200x600x100 mm` altında birleştiriyor ve 1.000 ₽ altındaki fiyatları farklı bir ürüne çeviriyordu. Bu yüzden `Fatura 969` (`180 mm`, `9.675 ₽/m³`) ile `Fatura 923` (`100 mm`, `9.675 ₽/m³`) yanlış şekilde aynı kalemde ve yanlış fiyatla kıyaslanıyordu.
+- **Kalıcı Çözüm:**
+  - `server.ts` içindeki kalınlık ezen ve fiyata göre ürün adı değiştiren hatalı sabit kural kaldırılacak.
+  - Ürün adı standartlaştırma fonksiyonu (`canonicalizeMaterialName` ve `dualMaterialComparisonEngine.ts`), ürün adındaki veya PDF kalemindeki gerçek ölçüleri (`1200x600x100 mm`, `1200x600x180 mm`, `1200x600x50 mm` vb.) ve yoğunluk bilgisini (`110 kg/m³`, `45 kg/m³`) koruyarak **her kalınlığı kendi içinde ayrı bir kalem olarak** gruplayacak.
+  - Ayrıca aynı kalınlıktaki ürünlerde `paket (уп)` veya `m²` cinsinden girilmiş fatura satırları varsa, boyut bilgisinden (`1200x600x100 mm`) `m³` karşılığı hesaplanacak ya da farklı birimler birbirine karıştırılmadan kendi birim grubunda kıyaslanacak.
 
 ---
 
-### 3. Key Product Decisions & Trade-Offs
-
-- **Karar 1 — Kategori Sınıflandırmasında Tek Doğruluk Kaynağı (`resolveItemCategory`)**:
-  - *Seçilen Yaklaşım*: Hem Dashboard hem Şantiye Bazlı Malzeme Özeti hem de Malzeme Fiyat Karşılaştırma ekranlarının tamamında `resolveItemCategory` kullanılarak manuel kategori atamaları, Rusça orijinal fatura satırları ve tedarikçi bağlamı birebir aynı öncelikle çözümlenir.
-  - *Neden*: Farklı sekmelerde veya alt bileşenlerde bir kalemin farklı kategoriye düşmesini kesin olarak önler.
-- **Karar 2 — Yapay Zeka Masasının "Slogan" Yerine "Veriye Dayalı Karar Kartları" Sunması**:
-  - *Seçilen Yaklaşım*: Sabit metinler ve eski "23 Kategori" ibaresi yerine, gerçek zamanlı hesaplanan 4 somut satınalma içgörüsü (Fiyat Makası, Anomali Etkisi, Lider İskonto, Harcama Yoğunlaşması) ve doğrudan sekme kısayolları gösterilir.
-  - *Neden*: Yöneticinin ekrana baktığı ilk 5 saniyede nerede fiyat farkı veya tasarruf fırsatı olduğunu görüp tek tıkla aksiyon almasını sağlar.
-- **Karar 3 — Veri Güvenliği & Yedek Kartının Kaldırılması**:
-  - *Seçilen Yaklaşım*: Üst navigasyon barında zaten mevcut olan yedekleme butonu korunurken, Dashboard içindeki tekrar eden yönetici yedekleme kutusu kaldırılır; yerine karar verici için çok daha değerli olan **En Yüksek Hacimli Tedarikçiler & Pazarlık Özeti** eklenir.
-  - *Neden*: Ekran israfını önler ve satınalma odaklı bilgi yoğunluğunu artırır.
+## 2. Etkilenecek Dosyalar
+1. **`src/utils/invoiceLineParser.ts`**: Rusça/Türkçe KDV tespiti (`detectVatIncluded`), genel toplam ayıklama (`extractGrandTotalFromText`) ve çok sütunlu/bileşik birimli PDF tablo satırı ayrıştırma motorunun güncellenmesi.
+2. **`server/invoiceDocumentLines.ts`**: Doğrulanamayan veya taranmış Prizma PDF'leri için Gemini (`gemini-2.5-flash`) tabanlı PDF okuma yedek katmanının eklenmesi; bozuk önbellek kayıtlarının yenilenmesi ve doğrulanmış PDF kalemlerinin (`m³` birim ve gerçek birim fiyat) fatura kalemlerine tam aktarılması.
+3. **`server.ts`**:
+   - Taşyünü kalınlıklarını (`100 mm`, `180 mm` vb.) ezen hatalı sabit kuralın kaldırılması, her kalınlığın kendi ölçüsüyle ayrı kalem olarak korunması.
+   - `/api/materials/compare` ve fiyat geçmişi hesaplamalarında doğrulanmamış Prizma STF satırlarının (`lineCheck.status !== 'verified'`) fiyat anomalisi ve en ucuz/en pahalı kıyaslamalarını bozmasının engellenmesi.
+4. **`src/utils/dualMaterialComparisonEngine.ts` & `src/components/ProcurementAnomalyAlerts.tsx`**:
+   - Doğrulanmamış Prizma STF kayıtlarının anomali ve fiyat farkı hesaplamalarından hariç tutulması.
+   - Kalınlık bilgilerinin (`100 mm` vs `180 mm`) eşleştirme anahtarında (`specKey`) kesin ayrım kriteri olarak korunması.
 
 ---
 
-### 4. Technical Architecture & Data Strategy
-
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                   FIRESTORE & MERKEZİ VERİ KATMANI                         │
-│     Invoices (GES Platform)  │  Discounts (Pazarlıklar)  │  Comparisons    │
-└──────────────┬─────────────────────────────┬──────────────────────┬────────┘
-               │                             │                      │
-               ▼                             ▼                      ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│         TEK DOĞRULUK KAYNAĞI ANALİTİK MOTORU (28 Kanonik Kategori)         │
-│  • resolveItemCategory() ile %100 kategori uyumu                           │
-│  • Ortak Filtre Motoru (Tarih, Şantiye, Kategori, Tedarikçi, Şef, Fatura)  │
-└──────────────┬─────────────────────────────┬──────────────────────┬────────┘
-               │                             │                      │
-               ▼                             ▼                      ▼
-┌──────────────────────────┐  ┌──────────────────────────┐  ┌────────────────┐
-│  YAPAY ZEKA KARAR &      │  │  KATEGORİ HARCAMA &      │  │ SON İŞLEMLER,  │
-│  CANLI SEKME MASASI      │  │  ALT KIRILIM PANELİ      │  │ İSKONTOLAR &   │
-│  • 6 Sekme Canlı Köprü   │  │  • 28 Standart Kategori  │  │ TEDARİKÇİ      │
-│  • 4 Akıllı Aksiyon Kartı│  │  • Tıklanabilir Malzeme  │  │ PERFORMANS     │
-│  • Tek Tık Filtre / Geçiş│  │    ve Tedarikçi Çekmecesi│  │ ÖZETİ (Yedek   │
-│                          │  │  • Fiyat Kıyas Köprüsü   │  │ Kartı Kalktı)  │
-└──────────────────────────┘  └──────────────────────────┘  └────────────────┘
-```
-
-- **Etkileşimli Bileşen ve Durum Eşlemesi**:
-  - **Canlı Sekme Köprüleri**: Her sekme butonu (`material-compare`, `anomalies`, `performance`, `discounts`, `invoice-ai`, `jobsites-supervisors`) o sekmedeki güncel kayıt/uyarı sayısını gösterir ve tıklandığında ilgili sekmeye geçiş yapar.
-  - **Kategori Alt Kırılım Çekmecesi (`selectedCategory` aktifken veya kategori satırına tıklandığında)**: Seçilen kategorideki tüm normalize kalemleri gruplayarak en yüksek harcamalı malzemeleri, tedarikçileri ve şantiyeleri anında listeler; herhangi bir malzemeye tıklandığında detayını veya fiyat karşılaştırmasını açar.
-  - **Tedarikçi & İskonto Özeti**: Mükerrer yedekleme kartının yerine gelen kartta, seçili filtre dönemindeki en büyük 5 tedarikçi (toplam harcama, fatura sayısı ve o tedarikçiden alınan toplam indirim) gösterilir; bir tedarikçiye tıklandığında tüm Dashboard o tedarikçiye göre filtrelenir.
+## 3. Doğrulama ve Test Adımları
+- Önbellekteki hatalı Prizma PDF analiz kayıtları yeniden işlenerek `BTF.034236` (Fatura 969 - `180 mm`, `9.675 ₽/m³`) ve `BTF.032868` (Fatura 923 - `100 mm`, `9.675 ₽/m³`) dahil tüm Prizma faturalarının doğru birim fiyat ve doğru kalınlıkla ayrıştığı doğrulanacak.
+- `tsc --noEmit`, `npm run build` ve `/api/health` (`invoices: 1059, discounts: 253`) kontrolleri eksiksiz teyit edilecek.

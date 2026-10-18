@@ -1,6 +1,6 @@
 {
-  "summary": "Genel Bakış ve Dashboard ekranının 28 standart kategoriyle tam senkronize çalışması, Yapay Zeka Karar & Canlı Senkronizasyon Masasının akıllı aksiyon ve sekmeler arası canlı köprü merkezine dönüştürülmesi, Kategori Bazlı Harcama Dağılımına tıklanabilir alt kırılım (malzeme/tedarikçi/şantiye) eklenmesi ve mükerrer Veri Güvenliği & Yedek kartının kaldırılarak alt düzenin optimize edilmesi için uygulama planı.",
-  "updatedAt": "2026-10-18T16:26:11.493385683Z",
+  "summary": "Prizma fatura PDF okuma motorunun kalıcı olarak düzeltilmesi, taranmış PDF belgelerinin Gemini AI ile okunması, doğrulanamayan STF kayıtlarının fiyat ve anomali analizlerinden hariç tutulması ve taşyünü/yalıtım ürünlerinin kalınlık bazlı doğru ayrıştırılması planı.",
+  "updatedAt": "2026-10-18T18:44:04.037881589Z",
   "requestFeedback": true,
   "userFacing": true
 }

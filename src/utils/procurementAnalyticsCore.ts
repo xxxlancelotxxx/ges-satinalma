@@ -269,7 +269,15 @@ export function getNormalizedProcurementItems(invoices: InvoiceRecord[] = []): N
     const supervisorName = inv.uploadedBySupervisorName || inv.supervisorName || 'Satınalma Şefi';
     const fileUrl = inv.fileUrl || inv.rawFileName;
 
+    const invTotal = Number(inv.totalAmount) || 0;
     if (invItems.length > 0) {
+      const rawSum = invItems.reduce((s, it) => {
+        const qty = Number(it.quantity) > 0 ? Number(it.quantity) : 1;
+        const uPrice = Number(it.unitPrice) || 0;
+        return s + (Number(it.totalPrice) > 0 ? Number(it.totalPrice) : uPrice * qty);
+      }, 0);
+      const scale = (invTotal > 0 && rawSum > 0 && Math.abs(rawSum - invTotal) > 0.05) ? (invTotal / rawSum) : 1;
+
       invItems.forEach((it, itIndex) => {
         const rawName = it.materialName || it.originalName || 'Malzeme Kalemi';
         const rawOrig = it.originalName || it.materialName || '';
@@ -281,7 +289,9 @@ export function getNormalizedProcurementItems(invoices: InvoiceRecord[] = []): N
         });
         const qty = Number(it.quantity) > 0 ? Number(it.quantity) : 1;
         const uPrice = Number(it.unitPrice) || 0;
-        const totPrice = Number(it.totalPrice) > 0 ? Number(it.totalPrice) : uPrice * qty;
+        const rawTot = Number(it.totalPrice) > 0 ? Number(it.totalPrice) : uPrice * qty;
+        const totPrice = Number((rawTot * scale).toFixed(2));
+        const effectiveUPrice = qty > 0 ? Number((totPrice / qty).toFixed(2)) : uPrice;
         const normUnit = normalizeUnit(it.unit || 'adet');
 
         // Determine special category key if any
@@ -309,7 +319,7 @@ export function getNormalizedProcurementItems(invoices: InvoiceRecord[] = []): N
           originalName: rawOrig,
           quantity: qty,
           unit: normUnit,
-          unitPrice: uPrice,
+          unitPrice: effectiveUPrice,
           totalPrice: totPrice,
           fileUrl,
           subType,

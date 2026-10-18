@@ -9,9 +9,11 @@ import { getFirestore, collection, getDocs, doc, writeBatch } from 'firebase/fir
 import {
   InvoiceLineCheck,
   DocumentLinesResult,
+  CURRENT_DOC_LINES_PARSER_VERSION,
   buildLineCheck,
   extractPdfText,
-  readInvoiceDocumentText
+  readInvoiceDocumentText,
+  readInvoiceDocumentWithGemini
 } from './invoiceDocumentLines';
 
 let defaultDb: any = null;
@@ -216,12 +218,40 @@ class PrizmaSyncService {
     this.loadDocLinesFromDisk();
   }
 
+  private healInvoicePdfItemVat(it: any, defaultVat = 22): any {
+    if (!it || typeof it !== 'object') return it;
+    const vatPct = Number(it.vatPercentage ?? defaultVat);
+    const grossUnit = Number(it.grossUnitPrice) || 0;
+    const netUnit = Number(it.unitPriceNet ?? it.unitPrice) || 0;
+    const qty = Number(it.quantity) || 1;
+    const grossTot = Number(it.grossTotalPrice) || Number((grossUnit * qty).toFixed(2));
+    if (vatPct > 0 && grossUnit > 0 && Math.abs(grossUnit - netUnit) < 0.01) {
+      const fixedNetTot = Number((grossTot / (1 + vatPct / 100)).toFixed(2));
+      const fixedNetUnit = Number((fixedNetTot / qty).toFixed(2));
+      return {
+        ...it,
+        unitPrice: fixedNetUnit,
+        unitPriceNet: fixedNetUnit,
+        totalPrice: fixedNetTot,
+        grossTotalPrice: grossTot,
+        isNetNormalized: true
+      };
+    }
+    return it;
+  }
+
   private loadDocLinesFromDisk() {
     try {
       const filePath = path.join(BACKUP_DIR, 'prizma_invoice_doc_lines.json');
       if (fs.existsSync(filePath)) {
         const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        for (const [k, v] of Object.entries(parsed || {})) this.docLinesCache.set(Number(k), v as any);
+        for (const [k, v] of Object.entries(parsed || {})) {
+          const entry = v as any;
+          if (entry && entry.verified && Array.isArray(entry.items)) {
+            entry.items = entry.items.map((it: any) => this.healInvoicePdfItemVat(it));
+          }
+          this.docLinesCache.set(Number(k), entry);
+        }
       }
     } catch (_) {}
   }
@@ -234,8 +264,8 @@ class PrizmaSyncService {
     } catch (_) {}
   }
 
-  /** Talebin "Счет на оплату" dosyasını Prizma'dan bulur ve PDF metnini döndürür. */
-  private async fetchInvoiceDocumentText(demandId: number, knownFileId?: number): Promise<{ fileId?: number; text?: string; note?: string }> {
+  /** Talebin "Счет на оплату" dosyasını Prizma'dan bulur ve PDF metnini + ham verisini döndürür. */
+  private async fetchInvoiceDocumentText(demandId: number, knownFileId?: number): Promise<{ fileId?: number; text?: string; buffer?: Buffer; mimeType?: string; note?: string }> {
     let fileId = knownFileId;
     if (!fileId) {
       const files = await (prizmaService as any).authorizedGet(`/api/process/list-files/BTF/${demandId}`);
@@ -252,11 +282,11 @@ class PrizmaSyncService {
     // Geçici hatalar (5xx, yetki) kalıcı sonuç sayılmaz: üst katman "Belge okunamadı" der ve tekrar dener
     if (res.status !== 200) throw new Error(`Prizma dosya servisi HTTP ${res.status}`);
     if (res.data.subarray(0, 5).toString('latin1') !== '%PDF-') {
-      return { fileId, note: `Belge PDF değil (${res.contentType}); metin katmanı okunamıyor` };
+      return { fileId, buffer: res.data, mimeType: res.contentType, note: `Belge PDF değil (${res.contentType}); metin katmanı okunamıyor` };
     }
     const text = await extractPdfText(res.data);
-    if (!text || text.replace(/\s+/g, '').length < 50) return { fileId, note: 'PDF taranmış görüntü; metin katmanı yok' };
-    return { fileId, text };
+    if (!text || text.replace(/\s+/g, '').length < 50) return { fileId, buffer: res.data, mimeType: 'application/pdf', note: 'PDF taranmış görüntü; metin katmanı yok' };
+    return { fileId, text, buffer: res.data, mimeType: 'application/pdf' };
   }
 
   /**
@@ -275,14 +305,16 @@ class PrizmaSyncService {
     allowDownload?: boolean;
   }): Promise<{ items: any[]; freightNet: number; freightGross: number; linesSource: 'invoice_pdf' | 'stf_order'; lineCheck: InvoiceLineCheck }> {
     const { demandId, invoiceTotal, previous } = params;
+    const defaultVat = params.docYear === '2025' ? 20 : 22;
     const prevCheck = previous?.lineCheck;
     if (
       prevCheck?.status === 'verified' && hasDocumentLines(previous) &&
       Math.abs((prevCheck.invoiceTotal || 0) - invoiceTotal) < 0.01 &&
       (!params.fileId || !prevCheck.fileId || prevCheck.fileId === params.fileId)
     ) {
+      const healedPrevItems = (previous.items || []).map((it: any) => this.healInvoicePdfItemVat(it, defaultVat));
       return {
-        items: previous.items,
+        items: healedPrevItems,
         freightNet: Number(previous.excludedFreightAmount) || 0,
         freightGross: Number(previous.excludedFreightGrossAmount) || 0,
         linesSource: 'invoice_pdf',
@@ -292,14 +324,37 @@ class PrizmaSyncService {
 
     let docResult: DocumentLinesResult | undefined;
     const cached = this.docLinesCache.get(demandId);
-    if (cached && Math.abs(cached.invoiceTotal - invoiceTotal) < 0.01 && (!params.fileId || cached.fileId === params.fileId)) {
+    const isCacheUsable = cached &&
+      Math.abs(cached.invoiceTotal - invoiceTotal) < 0.01 &&
+      (!params.fileId || cached.fileId === params.fileId) &&
+      (cached.verified || cached.parserVersion === CURRENT_DOC_LINES_PARSER_VERSION);
+
+    if (isCacheUsable) {
       docResult = cached;
     } else if (params.allowDownload !== false) {
       try {
         const fetched = await this.fetchInvoiceDocumentText(demandId, params.fileId);
-        docResult = fetched.text
-          ? readInvoiceDocumentText(fetched.text, { invoiceTotal, docYear: params.docYear, stfItems: params.stfItems, fileId: fetched.fileId })
-          : { fileId: fetched.fileId, verified: false, note: fetched.note || 'Belge okunamadı' };
+        if (fetched.text) {
+          docResult = readInvoiceDocumentText(fetched.text, { invoiceTotal, docYear: params.docYear, stfItems: params.stfItems, fileId: fetched.fileId });
+        }
+        // Metin tabanlı ayrıştırıcı doğrulayamadıysa veya PDF taranmış resimse Gemini AI ile oku
+        if ((!docResult || !docResult.verified) && fetched.buffer) {
+          const aiResult = await readInvoiceDocumentWithGemini(fetched.buffer, {
+            invoiceTotal,
+            docYear: params.docYear,
+            stfItems: params.stfItems,
+            fileId: fetched.fileId,
+            mimeType: fetched.mimeType
+          });
+          if (aiResult.verified) {
+            docResult = aiResult;
+          } else if (!docResult) {
+            docResult = aiResult;
+          }
+        }
+        if (!docResult) {
+          docResult = { fileId: fetched.fileId, verified: false, note: fetched.note || 'Belge okunamadı', parserVersion: CURRENT_DOC_LINES_PARSER_VERSION };
+        }
         this.docLinesCache.set(demandId, { ...docResult, invoiceTotal });
       } catch (err: any) {
         // Ağ hatası kalıcı sonuç sayılmaz, önbelleğe yazılmaz
@@ -308,8 +363,9 @@ class PrizmaSyncService {
     }
 
     if (docResult?.verified && docResult.items?.length) {
+      const healedDocItems = docResult.items.map((it: any) => this.healInvoicePdfItemVat(it, defaultVat));
       return {
-        items: docResult.items,
+        items: healedDocItems,
         freightNet: docResult.freightNet || 0,
         freightGross: docResult.freightGross || 0,
         linesSource: 'invoice_pdf',
@@ -459,22 +515,26 @@ class PrizmaSyncService {
         : (inv.prizmaStfUrl ? inv.prizmaStfUrl.replace(/\/detail\/[^\/]+\//, '/detail/-1/') : undefined);
 
       const cachedOrderRows = inv.prizmaOrderDemandId ? this.orderRowsCache.get(inv.prizmaOrderDemandId) : undefined;
-      const rawItemsList = inv.items || [];
+      const cachedDoc = inv.prizmaDemandId ? this.docLinesCache.get(inv.prizmaDemandId) : undefined;
       const docYear = String(inv.date || '').slice(0, 4);
+      const defaultVatForDoc = docYear === '2025' ? 20 : 22;
+      const rawItemsList = (cachedDoc?.verified && Array.isArray(cachedDoc.items) && cachedDoc.items.length > 0)
+        ? cachedDoc.items
+        : (inv.items || []);
       const isIpMalyavin = /(^|[\s"«])ип\s*["«]?малявин/i.test(inv.supplier || inv.vendorName || '');
       const hasVat20Or22OnInvoice = rawItemsList.some(x => Number(x.vatPercentage) === 20 || Number(x.vatPercentage) === 22);
       const rawSumUnitQty = rawItemsList.reduce((s, x) => s + (Number(x.unitPrice) || 0) * (Number(x.quantity) || 1), 0);
       const invTot = Number(inv.totalAmount) || 0;
       const isInvoiceAlreadyNet = invTot > 0 && rawSumUnitQty > 0 && (invTot / rawSumUnitQty >= 1.12 && invTot / rawSumUnitQty <= 1.40);
 
-      let excludedFreightNetSum = Number(inv.excludedFreightAmount) || 0;
-      let excludedFreightGrossSum = Number(inv.excludedFreightGrossAmount) || 0;
+      let excludedFreightNetSum = cachedDoc?.verified ? (Number(cachedDoc.freightNet) || 0) : (Number(inv.excludedFreightAmount) || 0);
+      let excludedFreightGrossSum = cachedDoc?.verified ? (Number(cachedDoc.freightGross) || 0) : (Number(inv.excludedFreightGrossAmount) || 0);
       let trackedFreightHere = false;
 
       const mappedItems = rawItemsList
         .map((it, idx) => {
           // Fatura belgesinden okunmuş kalem: isim, birim ve fiyat belgeden gelir; STF satırıyla ezilmez.
-          if (it.lineSource === 'invoice_pdf') return { ...it };
+          if (it.lineSource === 'invoice_pdf') return this.healInvoicePdfItemVat({ ...it }, defaultVatForDoc);
           const matchedRow = Array.isArray(cachedOrderRows)
             ? (cachedOrderRows.find((r: any) => `prizma_row_${r.id}` === it.id) || cachedOrderRows[idx])
             : undefined;

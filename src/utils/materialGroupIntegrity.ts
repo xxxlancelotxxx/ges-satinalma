@@ -835,7 +835,10 @@ const PRODUCT_SERIES_RULES: Array<{
   { seriesKey: 'TEHNOVENT_N', seriesLabel: 'Техновент Н', pattern: /техновент\s*н(?![а-яa-z])|tehnovent\s*n(?![a-z])/i },
   { seriesKey: 'FASAD_120', seriesLabel: 'Фасад 120 (120 кг/м³)', pattern: /фасад\s*120|fasad\s*120/i },
   { seriesKey: 'ROKLAYT', seriesLabel: 'Роклайт', pattern: /роклайт|roklayt/i },
+  { seriesKey: 'TEHNOFAS_OPTIMA', seriesLabel: 'Технофас Оптима', pattern: /технофас\s*оптима|tehnofas\s*optima/i },
+  { seriesKey: 'TEHNOFAS_DEKOR', seriesLabel: 'Технофас Декор', pattern: /технофас\s*декор|tehnofas\s*dekor/i },
   { seriesKey: 'TEHNOFAS', seriesLabel: 'Технофас', pattern: /технофас|tehnofas/i },
+  { seriesKey: 'TEHNOBLOK_STANDART', seriesLabel: 'Техноблок Стандарт', pattern: /техноблок\s*стандарт|tehnoblok\s*standart/i },
   { seriesKey: 'TEHNOBLOK', seriesLabel: 'Техноблок', pattern: /техноблок|tehnoblok/i },
   { seriesKey: 'CARBON_PROF', seriesLabel: 'Carbon Prof', pattern: /carbon\s*prof|carbonproof|карбон\s*проф/i },
   { seriesKey: 'GEO_S', seriesLabel: 'Гео С', pattern: /гео\s*с(?![а-яa-z])|geo\s*c(?![a-z])/i },
@@ -1054,6 +1057,11 @@ export function extractSpecSignature(rawText: string): SpecSignature {
   const dims = t.match(/(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(?:x(\d+(?:\.\d+)?))?/);
   if (dims) {
     sig.dims = [dims[1], dims[2], dims[3]].filter(Boolean).map(Number).sort((a, b) => a - b).join('x');
+  } else if (/технофас|техноблок|техновент|техноруф|технофлор|роклайт|минвата|минераловат|каменн|базальт|утеплител|теплоизоляц|taşyünü|taş\s*yünü|tasyunu|пеноплэкс|пеноплекс|penoplex|carbon\s*prof|\bxps\b|эппс|baswool|басвул|rockwool|роквул/i.test(t)) {
+    const thMatch = t.match(/(?:^|[^\d.])(20|30|40|50|60|70|80|90|100|120|140|150|160|180|200|250)\s*(?:мм|mm)\b/);
+    if (thMatch) {
+      sig.dims = thMatch[1];
+    }
   }
   const mic = t.match(/(\d+(?:\.\d+)?)\s*(?:мкм|мкр|микрон|mkm|mkr|mikron)/);
   if (mic) sig.micron = String(Number(mic[1]));
@@ -1120,7 +1128,10 @@ export function isMeasuredUnit(unit?: string): boolean {
 export function extractSpecSignatureForUnit(rawText: string, unit?: string): SpecSignature {
   const sig = extractSpecSignature(rawText);
   if (isMeasuredUnit(unit)) {
-    delete sig.dims;
+    const isInsulationBoard = /технофас|техноблок|техновент|техноруф|технофлор|роклайт|минвата|минераловат|каменн|базальт|утеплител|теплоизоляц|taşyünü|taş\s*yünü|tasyunu|пеноплэкс|пеноплекс|penoplex|carbon\s*prof|\bxps\b|эппс|baswool|басвул|rockwool|роквул/i.test(rawText);
+    if (!isInsulationBoard) {
+      delete sig.dims;
+    }
     delete sig.pack;
     delete sig.bagKg;
     delete sig.litre;

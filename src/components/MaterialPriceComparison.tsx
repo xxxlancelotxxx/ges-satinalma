@@ -6,8 +6,12 @@ import {
   CrossBrandEquivalentFamily,
   buildMode1AppleToAppleComparisons,
   buildMode2CrossBrandFamilies,
-  findCheaperEquivalentBrandSuggestion
+  findCheaperEquivalentBrandSuggestion,
+  isPrizmaHistoryRecord,
+  isGesArchiveHistoryRecord,
+  recalculateMaterialComparisonForSource
 } from '../utils/dualMaterialComparisonEngine';
+export { isPrizmaHistoryRecord, isGesArchiveHistoryRecord, recalculateMaterialComparisonForSource };
 import { SearchableFilterDropdown } from './SearchableFilterDropdown';
 import { materialFingerprint } from '../utils/materialFingerprint';
 import { DateRangeFilterDropdown } from './DateRangeFilterDropdown';
@@ -87,79 +91,12 @@ interface Props {
   jobsites: Jobsite[];
   supervisors?: PurchasingSupervisor[];
   initialMaterialName?: string;
+  initialMaterialId?: string;
   initialCategory?: string;
+  initialSourceFilter?: 'all' | 'prizma_only' | 'local_only';
   onRefreshData?: () => Promise<void>;
   onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => void | Promise<void>;
   onDeleteInvoice?: (id: string) => void | Promise<void>;
-}
-
-// Origin and Source Identification Helpers
-export const isPrizmaHistoryRecord = (h: any): boolean => {
-  if (!h) return false;
-  if (h.origin === 'prizma') return true;
-  if (h.origin === 'ges_archive') return false;
-  const invId = String(h.invoiceId || '');
-  if (invId.startsWith('inv_prizma_') || invId.startsWith('prizma_')) return true;
-  // If invoiceId starts with inv_sync_, inv_cmp_, or inv_ (timestamp), it's a GES Arşiv invoice!
-  if (invId.startsWith('inv_sync_') || invId.startsWith('inv_cmp_') || /^inv_\d+/.test(invId)) return false;
-  return Boolean(h.prizmaSource);
-};
-
-export const isGesArchiveHistoryRecord = (h: any): boolean => {
-  return !isPrizmaHistoryRecord(h);
-};
-
-export function recalculateMaterialComparisonForSource(
-  c: MaterialComparison,
-  sourceFilter: 'all' | 'prizma_only' | 'local_only'
-): MaterialComparison | null {
-  if (sourceFilter === 'all') {
-    return c;
-  }
-
-  const isMatching = sourceFilter === 'prizma_only' ? isPrizmaHistoryRecord : isGesArchiveHistoryRecord;
-  const filteredHistory = (c.history || []).filter(isMatching);
-
-  if (filteredHistory.length === 0) {
-    return null;
-  }
-
-  let totalSpend = 0;
-  let totalQty = 0;
-  filteredHistory.forEach(h => {
-    const qty = Number(h.normalizedQuantity ?? h.quantity) || 0;
-    const price = Number(h.normalizedUnitPrice ?? h.unitPrice) || 0;
-    const spend = (Number(h.originalUnitPrice ?? price) || 0) * (Number(h.originalQuantity ?? qty) || 1);
-    totalSpend += spend;
-    totalQty += qty;
-  });
-
-  const unitPrices = filteredHistory.map(h => Number(h.normalizedUnitPrice ?? h.unitPrice) || 0).filter(p => p > 0);
-  const minUnitPrice = unitPrices.length > 0 ? Math.min(...unitPrices) : 0;
-  const maxUnitPrice = unitPrices.length > 0 ? Math.max(...unitPrices) : 0;
-  const averageUnitPrice = totalQty > 0 ? (totalSpend / totalQty) : (unitPrices.length > 0 ? unitPrices.reduce((a, b) => a + b, 0) / unitPrices.length : 0);
-
-  let priceDifferencePercentage = 0;
-  if (minUnitPrice > 0 && maxUnitPrice > minUnitPrice) {
-    priceDifferencePercentage = Math.round(((maxUnitPrice - minUnitPrice) / minUnitPrice) * 100);
-  }
-
-  const cheapestEntry = filteredHistory.find(h => (Number(h.normalizedUnitPrice ?? h.unitPrice) || 0) === minUnitPrice);
-  const priciestEntry = filteredHistory.find(h => (Number(h.normalizedUnitPrice ?? h.unitPrice) || 0) === maxUnitPrice);
-
-  return {
-    ...c,
-    history: filteredHistory,
-    totalQuantityPurchased: Number(totalQty.toFixed(2)),
-    totalSpend: Math.round(totalSpend),
-    minUnitPrice: Number(minUnitPrice.toFixed(2)),
-    maxUnitPrice: Number(maxUnitPrice.toFixed(2)),
-    averageUnitPrice: Number(averageUnitPrice.toFixed(2)),
-    avgUnitPrice: Number(averageUnitPrice.toFixed(2)),
-    priceDifferencePercentage,
-    cheapestJobsite: cheapestEntry?.jobsiteName || c.cheapestJobsite,
-    priciestJobsite: priciestEntry?.jobsiteName || c.priciestJobsite,
-  };
 }
 
 export const MaterialPriceComparison: React.FC<Props> = ({
@@ -168,7 +105,9 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   jobsites,
   supervisors = [],
   initialMaterialName,
+  initialMaterialId,
   initialCategory,
+  initialSourceFilter,
   onRefreshData,
   onUpdateInvoice,
   onDeleteInvoice
@@ -176,16 +115,18 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const { t } = useLanguage();
   const {user} = useAuth();
   const [selectedMaterialName, setSelectedMaterialName] = useState<string>(
-    comparisons[0]?.materialName || ''
+    initialMaterialId || initialMaterialName || comparisons[0]?.materialName || ''
   );
   const [expandedMaterialName, setExpandedMaterialName] = useState<string | null>(
-    initialMaterialName || null
+    initialMaterialId || initialMaterialName || null
   );
 
   const [selectedInvoiceForModal, setSelectedInvoiceForModal] = useState<InvoiceRecord | null>(null);
 
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [prizmaSourceFilter, setPrizmaSourceFilter] = useState<'all' | 'prizma_only' | 'local_only'>('all');
+  const [prizmaSourceFilter, setPrizmaSourceFilter] = useState<'all' | 'prizma_only' | 'local_only'>(
+    initialSourceFilter || 'all'
+  );
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [selectedJobsite, setSelectedJobsite] = useState<string>('ALL');
   const [selectedVendor, setSelectedVendor] = useState<string>('ALL');
@@ -207,31 +148,12 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const [simCustomQty, setSimCustomQty] = useState<string>('');
   const [mode2SearchTerm, setMode2SearchTerm] = useState<string>('');
 
-  // Handle external navigation (from Dashboard, Prizma Invoices, Drive, Pre-Approval, etc.)
+  // Sync source filter when navigated from Dashboard
   useEffect(() => {
-    if (initialCategory && initialCategory.trim() && initialCategory !== 'ALL') {
-      setSelectedCategory(initialCategory.trim());
-      if (!initialMaterialName || !initialMaterialName.trim()) {
-        setSearchTerm('');
-      }
+    if (initialSourceFilter) {
+      setPrizmaSourceFilter(initialSourceFilter);
     }
-    if (initialMaterialName && initialMaterialName.trim()) {
-      const q = initialMaterialName.trim();
-      setSearchTerm(q);
-      const lower = q.toLowerCase();
-      const match = comparisons.find(c => 
-        c.materialName.toLowerCase() === lower ||
-        c.materialName.toLowerCase().includes(lower) ||
-        lower.includes(c.materialName.toLowerCase()) ||
-        c.history.some(h => (h.originalName && h.originalName.toLowerCase().includes(lower)) || (h.materialName && String(h.materialName).toLowerCase().includes(lower)))
-      );
-      if (match) {
-        const key = match.id || `${match.materialName}___${match.unit}`;
-        setSelectedMaterialName(key);
-        setExpandedMaterialName(key);
-      }
-    }
-  }, [initialMaterialName, initialCategory, comparisons]);
+  }, [initialSourceFilter, initialMaterialName, initialMaterialId]);
 
   // AI & Manual Merge States
   const [isAnalyzingAI, setIsAnalyzingAI] = useState<boolean>(false);
@@ -399,10 +321,10 @@ export const MaterialPriceComparison: React.FC<Props> = ({
 
   const toggleCategoryCollapse = (catName: string) => {
     setCollapsedCategories(prev => {
-      const isCurrentlyCollapsed = prev[catName] !== false; // Default is collapsed (true)
+      const isCurrentlyCollapsed = prev[catName] === true;
       return {
         ...prev,
-        [catName]: isCurrentlyCollapsed ? false : true
+        [catName]: !isCurrentlyCollapsed
       };
     });
   };
@@ -461,11 +383,8 @@ export const MaterialPriceComparison: React.FC<Props> = ({
     return { all, prizma, ges };
   }, [baseComparisons]);
 
-  // Source-filtered raw comparisons
+  // Source-filtered raw comparisons (also normalizes pack-vs-piece unit outliers)
   const sourceFilteredRawComparisons = useMemo(() => {
-    if (prizmaSourceFilter === 'all') {
-      return baseComparisons;
-    }
     const res: MaterialComparison[] = [];
     baseComparisons.forEach(c => {
       const recalculated = recalculateMaterialComparisonForSource(c, prizmaSourceFilter);
@@ -508,16 +427,82 @@ export const MaterialPriceComparison: React.FC<Props> = ({
     }
   }, [mode2CrossBrandFamilies, simSelectedFamilyId]);
 
+  // Handle external navigation (from Dashboard, Prizma Invoices, Drive, Pre-Approval, etc.)
+  // Matches directly against `validComparisons` (Apple-to-Apple Mode 1) so the selected row & modal match 100%!
   useEffect(() => {
+    if (initialCategory && initialCategory.trim() && initialCategory !== 'ALL') {
+      setSelectedCategory(normalizeCategoryName(initialCategory.trim()));
+      if (!initialMaterialName || !initialMaterialName.trim()) {
+        setSearchTerm('');
+      }
+    } else if (initialMaterialName && initialMaterialName.trim()) {
+      setSelectedCategory('ALL');
+    }
+
+    if ((initialMaterialName && initialMaterialName.trim()) || (initialMaterialId && initialMaterialId.trim())) {
+      const q = (initialMaterialName || '').trim();
+      if (q) setSearchTerm(q);
+      const lower = q.toLowerCase();
+
+      // Find in validComparisons (Mode 1 Apple-to-Apple)
+      let match = initialMaterialId
+        ? validComparisons.find(c => c.id === initialMaterialId)
+        : undefined;
+
+      if (!match && lower) {
+        match = validComparisons.find(c => c.materialName.toLowerCase() === lower);
+      }
+
+      if (!match && lower) {
+        const candidates = validComparisons.filter(
+          c =>
+            c.materialName.toLowerCase().includes(lower) ||
+            lower.includes(c.materialName.toLowerCase()) ||
+            c.history.some(
+              h =>
+                (h.originalName && h.originalName.toLowerCase().includes(lower)) ||
+                ((h as any).materialName && String((h as any).materialName).toLowerCase().includes(lower))
+            )
+        );
+        if (candidates.length > 0) {
+          // Prefer candidates that actually have a price gap and highest totalSpend
+          candidates.sort((a, b) => {
+            if ((b.priceDifferencePercentage > 0 ? 1 : 0) !== (a.priceDifferencePercentage > 0 ? 1 : 0)) {
+              return (b.priceDifferencePercentage > 0 ? 1 : 0) - (a.priceDifferencePercentage > 0 ? 1 : 0);
+            }
+            return (b.totalSpend || 0) - (a.totalSpend || 0);
+          });
+          match = candidates[0];
+        }
+      }
+
+      if (match) {
+        const key = match.id || `${match.materialName}___${match.unit}`;
+        setSelectedMaterialName(key);
+        setExpandedMaterialName(key);
+        setCollapsedCategories(prev => ({
+          ...prev,
+          [match!.category]: false
+        }));
+        return;
+      }
+    }
+
     if (validComparisons.length > 0) {
-      const exists = validComparisons.some(c => (c.id && c.id === selectedMaterialName) || `${c.materialName}___${c.unit}` === selectedMaterialName || c.materialName === selectedMaterialName);
+      const exists = validComparisons.some(
+        c =>
+          (c.id && c.id === selectedMaterialName) ||
+          `${c.materialName}___${c.unit}` === selectedMaterialName ||
+          c.materialName === selectedMaterialName
+      );
       if (!exists || !selectedMaterialName) {
-        const firstKey = validComparisons[0].id || `${validComparisons[0].materialName}___${validComparisons[0].unit}`;
+        const firstWithGap = validComparisons.find(c => c.priceDifferencePercentage > 0) || validComparisons[0];
+        const firstKey = firstWithGap.id || `${firstWithGap.materialName}___${firstWithGap.unit}`;
         setSelectedMaterialName(firstKey);
         setExpandedMaterialName(firstKey);
       }
     }
-  }, [validComparisons]);
+  }, [initialMaterialName, initialMaterialId, initialCategory, validComparisons]);
 
   const categories = useMemo<string[]>(() => {
     const uniqueCats = Array.from(new Set(validComparisons.map(c => c.category))) as string[];
@@ -759,8 +744,8 @@ export const MaterialPriceComparison: React.FC<Props> = ({
       const matchesVen = selectedVendor === 'ALL' || c.history.some(h => areVendorsEqual(h.supplier, selectedVendor));
       const matchesSup = selectedSupervisor === 'ALL' || c.history.some(h => (h.uploadedBySupervisorName || '') === selectedSupervisor);
       const matchesPrizma = prizmaSourceFilter === 'all' ||
-        (prizmaSourceFilter === 'prizma_only' && c.history.some(h => h.prizmaSource || h.prizmaRequestCode)) ||
-        (prizmaSourceFilter === 'local_only' && c.history.some(h => !h.prizmaSource && !h.prizmaRequestCode));
+        (prizmaSourceFilter === 'prizma_only' && c.history.some(isPrizmaHistoryRecord)) ||
+        (prizmaSourceFilter === 'local_only' && c.history.some(isGesArchiveHistoryRecord));
       const matchesInvNo = !invoiceNoFilter.trim() || c.history.some(h => String(h.invoiceNumber || '').toLowerCase().includes(invoiceNoFilter.toLowerCase().trim()));
       const matchesDate = !dateFilter.preset || dateFilter.preset === 'all' || c.history.some(h => matchesDateFilter(h.date, dateFilter));
       const matchesGap = !onlyWithPriceGap || c.priceDifferencePercentage > 0;
@@ -3326,7 +3311,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
           ) : (
             Object.entries(groupedFilteredMaterials).map(([catName, rawList]) => {
               const matList = rawList as MaterialComparison[];
-              const isCatCollapsed = collapsedCategories[catName] !== false;
+              const isCatCollapsed = collapsedCategories[catName] === true;
               const catTotalSpend = matList.reduce((acc, curr) => acc + curr.totalSpend, 0);
               const catMaxGap = Math.max(...matList.map(m => m.priceDifferencePercentage));
 

@@ -429,7 +429,7 @@ export function extractBoardVolumeM3(text: string): { thicknessMm: number; areaM
   const match3d = lower.match(/(\d+(?:\.\d+)?)\s*[xх*×]\s*(\d+(?:\.\d+)?)\s*[xх*×]\s*(\d+(?:\.\d+)?)/i);
   if (match3d) {
     const nums = [parseFloat(match3d[1]), parseFloat(match3d[2]), parseFloat(match3d[3])].sort((a, b) => a - b);
-    if (nums[0] >= 3 && nums[0] <= 50 && nums[1] >= 400 && nums[2] >= 400) {
+    if (nums[0] >= 3 && nums[0] <= 250 && nums[1] >= 400 && nums[2] >= 400) {
       thicknessMm = nums[0];
       const areaM2 = Number(((nums[1] / 1000) * (nums[2] / 1000)).toFixed(4));
       const volumeM3 = Number((areaM2 * (thicknessMm / 1000)).toFixed(6));
@@ -437,7 +437,7 @@ export function extractBoardVolumeM3(text: string): { thicknessMm: number; areaM
     }
   }
 
-  const thickMatch = lower.match(/(?:^|[^0-9xх*])(6|8|9|10|12|12\.5|15|18|20|21|24|27|30|35|40|50|60|80|100|120|150|200)\s*(?:мм|mm)\b/i);
+  const thickMatch = lower.match(/(?:^|[^0-9xх*])(6|8|9|10|12|12\.5|15|18|20|21|24|27|30|35|40|50|60|70|80|90|100|120|140|150|160|180|200|250)\s*(?:мм|mm)\b/i);
   if (thickMatch) {
     thicknessMm = parseFloat(thickMatch[1]);
   } else if (lower.includes('фанер') || lower.includes('kontrplak') || lower.includes('plywood')) {
@@ -445,8 +445,9 @@ export function extractBoardVolumeM3(text: string): { thicknessMm: number; areaM
   }
 
   if (thicknessMm) {
-    const isXps = /пеноплэкс|пеноплекс|penoplex|\bxps\b/i.test(lower);
-    const defaultArea = isXps ? 0.6932 : ((lower.includes('1250') || lower.includes('осб') || lower.includes('osb')) ? 3.125 : 2.9768);
+    const isXps = /пеноплэкс|пеноплекс|penoplex|\bxps\b|carbon\s*prof|карбон\s*проф/i.test(lower);
+    const isMinWool = /taşyünü|taş\s*yünü|минвата|минераловат|технофас|техноблок|техновент|техноруф|технофлор|роклайт|baswool|басвул|rockwool|роквул/i.test(lower);
+    const defaultArea = isXps ? 0.6932 : (isMinWool ? 0.72 : ((lower.includes('1250') || lower.includes('осб') || lower.includes('osb')) ? 3.125 : 2.9768));
     const areaM2 = extractBoardAreaM2(lower) || defaultArea;
     const volumeM3 = Number((areaM2 * (thicknessMm / 1000)).toFixed(6));
     return { thicknessMm, areaM2, volumeM3 };
@@ -598,13 +599,24 @@ export function getMaterialBenchmarkUnit(materialName: string, _category?: strin
     return 'm³';
   }
 
+  // 4.5. TAŞYÜNÜ / MİNERAL YÜN VE XPS ISI YALITIM LEVHALARI (Piyasa Standardı: m³ veya çoğunluk birimi)
+  if (
+    /taşyünü|taş\s*yünü|tasyunu|минвата|минераловат|каменн.*ват|базальтов.*утеплител|технофас|tehnofas|техноблок|tehnoblok|техновент|tehnovent|техноруф|tehnoruf|технофлор|tehnoflor|роклайт|roklayt|baswool|басвул|rockwool|роквул|лайт\s*баттс|фасад\s*баттс|пеноплэкс|пеноплекс|penoplex|carbon\s*prof|карбон\s*проф|\bxps\b|эппс/i.test(text) &&
+    !/дюбел|dübel|dubel|клей|yapıştırıcı|yapistirici|harç|harc|ножовка|testere|bıçak|bicak|лента|bant/i.test(text)
+  ) {
+    const m3Count = normalizedUnits.filter(u => u === 'm3' || u === 'm³').length;
+    const m2Count = normalizedUnits.filter(u => u === 'm2' || u === 'm²').length;
+    if (m2Count > m3Count && m2Count > 0) return 'm²';
+    return 'm³';
+  }
+
   // 5. KONTRPLAK / PLYWOOD (m³ veya m² — mevcut birimlerde m³ varsa m³, yoksa m²)
   if (/фанер|kontrplak|plywood/i.test(text)) {
-    if (normalizedUnits.includes('m³')) return 'm³';
+    if (normalizedUnits.includes('m³') || normalizedUnits.includes('m3')) return 'm³';
     return 'm²';
   }
 
-  // 6. İnşaat Demiri & Bağ Teli (Standart: Ton)
+  // 6. İnşaat Demiri & Bağ Teli & Çelik: Rusya'da satınalma standardı daima TON'dur
   if (
     (text.includes('арматур') ||
      text.includes('inşaat demir') ||
@@ -613,6 +625,9 @@ export function getMaterialBenchmarkUnit(materialName: string, _category?: strin
      text.includes('demir nervurlu') ||
      text.includes('a500') ||
      text.includes('а500') ||
+     text.includes('a240') ||
+     text.includes('а240') ||
+     text.includes('b500') ||
      text.includes('bağ teli') ||
      text.includes('bag teli') ||
      text.includes('bağlama teli') ||
@@ -963,6 +978,20 @@ export function convertMaterialUnit(params: {
 
     // Adet / Boy -> Ton (Standart inşaat demir boyu 11.7 m)
     if (from === 'adet' && to === 'ton') {
+      // Eğer birim fiyat zaten piyasa ton fiyatı seviyesindeyse (ör. >= 15,000 ₽),
+      // bu faturada birim sehven 'adet' yazılmış gerçek bir ton fiyatıdır (1 çubuk demir 72.000 ₽ olamaz).
+      if (unitPrice >= 15000) {
+        return {
+          convertedUnitPrice: unitPrice,
+          convertedQuantity: quantity,
+          fromUnit: from,
+          toUnit: to,
+          factor: 1,
+          formula: 'Birim fiyat zaten ton bazlıdır (sehven adet yazılmış)',
+          confidence: 'HIGH',
+          conversionApplied: true
+        };
+      }
       const barLength = text.includes('12') && text.includes('m') ? 12.0 : 11.7;
       const weightPerBarTon = (barLength * kgPerMeter) / 1000;
       return {
@@ -1669,10 +1698,23 @@ export function convertMaterialUnit(params: {
       /\bxps\b/i.test(text) ||
       text.includes('taşyünü') ||
       text.includes('taş yünü') ||
+      text.includes('tasyunu') ||
       text.includes('минвата') ||
+      text.includes('минераловат') ||
+      text.includes('каменн') ||
+      text.includes('базальтов') ||
+      text.includes('утеплител') ||
+      text.includes('теплоизоляц') ||
       text.includes('технофас') ||
       text.includes('техноблок') ||
+      text.includes('техновент') ||
+      text.includes('техноруф') ||
+      text.includes('технофлор') ||
+      text.includes('роклайт') ||
+      text.includes('rockwool') ||
+      text.includes('роквул') ||
       text.includes('baswool') ||
+      text.includes('басвул') ||
       text.includes('logicpir') ||
       text.includes('тент') ||
       text.includes('тарпаулин') ||

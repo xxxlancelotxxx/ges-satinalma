@@ -6,7 +6,8 @@ import { CANONICAL_28_CATEGORIES, normalizeCategoryName, sortCategoriesByPriorit
 import { getCategorySpendingSummary, verifyProcurementDataIntegrity, isPrizmaAutoSyncedInvoice } from './procurementAnalyticsCore';
 import { detectSuperIntelligentProcurementAnomalies } from './aiForensicAuditor';
 import { isLowPriorityConsumable } from './lowPriorityConsumables';
-export { isPrizmaAutoSyncedInvoice };
+import { getSynchronizedAppleToAppleComparisons } from './dualMaterialComparisonEngine';
+export { isPrizmaAutoSyncedInvoice, getSynchronizedAppleToAppleComparisons };
 const ua = formatRuble;
 
 /* Centralized 28 Canonical Categories - Single Source of Truth */
@@ -174,18 +175,150 @@ export function getSupervisorPerformanceData(discounts: any[] = [], supervisors:
   return TY(discounts, supervisors);
 }
 
-export function getTopPriceDifferenceMaterials(comparisons: any[] = [], limit: number = 6, category?: string, search?: string): any[] {
-  return EY(comparisons, limit, category, search).map((m: any) => {
-    return {
-      ...m,
-      minUnitPrice: m.minPrice,
-      maxUnitPrice: m.maxPrice,
-      priceGapPercentage: m.priceDiffPercentage,
-      priceDifferencePercentage: m.priceDiffPercentage,
-      cheapestJobsiteName: m.cheapestJobsite,
-      priciestJobsiteName: m.priciestJobsite,
-    };
+export interface TopPriceGapFilterOptions {
+  sourceFilter?: 'local_only' | 'all' | 'prizma_only';
+  significantOnly?: boolean;
+  minSpendRub?: number;
+  minSavingsRub?: number;
+  sortBy?: 'impact' | 'percentage' | 'spend';
+}
+
+export function getTopPriceDifferenceMaterials(
+  comparisons: any[] = [],
+  limit: number = 6,
+  category?: string,
+  search?: string,
+  options?: TopPriceGapFilterOptions
+): any[] {
+  const sourceFilter = options?.sourceFilter || 'local_only';
+  const significantOnly = options?.significantOnly !== false;
+  const minSpendRub = options?.minSpendRub ?? 50000;
+  const minSavingsRub = options?.minSavingsRub ?? 15000;
+  const sortBy = options?.sortBy || 'impact';
+
+  // Run the exact same Apple-to-Apple + Source Filter pipeline used by MaterialPriceComparison
+  const synchronized = getSynchronizedAppleToAppleComparisons(comparisons, sourceFilter);
+
+  const validGapItems = synchronized
+    .filter(r => {
+      if (!r || r.minUnitPrice <= 0 || r.maxUnitPrice <= r.minUnitPrice) return false;
+      if (wY(r.materialName, r.category)) return false;
+      const historyLen = Array.isArray(r.history) ? r.history.length : 0;
+      if (historyLen < 2) return false;
+      const pct = r.priceDifferencePercentage || Number((((r.maxUnitPrice - r.minUnitPrice) / r.minUnitPrice) * 100).toFixed(1));
+      if (pct < 3) return false;
+      if (category && category !== 'ALL') {
+        const normCat = normalizeCategoryName(r.category, r.materialName).toLowerCase().trim();
+        const targetCat = normalizeCategoryName(category).toLowerCase().trim();
+        if (normCat !== targetCat && (r.category || '').toLowerCase().trim() !== category.toLowerCase().trim()) {
+          return false;
+        }
+      }
+      if (search && search.trim() !== '') {
+        const n = search.toLowerCase().trim();
+        const o = r.materialName && r.materialName.toLowerCase().includes(n);
+        const u = r.category && r.category.toLowerCase().includes(n);
+        const origMatch = Array.isArray(r.history) && r.history.some((h: any) => h.originalName && String(h.originalName).toLowerCase().includes(n));
+        if (!o && !u && !origMatch) return false;
+      }
+      return true;
+    })
+    .map(r => {
+      const history = Array.isArray(r.history) ? r.history : [];
+      const minPrice = Number(r.minUnitPrice) || 0;
+      const maxPrice = Number(r.maxUnitPrice) || 0;
+      const avgPrice = Number(r.averageUnitPrice || r.avgUnitPrice) || minPrice;
+      const totalSpend = Number(r.totalSpend) || 0;
+      const totalQty = Number(r.totalQuantityPurchased) || 0;
+      const priceDiffPercentage =
+        r.priceDifferencePercentage ||
+        (minPrice > 0 ? Number((((maxPrice - minPrice) / minPrice) * 100).toFixed(1)) : 0);
+
+      // Realistic financial impact / savings potential:
+      // Calculate excess paid above minUnitPrice across all history entries (or fallback to (avg - min)*qty)
+      let excessPaidRub = 0;
+      history.forEach((h: any) => {
+        const p = Number(h.normalizedUnitPrice ?? h.unitPrice) || 0;
+        const q = Number(h.normalizedQuantity ?? h.quantity) || 0;
+        if (p > minPrice && q > 0) {
+          excessPaidRub += (p - minPrice) * q;
+        }
+      });
+      if (excessPaidRub <= 0 && maxPrice > minPrice && totalQty > 0) {
+        excessPaidRub = (maxPrice - minPrice) * Math.min(totalQty, Math.max(1, totalQty * 0.5));
+      }
+      const potentialSavingsRub = Math.round(excessPaidRub);
+
+      const cheapestEntry = history.find(
+        (h: any) => Math.abs((Number(h.normalizedUnitPrice ?? h.unitPrice) || 0) - minPrice) < 0.01
+      );
+      const priciestEntry = history.find(
+        (h: any) => Math.abs((Number(h.normalizedUnitPrice ?? h.unitPrice) || 0) - maxPrice) < 0.01
+      );
+
+      const isTrivial = isLowPriorityConsumable(r.materialName, r.category);
+      const isMajorItem = !isTrivial && (totalSpend >= minSpendRub || potentialSavingsRub >= minSavingsRub);
+
+      // Smart composite score combining financial impact (₽), total spend volume, and percentage spread
+      const impactScore = potentialSavingsRub * 1.5 + totalSpend * 0.35 + priceDiffPercentage * 250;
+
+      return {
+        id: r.id || `${r.materialName}___${r.unit}`,
+        materialName: r.materialName,
+        category: r.category || 'Genel',
+        unit: r.unit || 'Birim',
+        minPrice,
+        maxPrice,
+        avgPrice,
+        minUnitPrice: minPrice,
+        maxUnitPrice: maxPrice,
+        priceDiffPercentage,
+        priceGapPercentage: priceDiffPercentage,
+        priceDifferencePercentage: priceDiffPercentage,
+        totalSpend,
+        totalQuantityPurchased: totalQty,
+        potentialSavingsRub,
+        invoiceCount: history.length,
+        cheapestJobsite: cheapestEntry?.jobsiteName || (r as any).cheapestJobsite || (r as any).cheapestJobsiteName || 'En Uygun Şantiye',
+        priciestJobsite: priciestEntry?.jobsiteName || (r as any).priciestJobsite || (r as any).priciestJobsiteName || 'En Yüksek Şantiye',
+        cheapestJobsiteName: cheapestEntry?.jobsiteName || (r as any).cheapestJobsite || (r as any).cheapestJobsiteName || 'En Uygun Şantiye',
+        priciestJobsiteName: priciestEntry?.jobsiteName || (r as any).priciestJobsite || (r as any).priciestJobsiteName || 'En Yüksek Şantiye',
+        cheapestSupplier: cheapestEntry?.supplier || '',
+        priciestSupplier: priciestEntry?.supplier || '',
+        isMajorItem,
+        isTrivial,
+        impactScore,
+        sourceFilter
+      };
+    });
+
+  let pool = validGapItems;
+  if (significantOnly) {
+    const majorOnly = validGapItems.filter(item => item.isMajorItem);
+    // If the user filtered by a specific narrow category that only has medium items, fallback to non-trivial items in that category
+    if (majorOnly.length > 0) {
+      pool = majorOnly;
+    } else if (category && category !== 'ALL') {
+      pool = validGapItems.filter(item => !item.isTrivial && item.totalSpend >= 5000);
+    } else {
+      pool = majorOnly;
+    }
+  }
+
+  pool.sort((a, b) => {
+    if (sortBy === 'percentage') {
+      if (b.priceDiffPercentage !== a.priceDiffPercentage) return b.priceDiffPercentage - a.priceDiffPercentage;
+      return b.potentialSavingsRub - a.potentialSavingsRub;
+    }
+    if (sortBy === 'spend') {
+      if (b.totalSpend !== a.totalSpend) return b.totalSpend - a.totalSpend;
+      return b.potentialSavingsRub - a.potentialSavingsRub;
+    }
+    // Default 'impact': prioritize net financial savings impact & volume so major structural items come first
+    return b.impactScore - a.impactScore;
   });
+
+  return limit > 0 ? pool.slice(0, limit) : pool;
 }
 
 export function getRecentCombinedTransactions(invoices: any[] = [], discounts: any[] = [], limit: number = 0): any[] {
@@ -196,14 +329,24 @@ export function getTopDiscountRecords(discounts: any[] = [], limit: number = 5):
   return OY(discounts, limit);
 }
 
-export function getDashboardAnomalies(invoices: any[] = [], discounts: any[] = [], comparisons: any[] = []): any[] {
-  const legacy = MY(invoices, discounts, comparisons).map((a: any) => ({
+export function getDashboardAnomalies(
+  invoices: any[] = [],
+  discounts: any[] = [],
+  comparisons: any[] = [],
+  sourceFilter: 'local_only' | 'all' | 'prizma_only' = 'local_only'
+): any[] {
+  const syncedComparisons = getSynchronizedAppleToAppleComparisons(comparisons, sourceFilter);
+  const significantSyncedComparisons = syncedComparisons.filter(
+    c => !isLowPriorityConsumable(c.materialName, c.category) && (Number(c.totalSpend) || 0) >= 25000 && (c.history?.length || 0) >= 2
+  );
+
+  const legacy = MY(invoices, discounts, significantSyncedComparisons).map((a: any) => ({
     ...a,
     description: a.materialOrSupplier ? a.materialOrSupplier + ' - ' + a.title : a.title,
     rawRecord: undefined,
   }));
 
-  const superAnomalies = detectSuperIntelligentProcurementAnomalies(invoices, discounts, comparisons).map((sa: any) => ({
+  const superAnomalies = detectSuperIntelligentProcurementAnomalies(invoices, discounts, significantSyncedComparisons).map((sa: any) => ({
     id: sa.id,
     type: sa.type,
     severity: sa.severity,
@@ -229,7 +372,8 @@ export function getDashboardAnomalies(invoices: any[] = [], discounts: any[] = [
   });
 
   return Array.from(map.values()).filter((a: any) =>
-    !isLowPriorityConsumable(a.materialName || a.materialOrSupplier, a.category, a.title)
+    !isLowPriorityConsumable(a.materialName || a.materialOrSupplier, a.category, a.title) &&
+    (Number(a.impactAmount) || 0) >= 10000
   ).sort((a: any, b: any) => {
     const sev = { CRITICAL: 1, WARNING: 2, INFO: 3 };
     const diff = (sev[a.severity as keyof typeof sev] || 2) - (sev[b.severity as keyof typeof sev] || 2);
@@ -285,15 +429,16 @@ function GN(e: any ,t: any ): any {return t===0?e>0?100:0:Number(((e-t)/t*100).t
 function NY(e: any ,t: any ): any {const a=new Set;Array.isArray(e)&&e.forEach(r=>{if(r.isDeleted)return;const n=ps({supplier:r.supplier,notes:r.notes,items:r.items});n&&!j0(n)&&a.add(n),Array.isArray(r.items)&&r.items.forEach(o=>{const u=_s(o.materialName,o.originalName,r.supplier,o.category);u&&!j0(u)&&a.add(u)})}),Array.isArray(t)&&t.forEach(r=>{if(r.isDeleted)return;const n=ps({category:r.category,vendorName:r.vendorName,notes:r.notes,items:r.items});n&&!j0(n)&&a.add(n),Array.isArray(r.items)&&r.items.forEach(o=>{const u=_s(o.materialName,o.originalName,r.vendorName,o.category);u&&!j0(u)&&a.add(u)})});const i=Array.from(a);return i.length===0?Array.from(EP):i.sort()}
 function bY(e: any ): any {
   const{currentInvoices:rawInvoices=[],currentDiscounts:rawDiscounts=[],previousInvoices:rawPrevInvoices=[],previousDiscounts:rawPrevDiscounts=[],jobsites:n=[],supervisors:o=[],anomaliesCount:u=0,categorySpending=[]}=e;
-  const t=rawInvoices.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted&&!isPrizmaAutoSyncedInvoice(F));
+  const t=rawInvoices.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted);
   const a=rawDiscounts.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted);
-  const i=rawPrevInvoices.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted&&!isPrizmaAutoSyncedInvoice(F));
+  const i=rawPrevInvoices.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted);
   const r=rawPrevDiscounts.filter((F: any)=>!F.isDeleted&&!F.isPermanentlyDeleted);
   const c=t;
+  const invoiceTotalSum = c.reduce((F: any, ae: any) => F + (Number(ae.totalAmount) || 0), 0);
   const catTotalSpend = Array.isArray(categorySpending) && categorySpending.length > 0
     ? categorySpending.reduce((acc: number, curr: any) => acc + (Number(curr.spend) || 0), 0)
     : 0;
-  const f = catTotalSpend > 0 ? catTotalSpend : c.reduce((F: any, ae: any) => F + (Number(ae.totalAmount) || 0), 0);
+  const f = invoiceTotalSum > 0 ? invoiceTotalSum : catTotalSpend;
   const m=c.reduce((F: any,ae: any)=>{const ue=Array.isArray(ae.items)?ae.items.reduce((re: any,Z: any)=>re+(Number(Z.discountAmount)||0),0):0;return F+(Number(ae.discount)||ue||0)},0);
   const p=a.reduce((F: any,ae: any)=>{const ue=Math.max(0,(Number(ae.offerPrice)||0)-(Number(ae.agreedPrice)||0));return F+(Number(ae.discountAmount)||ue||0)},0);
   const h=p>0?p:m;

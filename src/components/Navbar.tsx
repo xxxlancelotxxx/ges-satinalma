@@ -417,6 +417,24 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </button>
 
+          {/* 1.5 Malzeme Karşılaştırma (Direct Top-Level Action Button) */}
+          <button
+            onClick={() => handleTabClick('material-compare')}
+            className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+              activeTab === 'material-compare'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-900/40 ring-1 ring-indigo-400/50'
+                : 'text-slate-300 hover:bg-slate-800/90 hover:text-white'
+            }`}
+          >
+            <BarChart3 className={`w-4 h-4 ${activeTab === 'material-compare' ? 'text-amber-300' : 'text-indigo-400'}`} />
+            <span>{t('navMaterialCompare')}</span>
+            {activeTab === 'material-compare' && (
+              <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-950/80 text-amber-300 font-mono border border-indigo-400/30">
+                {t('badgeAnalysis')}
+              </span>
+            )}
+          </button>
+
           {/* 2, 3, 4: Grouped Dropdowns */}
           {navGroups.map((group) => {
             const GroupIcon = group.icon;

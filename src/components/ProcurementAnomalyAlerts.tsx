@@ -421,7 +421,12 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
     });
 
     // 5. İnsandan Üstün Yapay Zeka Satınalma Beyni (4 Gizli Anomali Motoru)
-    const superAnomalies = detectSuperIntelligentProcurementAnomalies(invoices, discounts, comparisons);
+    const verifiedInvoicesForAnomalies = invoices.filter(inv => {
+      const isPrizma = inv.source === 'prizma' || Boolean(inv.prizmaId) || String(inv.id || '').startsWith('inv_prizma_');
+      if (!isPrizma) return true;
+      return (inv as any).linesSource === 'invoice_pdf' || (inv as any).lineCheck?.status === 'verified';
+    });
+    const superAnomalies = detectSuperIntelligentProcurementAnomalies(verifiedInvoicesForAnomalies, discounts, comparisons);
     superAnomalies.forEach(sa => {
       if (!list.some(item => item.id === sa.id)) {
         list.push({

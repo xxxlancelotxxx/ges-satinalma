@@ -1,6 +1,7 @@
 import { MaterialComparison } from '../types';
 import { analyzeMaterialSegment, MaterialQualitySegment } from './materialSegmentIntelligence';
 import { extractSpecSignature, getSpecConflicts, extractOriginalBrandAndSeries } from './materialGroupIntegrity';
+import { normalizeCategoryName } from './categoryClassifier';
 
 export type DualComparisonLens = 'MODE_1_APPLE_TO_APPLE' | 'MODE_2_BRAND_EQUIVALENT';
 
@@ -139,7 +140,10 @@ const CANONICAL_BRAND_RULES: Array<{
       { pattern: /линокром|linokrom/i, seriesName: 'Линокром' },
       { pattern: /бикрост|bikrost/i, seriesName: 'Бикрост' },
       { pattern: /роклайт|rocklight/i, seriesName: 'Роклайт' },
+      { pattern: /техноблок\s*стандарт/i, seriesName: 'Техноблок Стандарт' },
       { pattern: /техноблок/i, seriesName: 'Техноблок' },
+      { pattern: /технофас\s*оптима/i, seriesName: 'Технофас Оптима' },
+      { pattern: /технофас\s*декор/i, seriesName: 'Технофас Декор' },
       { pattern: /технофас/i, seriesName: 'Технофас' },
       { pattern: /техноруф/i, seriesName: 'Техноруф' },
       { pattern: /технофлор/i, seriesName: 'Технофлор' },
@@ -583,7 +587,7 @@ export function normalizeOriginalGeometryAndSpecs(rawOriginal: string): {
   if (!thicknessMm) {
     const thickMatch =
       norm.match(/(?:толщ[а-я.]*\s*|т\.\s*|эпп[\s-]*|ткп[\s-]*|хпп[\s-]*|экп[\s-]*)(\d+(?:\.\d+)?)\s*(?:мм|mm)?/) ||
-      norm.match(/(?:^|[^\d.])(9\.5|12\.5|15|3\.0|3\.5|4\.0|4\.5|20|30|40|50|80|100|120|150)\s*(?:мм|mm)(?![а-яa-z0-9])/);
+      norm.match(/(?:^|[^\d.])(9\.5|12\.5|15|3\.0|3\.5|4\.0|4\.5|20|30|40|50|60|70|80|90|100|120|140|150|160|180|200|250)\s*(?:мм|mm)(?![а-яa-z0-9])/);
     if (thickMatch && thickMatch[1]) {
       const val = Number(thickMatch[1]);
       if (val >= 1.5 && val <= 250) {
@@ -1009,9 +1013,13 @@ export function buildMode1AppleToAppleComparisons(
 
   comparisons.forEach(comp => {
     if (FREIGHT_REGEX.test(comp.materialName || '')) return;
-    const history = (comp.history || []).filter(
-      h => !FREIGHT_REGEX.test(`${h.originalName || ''} ${comp.materialName || ''}`)
-    );
+    const history = (comp.history || []).filter(h => {
+      if (FREIGHT_REGEX.test(`${h.originalName || ''} ${comp.materialName || ''}`)) return false;
+      if (h.isPrizma && (h.isPdfVerified === false || (h.lineCheckStatus && h.lineCheckStatus !== 'verified'))) {
+        return false;
+      }
+      return true;
+    });
     if (history.length === 0) {
       return;
     }
@@ -1047,11 +1055,12 @@ export function buildMode1AppleToAppleComparisons(
       return;
     }
 
-    // Group history entries strictly by Canonical Brand + Product Series/Density
+    // Group history entries strictly by Canonical Brand + Product Series/Density + Board Thickness
     const getEntryMode1BucketKey = (sig: SmartOriginalInvoiceSignature) => {
       const bKey = sig.canonicalBrandKey === 'UNSPECIFIED_STANDARD' ? 'DIGER_BELIRTILMEMIS' : sig.canonicalBrandKey;
       const sKey = sig.subBrandOrSeries ? `__${sig.subBrandOrSeries}` : '';
-      return `${bKey}${sKey}`;
+      const thKey = sig.thicknessMm ? `__TH_${sig.thicknessMm}MM` : '';
+      return `${bKey}${sKey}${thKey}`;
     };
 
     const distinctBuckets = Array.from(
@@ -1100,9 +1109,12 @@ export function buildMode1AppleToAppleComparisons(
         const grossStats = computeGrossStats(subHistory);
 
         const baseCleanName = comp.materialName.replace(/\s*—\s*\[.*\]$/i, '').trim();
+        const thSuffix = firstSig.thicknessMm && !new RegExp(`\\b${firstSig.thicknessMm}\\s*(?:mm|мм)\\b`, 'i').test(baseCleanName)
+          ? ` (${firstSig.thicknessMm} mm)`
+          : '';
         const mode1Name = bKey.startsWith('DIGER_BELIRTILMEMIS') && !firstSig.subBrandOrSeries
-          ? `${baseCleanName} — [Markasız / Standart]`
-          : `${baseCleanName} — [${brandLabel}]`;
+          ? `${baseCleanName}${thSuffix} — [Markasız / Standart]`
+          : `${baseCleanName}${thSuffix} — [${brandLabel}]`;
 
         result.push({
           ...comp,
@@ -1438,6 +1450,9 @@ export function buildMode2CrossBrandFamilies(
   comparisons.forEach(comp => {
     const history = comp.history || [];
     history.forEach(h => {
+      if (h.isPrizma && (h.isPdfVerified === false || (h.lineCheckStatus && h.lineCheckStatus !== 'verified'))) {
+        return;
+      }
       const sig = buildSmartOriginalSignature({
         originalName: h.originalName,
         materialName: comp.materialName,
@@ -1765,3 +1780,195 @@ export function findCheaperEquivalentBrandSuggestion(params: {
     specLabel: matchingFamily.canonicalSpecLabel
   };
 }
+
+/**
+ * Origin and Source Identification Helpers (Shared across Dashboard & MaterialPriceComparison)
+ */
+export const isPrizmaHistoryRecord = (h: any): boolean => {
+  if (!h) return false;
+  if (h.origin === 'prizma') return true;
+  if (h.origin === 'ges_archive') return false;
+  const invId = String(h.invoiceId || '');
+  if (invId.startsWith('inv_prizma_') || invId.startsWith('prizma_')) return true;
+  if (invId.startsWith('inv_sync_') || invId.startsWith('inv_cmp_') || /^inv_\d+/.test(invId)) return false;
+  return Boolean(h.prizmaSource);
+};
+
+export const isGesArchiveHistoryRecord = (h: any): boolean => {
+  return !isPrizmaHistoryRecord(h);
+};
+
+/**
+ * Extracts explicit pack count (e.g. "(100шт)", "(50 шт)", "уп. 200 шт") from original Russian/Turkish description
+ */
+function extractExplicitPackPieceCount(text?: string): number | null {
+  if (!text) return null;
+  const match = text.match(/(?:\(|\b)(\d{2,4})\s*(?:шт|adet|pcs)(?:\)|\b|\/уп)/i);
+  if (!match) return null;
+  const count = parseInt(match[1], 10);
+  if (count >= 10 && count <= 5000) return count;
+  return null;
+}
+
+/**
+ * Normalizes history records where one record in an ADET/piece group has a box price (e.g. "(100шт)" = 503.86 ₽)
+ * while another record is priced per single piece (e.g. 8.65 ₽), preventing false 5000% unit mismatch gaps.
+ */
+function normalizeHistoryPackVsPieceOutliers(history: MaterialComparison['history'], groupUnit?: string): MaterialComparison['history'] {
+  if (!Array.isArray(history) || history.length < 2) return history;
+  const unitLower = String(groupUnit || '').toLowerCase().trim();
+  const isPieceGroup = !unitLower || unitLower === 'adet' || unitLower === 'шт' || unitLower === 'ad' || unitLower === 'birim';
+  if (!isPieceGroup) return history;
+
+  const rawPrices = history
+    .map(h => Number(h.normalizedUnitPrice ?? h.unitPrice) || 0)
+    .filter(p => p > 0);
+  if (rawPrices.length < 2) return history;
+  const minRawPrice = Math.min(...rawPrices);
+  if (minRawPrice <= 0) return history;
+
+  return history.map(h => {
+    const price = Number(h.normalizedUnitPrice ?? h.unitPrice) || 0;
+    const qty = Number(h.normalizedQuantity ?? h.quantity) || 0;
+    const packCount = extractExplicitPackPieceCount(h.originalName || (h as any).rawOriginalName || '');
+    if (packCount && packCount >= 10 && price > minRawPrice * (packCount * 0.25)) {
+      const perPiecePrice = Number((price / packCount).toFixed(2));
+      const totalPieces = Number((qty * packCount).toFixed(2));
+      return {
+        ...h,
+        normalizedUnitPrice: perPiecePrice,
+        normalizedQuantity: totalPieces,
+        unitPrice: perPiecePrice,
+        quantity: totalPieces
+      };
+    }
+    return h;
+  });
+}
+
+export function recalculateMaterialComparisonForSource(
+  c: MaterialComparison,
+  sourceFilter: 'all' | 'prizma_only' | 'local_only'
+): MaterialComparison | null {
+  const isMatching = (h: any): boolean => {
+    // Doğrulanamamış Prizma STF kayıtları (PDF'ten veya AI OCR ile doğrulanamayanlar) fiyat analizini yanıltmaması için hariç tutulur
+    if (isPrizmaHistoryRecord(h) && h?.isPdfVerified === false) {
+      return false;
+    }
+    if (sourceFilter === 'all') return true;
+    if (sourceFilter === 'prizma_only') return isPrizmaHistoryRecord(h);
+    return isGesArchiveHistoryRecord(h);
+  };
+
+  const rawFilteredHistory = (c.history || []).filter(isMatching);
+  if (rawFilteredHistory.length === 0) {
+    return null;
+  }
+
+  const filteredHistory = normalizeHistoryPackVsPieceOutliers(rawFilteredHistory, c.unit);
+
+  let totalSpend = 0;
+  let totalQty = 0;
+  filteredHistory.forEach(h => {
+    const qty = Number(h.normalizedQuantity ?? h.quantity) || 0;
+    const price = Number(h.normalizedUnitPrice ?? h.unitPrice) || 0;
+    const spend =
+      (Number(h.originalUnitPrice ?? h.unitPrice ?? price) || 0) *
+      (Number(h.originalQuantity ?? h.quantity ?? qty) || 1);
+    totalSpend += spend > 0 ? spend : qty * price;
+    totalQty += qty;
+  });
+
+  const unitPrices = filteredHistory
+    .map(h => Number(h.normalizedUnitPrice ?? h.unitPrice) || 0)
+    .filter(p => p > 0);
+  const minUnitPrice = unitPrices.length > 0 ? Math.min(...unitPrices) : 0;
+  const maxUnitPrice = unitPrices.length > 0 ? Math.max(...unitPrices) : 0;
+  const averageUnitPrice =
+    totalQty > 0
+      ? totalSpend / totalQty
+      : unitPrices.length > 0
+      ? unitPrices.reduce((a, b) => a + b, 0) / unitPrices.length
+      : 0;
+
+  let priceDifferencePercentage = 0;
+  if (minUnitPrice > 0 && maxUnitPrice > minUnitPrice) {
+    priceDifferencePercentage = Math.round(((maxUnitPrice - minUnitPrice) / minUnitPrice) * 100);
+  }
+
+  const cheapestEntry = filteredHistory.find(
+    h => Math.abs((Number(h.normalizedUnitPrice ?? h.unitPrice) || 0) - minUnitPrice) < 0.01
+  );
+  const priciestEntry = filteredHistory.find(
+    h => Math.abs((Number(h.normalizedUnitPrice ?? h.unitPrice) || 0) - maxUnitPrice) < 0.01
+  );
+
+  return {
+    ...c,
+    history: filteredHistory,
+    totalQuantityPurchased: Number(totalQty.toFixed(2)),
+    totalSpend: Math.round(totalSpend),
+    minUnitPrice: Number(minUnitPrice.toFixed(2)),
+    maxUnitPrice: Number(maxUnitPrice.toFixed(2)),
+    averageUnitPrice: Number(averageUnitPrice.toFixed(2)),
+    avgUnitPrice: Number(averageUnitPrice.toFixed(2)),
+    priceDifferencePercentage,
+    cheapestJobsite: cheapestEntry?.jobsiteName || c.cheapestJobsite,
+    priciestJobsite: priciestEntry?.jobsiteName || c.priciestJobsite
+  };
+}
+
+export function isNonServiceMaterialComparison(c: MaterialComparison): boolean {
+  if (!c || !c.materialName) return false;
+  const lowerName = c.materialName.toLowerCase();
+  const lowerCat = (c.category || '').toLowerCase();
+  const isService =
+    lowerCat.includes('hizmet') ||
+    lowerCat.includes('lojistik') ||
+    lowerCat.includes('nakliye') ||
+    lowerName.includes('доставк') ||
+    lowerName.includes('транспорт') ||
+    lowerName.includes('услуг') ||
+    lowerName.includes('погрузк') ||
+    lowerName.includes('разгрузк') ||
+    lowerName.includes('перевозк') ||
+    lowerName.includes('экспедировани') ||
+    lowerName.includes('аренд') ||
+    lowerName.includes('рейс') ||
+    lowerName.includes('nakliye') ||
+    lowerName.includes('kargo') ||
+    lowerName.includes('shipp') ||
+    lowerName.includes('deliver') ||
+    lowerName.includes('freight') ||
+    lowerName.includes('taşıma') ||
+    lowerName.includes('tasima') ||
+    lowerName.includes('sevkiyat');
+  return !isService;
+}
+
+/**
+ * Single Source of Truth Pipeline for both Dashboard & MaterialPriceComparison:
+ * 1. Filters out service/freight items & normalizes to 28 canonical categories
+ * 2. Applies sourceFilter ('local_only' = Şef/Personel faturaları, 'all' = Prizma dahil tümü, 'prizma_only' = Sadece Prizma)
+ * 3. Runs Mode 1 Apple-to-Apple brand & specification separation so no cross-brand or cross-source false gaps occur
+ */
+export function getSynchronizedAppleToAppleComparisons(
+  comparisons: MaterialComparison[] = [],
+  sourceFilter: 'all' | 'prizma_only' | 'local_only' = 'local_only'
+): MaterialComparison[] {
+  if (!Array.isArray(comparisons) || comparisons.length === 0) return [];
+  const baseComparisons = comparisons
+    .filter(isNonServiceMaterialComparison)
+    .map(c => ({ ...c, category: normalizeCategoryName(c.category, c.materialName) }));
+
+  const sourceFiltered: MaterialComparison[] = [];
+  baseComparisons.forEach(c => {
+    const recalculated = recalculateMaterialComparisonForSource(c, sourceFilter);
+    if (recalculated) {
+      sourceFiltered.push(recalculated);
+    }
+  });
+
+  return buildMode1AppleToAppleComparisons(sourceFiltered);
+}
+

@@ -1215,7 +1215,16 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
   if (!inv) return inv;
   const cleanSupplier = normalizeVendorName(toSafeString(inv.supplier || inv.vendorName, ''));
   let rawItems = Array.isArray(inv.items) ? inv.items : [];
-  if (pMatch && Array.isArray(pMatch.items) && pMatch.items.length > 0 && String(inv.id || '').startsWith('inv_prizma_')) {
+  const pMatchHasVerifiedPdfLines = Boolean(
+    pMatch &&
+    Array.isArray(pMatch.items) &&
+    pMatch.items.length > 0 &&
+    (pMatch.linesSource === 'invoice_pdf' ||
+     pMatch.lineCheck?.status === 'verified' ||
+     pMatch.items.some((x: any) => x?.lineSource === 'invoice_pdf'))
+  );
+  const isPrizmaId = String(inv.id || '').startsWith('inv_prizma_') || String(inv.id || '').startsWith('prizma_');
+  if (pMatch && Array.isArray(pMatch.items) && pMatch.items.length > 0 && (isPrizmaId || pMatchHasVerifiedPdfLines)) {
     rawItems = pMatch.items.map((it: any) => ({
       ...it,
       prizmaRequestCode: pMatch.prizmaRequestCode || inv.prizmaRequestCode,
@@ -1239,7 +1248,7 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
 
   // Prizma faturasında nakliye yalnızca belgedeki / STF'deki açık nakliye satırlarından gelir. Fatura kaydında
   // eskiden "toplam farkı = nakliye" diye yazılmış tutar artık kullanılmaz (bkz. aşağıdaki kalem/toplam kontrolü).
-  const usePrizmaFreightOnly = Boolean(pMatch && String(inv.id || '').startsWith('inv_prizma_'));
+  const usePrizmaFreightOnly = Boolean(pMatch && (isPrizmaId || pMatchHasVerifiedPdfLines));
   let excludedFreightNetSum = (usePrizmaFreightOnly
     ? Number(pMatch?.excludedFreightAmount)
     : Number(inv.excludedFreightAmount || pMatch?.excludedFreightAmount)) || 0;
@@ -1367,8 +1376,12 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
         ? Number((grossUnitPrice / (1 + storedVatPct / 100)).toFixed(2))
         : grossUnitPrice;
     } else if (it.isNetNormalized && it.unitPriceNet > 0 && it.grossUnitPrice > 0 && !isIpMalyavin) {
-      unitPriceNet = Number(Number(it.unitPriceNet).toFixed(2));
       grossUnitPrice = Number(Number(it.grossUnitPrice).toFixed(2));
+      unitPriceNet = Number(Number(it.unitPriceNet).toFixed(2));
+      // Eğer belgeden okunan satırda KDV oranı > 0 olmasına rağmen net fiyat brüt fiyata eşit kalmışsa düzelt
+      if (effectiveVatPct > 0 && Math.abs(unitPriceNet - grossUnitPrice) < 0.01) {
+        unitPriceNet = Number((grossUnitPrice / (1 + effectiveVatPct / 100)).toFixed(2));
+      }
     } else if (isItemImpliedNet) {
       unitPriceNet = Number(rawUnitPrice.toFixed(2));
       grossUnitPrice = Number(impliedUnit.toFixed(2));
@@ -1389,8 +1402,14 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
 
     // Fatura belgesinden okunan satırda tutarlar belgedeki gibi kalır (yuvarlanmış birim fiyat × miktar kuruş kaydırır)
     const isDocumentLine = it.lineSource === 'invoice_pdf' && Number(it.totalPrice) > 0 && Number(it.grossTotalPrice) > 0;
-    const netTotalPrice = isDocumentLine ? Number(it.totalPrice) : Number((unitPriceNet * qty).toFixed(2));
-    const grossTotalPrice = isDocumentLine ? Number(it.grossTotalPrice) : Number((grossUnitPrice * qty).toFixed(2));
+    const rawDocNetTotal = Number(it.totalPrice);
+    const rawDocGrossTotal = Number(it.grossTotalPrice);
+    const netTotalPrice = isDocumentLine
+      ? (effectiveVatPct > 0 && Math.abs(rawDocNetTotal - rawDocGrossTotal) < 0.05
+          ? Number((rawDocGrossTotal / (1 + effectiveVatPct / 100)).toFixed(2))
+          : rawDocNetTotal)
+      : Number((unitPriceNet * qty).toFixed(2));
+    const grossTotalPrice = isDocumentLine ? rawDocGrossTotal : Number((grossUnitPrice * qty).toFixed(2));
 
     return {
       ...it,
@@ -3611,13 +3630,46 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     return { materialName: 'Klor Tozu / Kireç Kaymağı (Хлорная известь - 20/25 kg)', category: 'Temizlik & Hijyen Malzemeleri' };
   }
 
-  // Taşyünü Технофас Оптима (110 kg/m³) vs Техноблок Стандарт (45 kg/m³)
-  if (/технофас\s+оптима/i.test(combined)) {
-    const uPrice = Number(item.unitPrice) || 0;
-    if (/техноблок\s+стандарт|duvar\s*isi\s*gecis/i.test(cleanOrig) || (uPrice > 0 && uPrice < 1000)) {
-      return { materialName: 'Taşyünü Levha Технониколь Техноблок Стандарт 1200x600x100 mm', category: 'Yalıtım & Alçıpan' };
+  // Taşyünü Технофас / Техноблок / Техновент / Роклайт / Baswool — Gerçek kalınlık (50, 100, 150, 180, 200 mm vb.) ve seri korunur
+  if (/технофас|техноблок|техновент|техноруф|технофлор|роклайт|baswool|басвул/i.test(combined)) {
+    const extractTh = (txt: string) => {
+      const m =
+        txt.match(/\b(?:1200|1000)\s*[*xх×-]\s*(?:600|500)\s*[*xх×-]\s*(20|30|40|50|60|70|75|80|90|100|120|140|150|160|180|200|250)\b/i) ||
+        txt.match(/(?:толщ[а-я.]*\s*|(?:^|[^0-9xх*]))(20|30|40|50|60|70|75|80|90|100|120|140|150|160|180|200|250)\s*(?:мм|mm)\b/i);
+      return m ? m[1] : null;
+    };
+    const th = extractTh(cleanOrig) || extractTh(primaryText) || extractTh(combined) || '100';
+    const woolText = `${cleanOrig} ${primaryText}`;
+    if (/техноблок\s+стандарт|duvar\s*isi\s*gecis/i.test(cleanOrig) || (/техноблок/i.test(woolText) && !/технофас/i.test(cleanOrig))) {
+      return { materialName: `Taşyünü Levha Технониколь Техноблок Стандарт 1200x600x${th} mm (45 kg/m³)`, category: 'Yalıtım & Alçıpan' };
     }
-    return { materialName: 'Taşyünü Levha Технониколь Технофас Оптима 1200x600x100 mm (110 kg/m³)', category: 'Yalıtım & Alçıpan' };
+    if (/технофас\s+оптима/i.test(woolText)) {
+      return { materialName: `Taşyünü Levha Технониколь Технофас Оптима 1200x600x${th} mm (110 kg/m³)`, category: 'Yalıtım & Alçıpan' };
+    }
+    if (/технофас\s+декор/i.test(woolText)) {
+      return { materialName: `Taşyünü Levha Технониколь Технофас Декор 1200x600x${th} mm`, category: 'Yalıtım & Alçıpan' };
+    }
+    if (/технофас/i.test(woolText)) {
+      return { materialName: `Taşyünü Levha Технониколь Технофас 1200x600x${th} mm`, category: 'Yalıtım & Alçıpan' };
+    }
+    if (/техновент\s+оптима/i.test(woolText)) {
+      return { materialName: `Taşyünü Levha Технониколь Техновент Оптима 1200x600x${th} mm`, category: 'Yalıtım & Alçıpan' };
+    }
+    if (/техновент\s+стандарт/i.test(woolText)) {
+      return { materialName: `Taşyünü Levha Технониколь Техновент Стандарт 1200x600x${th} mm (80 kg/m³)`, category: 'Yalıtım & Alçıpan' };
+    }
+    if (/техновент\s+н\b/i.test(woolText)) {
+      return { materialName: `Taşyünü Levha Технониколь Техновент Н 1200x600x${th} mm`, category: 'Yalıtım & Alçıpan' };
+    }
+    if (/роклайт/i.test(woolText)) {
+      return { materialName: `Taşyünü Levha Технониколь Роклайт 1200x600x${th} mm`, category: 'Yalıtım & Alçıpan' };
+    }
+    if (/baswool|басвул/i.test(woolText)) {
+      if (/фасад\s*120/i.test(woolText)) {
+        return { materialName: `Taşyünü Levha Baswool Фасад 120 1200x600x${th} mm (120 kg/m³)`, category: 'Yalıtım & Alçıpan' };
+      }
+      return { materialName: `Taşyünü Levha Baswool 1200x600x${th} mm`, category: 'Yalıtım & Alçıpan' };
+    }
   }
 
   // Çelik Sapan stok kartı altında Bez Sapan (Строп текстильный) girilmişse ayır
@@ -4254,13 +4306,13 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     (/каменн.*ват|минерал.*ват|минвата|базальт.*утепл|басвул|baswool|маты\s*теплоизоляцион|ısı\s*yalıtım\s*şilte|утеплител.*(?:техно|роклайт|rockwool|парок|paroc|изовол|izovol|кнауф|knauf|урса|ursa)|техноблок|технофас|техновент|техноакустик|техноруф|роклайт|rockwool|tasyunu|taşyünü|taş\s*yünü|cam\s*yünü|cam\s*yunu/i.test(primaryText)) &&
     !/клей|пена|крепеж|дюбель|нож|testere|bıçak|труб|цилиндр/i.test(primaryText)
   ) {
-    const woolSrc = (effectiveOrig && /(?:1200|1000)\s*[*xх×-]\s*(?:600|500)|\b(20|30|40|50|75|80|100|120|150|200)\s*(?:мм|mm)/i.test(effectiveOrig)) ? effectiveOrig : primaryText;
+    const woolSrc = (effectiveOrig && /(?:1200|1000)\s*[*xх×-]\s*(?:600|500)|\b(20|30|40|50|60|70|75|80|90|100|120|140|150|160|180|200|250)\s*(?:мм|mm)/i.test(effectiveOrig)) ? effectiveOrig : primaryText;
     const woolTh =
-      woolSrc.match(/\b(?:1200|1000)\s*[*xх×-]\s*(?:600|500)\s*[*xх×-]\s*(20|30|40|50|75|80|100|120|150|200)\b/)?.[1] ||
-      woolSrc.match(/\b(20|30|40|50|75|80|100)\s*[*xх×-]\s*12[02]0\b/)?.[1] ||
-      woolSrc.match(/\b(?:2500|4000|5000|8000|9600|10000|18000)\s*[*xх×-]\s*1[02][02]0\s*[*xх×-]\s*(20|30|40|50|75|80|100)\b/)?.[1] ||
-      woolSrc.match(/(?:^|[^0-9])(20|30|40|50|75|80|100|150|200)\s*(?:мм|mm)(?![a-zа-яё])/i)?.[1] ||
-      primaryText.match(/(?:^|[^0-9])(20|30|40|50|75|80|100|150|200)\s*(?:мм|mm)(?![a-zа-яё])/i)?.[1] ||
+      woolSrc.match(/\b(?:1200|1000)\s*[*xх×-]\s*(?:600|500)\s*[*xх×-]\s*(20|30|40|50|60|70|75|80|90|100|120|140|150|160|180|200|250)\b/)?.[1] ||
+      woolSrc.match(/\b(20|30|40|50|60|70|75|80|90|100|120|140|150|160|180|200|250)\s*[*xх×-]\s*12[02]0\b/)?.[1] ||
+      woolSrc.match(/\b(?:2500|4000|5000|8000|9600|10000|18000)\s*[*xх×-]\s*1[02][02]0\s*[*xх×-]\s*(20|30|40|50|60|70|75|80|90|100)\b/)?.[1] ||
+      woolSrc.match(/(?:^|[^0-9])(20|30|40|50|60|70|75|80|90|100|120|140|150|160|180|200|250)\s*(?:мм|mm)(?![a-zа-яё])/i)?.[1] ||
+      primaryText.match(/(?:^|[^0-9])(20|30|40|50|60|70|75|80|90|100|120|140|150|160|180|200|250)\s*(?:мм|mm)(?![a-zа-яё])/i)?.[1] ||
       '100';
     if (/ralu|фольга\s*проф|ламел/i.test(woolSrc)) {
       return {
@@ -6938,8 +6990,18 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
 
     allInvoices.forEach(inv => {
       if (!inv.items || !Array.isArray(inv.items)) return;
+      const isPrizmaOriginInv = Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_')));
       inv.items.forEach(item => {
         if (!item.materialName || item.unitPrice === undefined || item.unitPrice === null) return;
+        // Kesin Doğrulama Kilidi: Prizma'dan gelen ancak fatura PDF'inden (metin veya AI OCR ile) doğrulanamayan
+        // ham STF sipariş satırları (prizma_row_...) birim/ambalaj yanılsaması yaratmaması için fiyat analizinden hariç tutulur.
+        const isStfOrderRow = String(item.id || '').startsWith('prizma_row_') && item.lineSource !== 'invoice_pdf';
+        const isPdfVerified = !isPrizmaOriginInv && !isStfOrderRow
+          ? true
+          : (inv.linesSource === 'invoice_pdf' || inv.lineCheck?.status === 'verified' || item.lineSource === 'invoice_pdf');
+        if (!isPdfVerified) {
+          return;
+        }
         // Standard comparison baseline is strictly NET (KDV Hariç / Без НДС)
         let priceNum = Number(item.unitPriceNet ?? item.unitPrice);
         if (isNaN(priceNum) || priceNum <= 0) return;
@@ -7192,17 +7254,24 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
     }>();
 
     consolidatedPreMap.forEach((preGroup, canonKey) => {
-      const allGroupUnits = Array.from(preGroup.rawUnits);
-      const benchmarkUnit = getMaterialBenchmarkUnit(preGroup.canonName, preGroup.canonCat, allGroupUnits);
+      // Çoğunluk birimi hesabı için tüm satırların birimlerini geçir
+      const allGroupUnits = preGroup.entries.map((e: any) => e.unit);
+      const isRebarCommodity = /арматур|inşaat demir|insaat demir|a500|а500|a240|а240/i.test(preGroup.canonName) || preGroup.canonCat === 'İnşaat Demiri';
+      const benchmarkUnit = isRebarCommodity ? 'ton' : getMaterialBenchmarkUnit(preGroup.canonName, preGroup.canonCat, allGroupUnits);
       const benchUnitNorm = normalizeStandardUnit(benchmarkUnit);
 
       preGroup.entries.forEach(({ inv, item, priceNum, quantity, unit }) => {
-        const itemUnitNorm = normalizeStandardUnit(unit);
+        let effectiveItemUnit = unit;
+        // İnşaat demirinde birim fiyat 15.000 ₽ üzerindeyse bu kesinlikle ton fiyatıdır (1 adet çubuk demir 72.000 ₽ olamaz)
+        if (isRebarCommodity && normalizeStandardUnit(unit) === 'adet' && priceNum >= 15000) {
+          effectiveItemUnit = 'ton';
+        }
+        const itemUnitNorm = normalizeStandardUnit(effectiveItemUnit);
         const testConv = convertMaterialUnit({
           materialName: preGroup.canonName,
           category: preGroup.canonCat,
           rawItemName: `${item.originalName || ''} ${item.materialName || ''}`.trim(),
-          fromUnit: unit,
+          fromUnit: effectiveItemUnit,
           toUnit: benchmarkUnit,
           unitPrice: priceNum,
           quantity
@@ -7210,7 +7279,7 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
         const isCompatibleWithBenchmark = (itemUnitNorm === benchUnitNorm) || testConv.conversionApplied;
 
         const targetKey = isCompatibleWithBenchmark ? canonKey : `${canonKey}__${itemUnitNorm}`;
-        const displayMaterialName = isCompatibleWithBenchmark ? preGroup.canonName : `${preGroup.canonName} (${unit || itemUnitNorm})`;
+        const displayMaterialName = isCompatibleWithBenchmark ? preGroup.canonName : `${preGroup.canonName} (${effectiveItemUnit || itemUnitNorm})`;
 
         if (!materialMap.has(targetKey)) {
           materialMap.set(targetKey, {
@@ -7224,8 +7293,8 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
         }
 
         const entry = materialMap.get(targetKey)!;
-        entry.rawUnits.add(unit);
-        entry.items.push({ inv, item, priceNum, quantity, unit });
+        entry.rawUnits.add(effectiveItemUnit);
+        entry.items.push({ inv, item, priceNum, quantity, unit: effectiveItemUnit });
       });
     });
 
@@ -7423,7 +7492,9 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
           excludedFreightAmount: inv.excludedFreightAmount,
           excludedFreightGrossAmount: inv.excludedFreightGrossAmount,
           invoiceLinesVerified: inv.linesReconciled !== false,
-          invoiceLinesSource: inv.linesSource || undefined,
+          invoiceLinesSource: inv.linesSource || item.lineSource || undefined,
+          isPdfVerified: !(Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))) || String(item.id || '').startsWith('prizma_row_')) ||
+            inv.linesSource === 'invoice_pdf' || inv.lineCheck?.status === 'verified' || item.lineSource === 'invoice_pdf',
           origin: Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))) ? 'prizma' : 'ges_archive',
           prizmaSource: Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))),
           gesArchiveSource: !Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))),

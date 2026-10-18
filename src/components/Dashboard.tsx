@@ -37,6 +37,7 @@ import {
   getRecentCombinedTransactions,
   getTopDiscountRecords,
   getDashboardAnomalies,
+  getSynchronizedAppleToAppleComparisons,
   exportDashboardToExcel,
   exportDashboardToHtml
 } from '../utils/dashboardStats';
@@ -111,7 +112,7 @@ interface DashboardProps {
   onOpenNewDiscountModal: () => void;
   onOpenBackupModal?: () => void;
   onNavigateToTab: (tabId: string) => void;
-  onNavigateToMaterial?: (materialName: string, category?: string) => void;
+  onNavigateToMaterial?: (materialName: string, category?: string, sourceFilter?: 'all' | 'prizma_only' | 'local_only', materialId?: string) => void;
   onRefreshData?: () => Promise<void>;
   onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => void | Promise<void>;
   onDeleteInvoice?: (id: string) => void | Promise<void>;
@@ -239,6 +240,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [categoryViewMode, setCategoryViewMode] = useState<'hybrid' | 'bars' | 'donut' | 'table'>('hybrid');
   const [showAllCategoryPills, setShowAllCategoryPills] = useState<boolean>(false);
   const [inspectedCategory, setInspectedCategory] = useState<string | null>(null);
+  // Default to supervisor/staff entries ('local_only') and major items (>=50,000 ₽) as requested
+  const [comparisonSourceMode, setComparisonSourceMode] = useState<'local_only' | 'all'>('local_only');
+  const [onlyMajorItems, setOnlyMajorItems] = useState<boolean>(true);
+  const [priceGapSortBy, setPriceGapSortBy] = useState<'impact' | 'percentage' | 'spend'>('impact');
   const [txSearch, setTxSearch] = useState<string>('');
   const [txPage, setTxPage] = useState<number>(1);
   const [txPageSize, setTxPageSize] = useState<number>(10);
@@ -248,17 +253,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
-  // Full transparent visibility across all roles (Admin, Supervisor, Personnel) to foster healthy team competition
-  // Only include GES platform invoices (Yeni Satınalma İndirim Girişi, 1M+ ₽ TDF, AI Fatura / Çek Okuma); exclude Prizma reference invoices
+  // Reactive visibility: respects comparisonSourceMode ('local_only' for GES archive vs 'all' for complete Prizma + GES)
   const effectiveInvoices = useMemo(() => {
     const validInvoices = invoices.filter(i => 
       !i.isDeleted && 
       !i.isPermanentlyDeleted && 
-      !isPrizmaAutoSyncedInvoice(i) &&
+      (comparisonSourceMode === 'all' || !isPrizmaAutoSyncedInvoice(i)) &&
       (i.supplier || (i.items && i.items.length > 0) || i.totalAmount > 0)
     );
     return dedupeSyncedInvoices(validInvoices, discounts);
-  }, [invoices, discounts]);
+  }, [invoices, discounts, comparisonSourceMode]);
 
   const effectiveDiscounts = useMemo(() => {
     return discounts.filter(d => 
@@ -361,10 +365,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
     return filterDiscounts(effectiveDiscounts, filter, previousBounds);
   }, [effectiveDiscounts, filter, previousBounds]);
 
-  // Detected Anomalies
+  // Detected Anomalies (synchronized with active comparisonSourceMode & materiality filter)
   const anomaliesList = useMemo(() => {
-    return getDashboardAnomalies(currentFilteredInvoices, currentFilteredDiscounts, materialComparisons);
-  }, [currentFilteredInvoices, currentFilteredDiscounts, materialComparisons]);
+    return getDashboardAnomalies(currentFilteredInvoices, currentFilteredDiscounts, materialComparisons, comparisonSourceMode);
+  }, [currentFilteredInvoices, currentFilteredDiscounts, materialComparisons, comparisonSourceMode]);
+
+  // Synchronized Apple-to-Apple comparison count for the active source mode
+  const syncedAppleComparisonsCount = useMemo(() => {
+    return getSynchronizedAppleToAppleComparisons(materialComparisons, comparisonSourceMode).length;
+  }, [materialComparisons, comparisonSourceMode]);
 
   // Super-Intelligent Procurement Brain Insights (4 Hidden Anomaly Engines)
   const superIntelligentInsights = useMemo(() => {
@@ -474,10 +483,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
     return getSupervisorPerformanceData(currentFilteredDiscounts, supervisors);
   }, [currentFilteredDiscounts, supervisors]);
 
-  // Top Price Difference Materials
+  // Top Price Difference Materials (100% Apple-to-Apple synchronized with MaterialPriceComparison)
   const topPriceGapMaterials = useMemo(() => {
-    return getTopPriceDifferenceMaterials(materialComparisons, 6, filter.selectedCategory, filter.searchTerm);
-  }, [materialComparisons, filter.selectedCategory, filter.searchTerm]);
+    return getTopPriceDifferenceMaterials(
+      materialComparisons,
+      8,
+      filter.selectedCategory,
+      filter.searchTerm,
+      {
+        sourceFilter: comparisonSourceMode,
+        significantOnly: onlyMajorItems,
+        sortBy: priceGapSortBy
+      }
+    );
+  }, [materialComparisons, filter.selectedCategory, filter.searchTerm, comparisonSourceMode, onlyMajorItems, priceGapSortBy]);
 
   // All Combined Activity Feed for the filtered period
   const allCombinedTransactions = useMemo(() => {
@@ -1201,14 +1220,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </h3>
                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  Canlı Senkronize
+                  Elma-Elma (%100 Mutabakat)
                 </span>
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-500/20 text-indigo-200 border border-indigo-400/30 font-mono">
-                  28 Standart Kategori • {categorySpendingData.length} Aktif (%100 Eşit)
+                  28 Standart Kategori • {categorySpendingData.length} Aktif
                 </span>
               </div>
               <p className="text-xs text-slate-300 mt-0.5">
-                Tüm sekmeler tek doğruluk kaynağından beslenir; aşağıdaki karar kartlarından veya sekme köprülerinden doğrudan ilgili analize geçebilirsiniz.
+                {comparisonSourceMode === 'local_only'
+                  ? 'Varsayılan olarak yalnızca satınalma şefleri ve personelin okuttuğu/yüklediği gerçek faturalar (GES Arşiv) baz alınır.'
+                  : 'Şef/Personel girişleri ile Prizma referans kayıtları birlikte analiz ediliyor.'}
               </p>
             </div>
           </div>
@@ -1217,12 +1238,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div className="flex items-center gap-1.5 flex-wrap">
             <button
               type="button"
-              onClick={() => onNavigateToTab('material-compare')}
+              onClick={() => {
+                if (onNavigateToMaterial) {
+                  onNavigateToMaterial('', filter.selectedCategory !== 'ALL' ? filter.selectedCategory : '', comparisonSourceMode, '');
+                } else {
+                  onNavigateToTab('material-compare');
+                }
+              }}
               className="px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-1.5 border border-white/10 cursor-pointer"
               title="Malzeme Birim Fiyat Karşılaştırma Sekmesine Git"
             >
               <TrendingUp className="w-3.5 h-3.5 text-amber-400" />
-              <span>Fiyat Kıyas ({materialComparisons.length})</span>
+              <span>Fiyat Kıyas ({syncedAppleComparisonsCount})</span>
             </button>
 
             <button
@@ -1289,14 +1316,85 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         </div>
 
+        {/* Source & Materiality Control Bar: Şef/Personel vs Prizma & Büyük Kalem Filtresi */}
+        <div className="mt-3.5 pt-3 border-t border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 relative z-10 text-xs">
+          <div className="flex items-center flex-wrap gap-2">
+            <span className="text-[11px] font-bold text-indigo-200 uppercase tracking-wider flex items-center gap-1.5">
+              <Database className="w-3.5 h-3.5 text-amber-400" />
+              <span>Karşılaştırma Veri Kaynağı:</span>
+            </span>
+            <div className="inline-flex items-center bg-slate-950/70 p-0.5 rounded-xl border border-white/15">
+              <button
+                type="button"
+                onClick={() => setComparisonSourceMode('local_only')}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  comparisonSourceMode === 'local_only'
+                    ? 'bg-emerald-500 text-slate-950 shadow-xs'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+                title="Yalnızca satınalma şefleri ve personelin okuttuğu/yüklediği faturaları (GES Arşiv) baz al"
+              >
+                <CheckCircle2 className="w-3 h-3" />
+                <span>Sadece Şef & Personel Girişleri</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setComparisonSourceMode('all')}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  comparisonSourceMode === 'all'
+                    ? 'bg-amber-500 text-slate-950 shadow-xs'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+                title="Prizma'dan senkronize edilen kayıtları da karşılaştırmaya dahil et"
+              >
+                <Layers className="w-3 h-3" />
+                <span>+ Prizma Dahil Tümü</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-center flex-wrap gap-2">
+            <span className="text-[11px] font-bold text-indigo-200 uppercase tracking-wider flex items-center gap-1">
+              <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-300" />
+              <span>Önem Eşiği:</span>
+            </span>
+            <div className="inline-flex items-center bg-slate-950/70 p-0.5 rounded-xl border border-white/15">
+              <button
+                type="button"
+                onClick={() => setOnlyMajorItems(true)}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                  onlyMajorItems
+                    ? 'bg-indigo-500 text-white shadow-xs'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+                title="Ufak tefek hırdavat/sarf kalemlerini gizle; yalnızca ciddi bütçeli (≥50.000 ₽ harcama veya ≥15.000 ₽ fark etkisi) kalemleri göster"
+              >
+                Büyük & Kritik Kalemler (≥50B ₽)
+              </button>
+              <button
+                type="button"
+                onClick={() => setOnlyMajorItems(false)}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                  !onlyMajorItems
+                    ? 'bg-indigo-500 text-white shadow-xs'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+                title="Küçük sarf malzemeleri dahil tüm fiyat farklarını göster"
+              >
+                Tüm Kalemler
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* Middle Row: 4 Actionable Executive Decision Cards (Always Active & Data-Driven) */}
-        <div className="mt-4 pt-4 border-t border-indigo-500/20 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 relative z-10 text-xs">
-          {/* Card 1: Highest Unit Price Gap Opportunity */}
+        <div className="mt-3.5 pt-3.5 border-t border-indigo-500/20 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 relative z-10 text-xs">
+          {/* Card 1: Highest Unit Price Gap Opportunity (Synchronized Apple-to-Apple & Major Item) */}
           <div
             onClick={() => {
               const topGap = topPriceGapMaterials[0];
               if (topGap && onNavigateToMaterial) {
-                onNavigateToMaterial(topGap.materialName, topGap.category);
+                onNavigateToMaterial(topGap.materialName, topGap.category, comparisonSourceMode, topGap.id);
               } else {
                 onNavigateToTab('material-compare');
               }
@@ -1307,7 +1405,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <div className="flex items-center justify-between gap-2 mb-1.5">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
                   <TrendingUp className="w-3.5 h-3.5 text-amber-400" />
-                  <span>En Yüksek Fiyat Makası</span>
+                  <span>{onlyMajorItems ? 'Büyük Kalem Fiyat Makası' : 'En Yüksek Fiyat Makası'}</span>
                 </span>
                 {topPriceGapMaterials[0] && (
                   <span className="font-mono font-black text-[11px] bg-amber-500/25 text-amber-200 px-1.5 py-0.5 rounded border border-amber-400/30">
@@ -1323,13 +1421,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   <p className="text-[11px] text-slate-300 mt-1 font-mono">
                     Min: <span className="text-emerald-300 font-bold">{formatRubleWithDecimals(topPriceGapMaterials[0].minPrice)}</span> • Max: <span className="text-rose-300 font-bold">{formatRubleWithDecimals(topPriceGapMaterials[0].maxPrice)}</span>
                   </p>
+                  <div className="flex items-center justify-between gap-2 mt-1.5 text-[10px] font-mono text-amber-200/90 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-400/20">
+                    <span>Hacim: {formatRuble(topPriceGapMaterials[0].totalSpend || 0)}</span>
+                    <span>•</span>
+                    <span className="text-emerald-300 font-bold">Etki: {formatRuble(topPriceGapMaterials[0].potentialSavingsRub || 0)}</span>
+                  </div>
                 </>
               ) : (
                 <p className="text-slate-300 text-[11px] mt-1">Seçili filtrede belirgin birim fiyat farkı yok.</p>
               )}
             </div>
             <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-amber-300 font-semibold">
-              <span className="truncate">{topPriceGapMaterials[0]?.category || 'Birim Fiyat Analizi'}</span>
+              <span className="truncate">
+                {topPriceGapMaterials[0]
+                  ? `${topPriceGapMaterials[0].invoiceCount || 2} Fatura • ${topPriceGapMaterials[0].category}`
+                  : 'Birim Fiyat Analizi'}
+              </span>
               <span className="group-hover:translate-x-0.5 transition-transform shrink-0">Kıyasla →</span>
             </div>
           </div>
@@ -2596,60 +2703,151 @@ export const Dashboard: React.FC<DashboardProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Price Difference Materials (6 cols) */}
         <div className="lg:col-span-6 bg-white rounded-2xl p-5 sm:p-6 border border-slate-200/80 shadow-xs flex flex-col">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
             <div>
-              <h2 className="text-base font-bold text-slate-900 flex items-center space-x-2">
-                <span>Fiyat Farkı En Yüksek Malzemeler</span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 font-bold border border-rose-100">
-                  Makas Analizi
+              <h2 className="text-base font-bold text-slate-900 flex items-center flex-wrap gap-2">
+                <span>{onlyMajorItems ? 'Fiyat Farkı En Yüksek Büyük Kalemler' : 'Fiyat Farkı En Yüksek Malzemeler'}</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-bold border border-emerald-200">
+                  {comparisonSourceMode === 'local_only' ? 'Şef & Personel Faturaları' : 'Prizma Dahil Tümü'}
                 </span>
               </h2>
-              <p className="text-xs text-slate-500">Şantiyeler arasında en ucuz ve en pahalı alım farkı</p>
+              <p className="text-xs text-slate-500">
+                Aynı marka ve teknik özellikteki (Elma-Elma) alımlar arasında doğrulanmış gerçek birim fiyat makası
+              </p>
             </div>
             <button
-              onClick={() => onNavigateToTab('material-compare')}
-              className="text-xs font-semibold text-indigo-600 hover:text-indigo-700 flex items-center space-x-1 cursor-pointer"
+              onClick={() => {
+                if (onNavigateToMaterial) {
+                  onNavigateToMaterial('', filter.selectedCategory !== 'ALL' ? filter.selectedCategory : '', comparisonSourceMode, '');
+                } else {
+                  onNavigateToTab('material-compare');
+                }
+              }}
+              className="text-xs font-semibold text-indigo-600 hover:text-indigo-700 flex items-center space-x-1 cursor-pointer shrink-0"
             >
               <span>Tümünü Gör</span>
               <ChevronRight className="w-3.5 h-3.5" />
             </button>
           </div>
 
-          <div className="space-y-3 flex-1 overflow-y-auto">
+          {/* Quick Source, Materiality & Sort Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3 pb-3 border-b border-slate-100 text-[11px]">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200/80">
+                <button
+                  type="button"
+                  onClick={() => setComparisonSourceMode('local_only')}
+                  className={`px-2 py-1 rounded-md font-bold transition-all cursor-pointer ${
+                    comparisonSourceMode === 'local_only'
+                      ? 'bg-white text-emerald-700 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Şef/Personel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setComparisonSourceMode('all')}
+                  className={`px-2 py-1 rounded-md font-bold transition-all cursor-pointer ${
+                    comparisonSourceMode === 'all'
+                      ? 'bg-white text-amber-700 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  +Prizma
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setOnlyMajorItems(prev => !prev)}
+                className={`px-2.5 py-1 rounded-lg font-bold border transition-all cursor-pointer ${
+                  onlyMajorItems
+                    ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                    : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                }`}
+                title="Ufak sarf/hırdavat kalemlerini filtrele, ≥50.000 ₽ hacimli ciddi alımları öne çıkar"
+              >
+                {onlyMajorItems ? '✓ Büyük Kalemler (≥50B ₽)' : 'Tüm Kalemler'}
+              </button>
+            </div>
+
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">Sırala:</span>
+              <select
+                value={priceGapSortBy}
+                onChange={(e) => setPriceGapSortBy(e.target.value as 'impact' | 'percentage' | 'spend')}
+                className="bg-slate-50 border border-slate-200 text-slate-700 rounded-lg px-2 py-1 font-semibold text-[11px] focus:outline-hidden focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+              >
+                <option value="impact">Net Fark Etkisi (₽)</option>
+                <option value="spend">Toplam Alım Hacmi (₽)</option>
+                <option value="percentage">Makas Oranı (%)</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="space-y-2.5 flex-1 overflow-y-auto max-h-96 pr-0.5">
             {topPriceGapMaterials.length > 0 ? (
               topPriceGapMaterials.map((mat, idx) => (
                 <div
-                  key={idx}
-                  onClick={() => onNavigateToMaterial ? onNavigateToMaterial(mat.materialName, mat.category) : onNavigateToTab('material-compare')}
-                  className="p-3 bg-slate-50 hover:bg-indigo-50/40 rounded-xl border border-slate-200/70 transition-colors cursor-pointer flex items-center justify-between gap-3 group"
+                  key={mat.id || idx}
+                  onClick={() =>
+                    onNavigateToMaterial
+                      ? onNavigateToMaterial(mat.materialName, mat.category, comparisonSourceMode, mat.id)
+                      : onNavigateToTab('material-compare')
+                  }
+                  className="p-3 bg-slate-50 hover:bg-indigo-50/50 rounded-xl border border-slate-200/80 hover:border-indigo-300 transition-all cursor-pointer flex items-center justify-between gap-3 group"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center space-x-2">
+                    <div className="flex items-center flex-wrap gap-1.5">
+                      <span className="text-[10px] font-mono font-bold text-slate-400">#{idx + 1}</span>
                       <span className="text-xs font-bold text-slate-900 group-hover:text-indigo-700 truncate" title={mat.materialName}>
                         {mat.materialName}
                       </span>
-                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-200 text-slate-700 font-medium shrink-0">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-200/80 text-slate-700 font-semibold shrink-0">
                         {mat.category}
                       </span>
+                      <span className="text-[10px] font-mono text-slate-500 shrink-0">
+                        ({mat.invoiceCount || 2} fatura)
+                      </span>
                     </div>
-                    <div className="flex items-center space-x-3 mt-1.5 text-[11px] text-slate-500">
-                      <span className="text-emerald-700 font-mono font-medium">Min: {formatRubleWithDecimals(mat.minPrice)}</span>
+                    <div className="flex items-center flex-wrap gap-x-3 gap-y-1 mt-1.5 text-[11px] text-slate-500 font-mono">
+                      <span className="text-emerald-700 font-semibold">
+                        Min: {formatRubleWithDecimals(mat.minPrice)}/{mat.unit}
+                      </span>
                       <span>•</span>
-                      <span className="text-rose-700 font-mono font-medium">Max: {formatRubleWithDecimals(mat.maxPrice)}</span>
-                      <span className="hidden sm:inline text-slate-400">({mat.cheapestJobsite} vs {mat.priciestJobsite})</span>
+                      <span className="text-rose-700 font-semibold">
+                        Max: {formatRubleWithDecimals(mat.maxPrice)}/{mat.unit}
+                      </span>
+                      <span className="text-slate-400 font-sans text-[10px] truncate">
+                        ({mat.cheapestJobsite} vs {mat.priciestJobsite})
+                      </span>
+                    </div>
+                    <div className="flex items-center flex-wrap gap-x-3 gap-y-0.5 mt-1 text-[10px] font-mono">
+                      <span className="text-slate-600">
+                        Toplam Alım: <strong className="text-slate-900">{formatRuble(mat.totalSpend || 0)}</strong>
+                      </span>
+                      {mat.potentialSavingsRub > 0 && (
+                        <span className="text-amber-700 font-bold">
+                          • Fark/Tasarruf Etkisi: {formatRuble(mat.potentialSavingsRub)}
+                        </span>
+                      )}
                     </div>
                   </div>
 
-                  <div className="text-right shrink-0">
-                    <span className="inline-flex items-center px-2 py-1 rounded-lg bg-rose-100 text-rose-800 text-xs font-mono font-bold">
+                  <div className="text-right shrink-0 flex flex-col items-end gap-1">
+                    <span className="inline-flex items-center px-2 py-1 rounded-lg bg-rose-100 text-rose-800 text-xs font-mono font-bold border border-rose-200/60">
                       %{mat.priceDiffPercentage.toFixed(0)} Fark
+                    </span>
+                    <span className="text-[10px] font-semibold text-indigo-600 group-hover:translate-x-0.5 transition-transform">
+                      Detaylı Kıyas →
                     </span>
                   </div>
                 </div>
               ))
             ) : (
               <div className="text-center py-8 text-slate-400 text-xs">
-                Şantiyeler arasında belirgin bir fiyat makası tespit edilmedi.
+                Seçili kriterlerde şantiyeler arasında belirgin bir fiyat makası tespit edilmedi.
               </div>
             )}
           </div>

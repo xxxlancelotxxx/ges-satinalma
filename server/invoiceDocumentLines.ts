@@ -9,8 +9,10 @@
  *  3. Tutmuyorsa STF satırlarını korur ama faturayı "doğrulanmadı" diye işaretler (fark uydurulmaz).
  */
 import { PDFParse } from 'pdf-parse';
-import { parseInvoiceText, verifyParsedInvoice, mapDocumentUnit, ParsedInvoiceDocument } from '../src/utils/invoiceLineParser';
+import { Type } from '@google/genai';
+import { parseInvoiceText, verifyParsedInvoice, mapDocumentUnit, ParsedInvoiceDocument, ParsedInvoiceLine } from '../src/utils/invoiceLineParser';
 import { normalizeCategoryName, translateRussianMaterialToTurkish } from '../src/utils/categoryClassifier';
+import { getGenAI, robustParseJSON, generateContentWithResilience } from './aiOcrEngine';
 
 export type InvoiceLineCheckStatus =
   | 'verified'            // kalemler fatura belgesinden okundu ve tutarı tutuyor
@@ -37,10 +39,13 @@ export interface DocumentLinesResult {
   freightNet?: number;
   freightGross?: number;
   grossSum?: number;
+  parserVersion?: number;
 }
 
-const FREIGHT_OR_SERVICE_RE = /шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставк|организация\s*доставк|грузоперевоз|перевозк|транспортн|автоуслуг|манипулятор|логистик|погруз|разгруз|услуг[аи]\s+по|nakliye|teslimat\s*hizmet|kargo/i;
-const FREIGHT_EXCEPTION_RE = /шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел|швеллер|угол|труба|арматур|лист|балка|сетка|кабель|провод|доска|брус|фанер/i;
+export const CURRENT_DOC_LINES_PARSER_VERSION = 2;
+
+const FREIGHT_OR_SERVICE_RE = /\b(?:доставк\w*|организация\s*доставк\w*|грузоперевоз\w*|перевозк\w*|транспортн\w+\s*(?:услуг|расход)\w*|автоуслуг\w*|манипулятор\w*|логистик\w*|погрузк\w*|погрузочн\w*|разгрузк\w*|разгрузочн\w*|такелаж\w*|аренда\b|kiralama\b|услуг[аи]\s+по|работы\s+по|nakliye|teslimat\s*hizmet|kargo)/i;
+const FREIGHT_EXCEPTION_RE = /шлифмашин|диск|круг|лента|шкурка|смесь|клей|раствор|состав|пен[аы]|пистолет|коробк|клин|дюбел|анкер|швеллер|угол|труба|арматур|лист|балка|сетка|кабель|провод|доска|брус|фанер|блок|плит|пила|хомут|профиль|шина|паста/i;
 
 export function isFreightOrServiceText(text: string): boolean {
   return FREIGHT_OR_SERVICE_RE.test(text) && !FREIGHT_EXCEPTION_RE.test(text);
@@ -77,15 +82,22 @@ export function buildItemsFromParsedInvoice(
   let freightGross = 0;
 
   for (const line of doc.lines) {
+    const vatPct = line.vatPct ?? doc.docVatPct ?? (doc.docVatAmount === 0 ? 0 : defaultVat);
+    const grossAmt = round2(line.grossAmount);
+    // Eğer satırda KDV oranı > 0 olmasına rağmen netAmount grossAmount'a eşit kalmışsa (belge dipnotunda KDV yüzdesi yazmadığı için),
+    // net tutarı KDV oranına bölerek kesin olarak ayrıştır.
+    const netAmt = (vatPct > 0 && Math.abs(line.netAmount - grossAmt) < 0.01)
+      ? round2(grossAmt / (1 + vatPct / 100))
+      : round2(line.netAmount);
+
     if (isFreightOrServiceText(line.name)) {
-      freightNet += line.netAmount;
-      freightGross += line.grossAmount;
+      freightNet += netAmt;
+      freightGross += grossAmt;
       continue;
     }
-    const vatPct = line.vatPct ?? doc.docVatPct ?? defaultVat;
     const qty = line.quantity || 1;
-    const grossUnitPrice = round2(line.grossAmount / qty);
-    const unitPriceNet = round2(line.netAmount / qty);
+    const grossUnitPrice = round2(grossAmt / qty);
+    const unitPriceNet = round2(netAmt / qty);
     const translated = translateRussianMaterialToTurkish(line.name) || line.name;
     const stf = bestStfMatch(line.name, ctx.stfItems || []);
     items.push({
@@ -99,8 +111,8 @@ export function buildItemsFromParsedInvoice(
       unitPrice: unitPriceNet,
       unitPriceNet,
       grossUnitPrice,
-      totalPrice: round2(line.netAmount),
-      grossTotalPrice: round2(line.grossAmount),
+      totalPrice: netAmt,
+      grossTotalPrice: grossAmt,
       vatPercentage: vatPct,
       isNetNormalized: true,
       lineSource: 'invoice_pdf',
@@ -128,7 +140,13 @@ export function readInvoiceDocumentText(
   const parsed = parseInvoiceText(text);
   const check = verifyParsedInvoice(parsed, ctx.invoiceTotal);
   if (!check.verified) {
-    return { fileId: ctx.fileId, verified: false, note: check.reason || 'Belge doğrulanamadı', grossSum: check.grossSum };
+    return {
+      fileId: ctx.fileId,
+      verified: false,
+      note: check.reason || 'Belge doğrulanamadı',
+      grossSum: check.grossSum,
+      parserVersion: CURRENT_DOC_LINES_PARSER_VERSION
+    };
   }
   const built = buildItemsFromParsedInvoice(parsed, { docYear: ctx.docYear, stfItems: ctx.stfItems });
   return {
@@ -138,8 +156,175 @@ export function readInvoiceDocumentText(
     items: built.items,
     freightNet: built.freightNet,
     freightGross: built.freightGross,
-    grossSum: check.grossSum
+    grossSum: check.grossSum,
+    parserVersion: CURRENT_DOC_LINES_PARSER_VERSION
   };
+}
+
+/**
+ * Metin katmanı olmayan (taranmış resim) veya karmaşık sütun düzenli PDF faturalarını
+ * Gemini (gemini-2.5-flash) ile okur ve yalnızca fatura toplamını (expectedTotal)
+ * aritmetik olarak tutturursa doğrulanmış kabul eder.
+ */
+export async function readInvoiceDocumentWithGemini(
+  pdfBuffer: Buffer,
+  ctx: { invoiceTotal: number; docYear: string; stfItems?: any[]; fileId?: number; mimeType?: string }
+): Promise<DocumentLinesResult> {
+  if (!pdfBuffer || pdfBuffer.length < 100 || pdfBuffer.length > 15 * 1024 * 1024) {
+    return {
+      fileId: ctx.fileId,
+      verified: false,
+      note: 'PDF boyutu AI okuma için uygun değil',
+      parserVersion: CURRENT_DOC_LINES_PARSER_VERSION
+    };
+  }
+  const isPdf = pdfBuffer.subarray(0, 5).toString('latin1') === '%PDF-';
+  const mimeType = isPdf ? 'application/pdf' : (ctx.mimeType || 'application/pdf');
+  if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
+    return {
+      fileId: ctx.fileId,
+      verified: false,
+      note: `Desteklenmeyen belge formatı (${mimeType})`,
+      parserVersion: CURRENT_DOC_LINES_PARSER_VERSION
+    };
+  }
+
+  try {
+    const ai = getGenAI();
+    const { text: resText } = await generateContentWithResilience(ai, {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                mimeType,
+                data: pdfBuffer.toString('base64')
+              }
+            },
+            {
+              text: `Извлеки все товарные строки из этого счета на оплату / УПД.
+Ожидаемая общая сумма счета к оплате (с НДС): ${ctx.invoiceTotal} руб.
+Правила:
+1. Поле "name" должно содержать точное оригинальное наименование товара на русском языке со всеми размерами (например, 1200х600х180 мм, плотность, марка).
+2. Поле "unitRaw" должно содержать точную единицу измерения из таблицы (шт, м3, м2, уп, пог. м, кг, т, рул и т.д.).
+3. Поле "pricesIncludeVat": true, если сумма строки ("Сумма") уже включает НДС ("В том числе НДС" или "Без НДС"); false, если НДС начисляется сверху на сумму строки.
+4. Проверь арифметику: quantity * price = amount.`
+            }
+          ]
+        }
+      ],
+      config: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            pricesIncludeVat: { type: Type.BOOLEAN },
+            docVatPct: { type: Type.NUMBER },
+            docVatAmount: { type: Type.NUMBER },
+            totalWithVat: { type: Type.NUMBER },
+            lines: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  no: { type: Type.INTEGER },
+                  name: { type: Type.STRING },
+                  article: { type: Type.STRING },
+                  quantity: { type: Type.NUMBER },
+                  unitRaw: { type: Type.STRING },
+                  price: { type: Type.NUMBER },
+                  amount: { type: Type.NUMBER },
+                  vatPct: { type: Type.NUMBER },
+                  vatAmount: { type: Type.NUMBER }
+                },
+                required: ['no', 'name', 'quantity', 'unitRaw', 'price', 'amount']
+              }
+            }
+          },
+          required: ['pricesIncludeVat', 'lines']
+        }
+      }
+    });
+
+    const rawJson = robustParseJSON(resText || '{}');
+    if (!rawJson || !Array.isArray(rawJson.lines) || rawJson.lines.length === 0) {
+      return {
+        fileId: ctx.fileId,
+        verified: false,
+        note: 'AI belgede okunabilir kalem tablosu bulamadı',
+        parserVersion: CURRENT_DOC_LINES_PARSER_VERSION
+      };
+    }
+
+    const defaultVat = ctx.docYear === '2025' ? 20 : 22;
+    const pricesIncludeVat = typeof rawJson.pricesIncludeVat === 'boolean' ? rawJson.pricesIncludeVat : true;
+    const docVatPct = typeof rawJson.docVatPct === 'number' && rawJson.docVatPct >= 0 ? rawJson.docVatPct : defaultVat;
+
+    const parsedLines: ParsedInvoiceLine[] = rawJson.lines.map((l: any, idx: number) => {
+      const qty = Number(l.quantity) || 1;
+      const price = Number(l.price) || 0;
+      const amount = Number(l.amount) || round2(qty * price);
+      const vatPct = typeof l.vatPct === 'number' && l.vatPct >= 0 ? l.vatPct : docVatPct;
+      const grossAmount = pricesIncludeVat ? amount : round2(amount * (1 + vatPct / 100));
+      const netAmount = pricesIncludeVat
+        ? (vatPct > 0 ? round2(amount / (1 + vatPct / 100)) : amount)
+        : amount;
+      return {
+        no: Number(l.no) || idx + 1,
+        name: String(l.name || '').trim(),
+        ...(l.article ? { article: String(l.article).trim() } : {}),
+        quantity: qty,
+        unitRaw: String(l.unitRaw || 'шт').trim(),
+        price,
+        amount,
+        vatPct,
+        ...(typeof l.vatAmount === 'number' ? { vatAmount: l.vatAmount } : {}),
+        grossAmount,
+        netAmount
+      };
+    });
+
+    const parsedDoc: ParsedInvoiceDocument = {
+      lines: parsedLines,
+      totalWithVat: typeof rawJson.totalWithVat === 'number' ? rawJson.totalWithVat : undefined,
+      docVatAmount: typeof rawJson.docVatAmount === 'number' ? rawJson.docVatAmount : undefined,
+      docVatPct,
+      pricesIncludeVat,
+      warnings: []
+    };
+
+    const check = verifyParsedInvoice(parsedDoc, ctx.invoiceTotal);
+    if (!check.verified) {
+      return {
+        fileId: ctx.fileId,
+        verified: false,
+        note: `AI OCR toplam doğrulaması tutmadı: ${check.reason || ''}`,
+        grossSum: check.grossSum,
+        parserVersion: CURRENT_DOC_LINES_PARSER_VERSION
+      };
+    }
+
+    const built = buildItemsFromParsedInvoice(parsedDoc, { docYear: ctx.docYear, stfItems: ctx.stfItems });
+    return {
+      fileId: ctx.fileId,
+      verified: true,
+      note: `${parsedDoc.lines.length} kalem fatura belgesinden (AI OCR) doğrulandı`,
+      items: built.items,
+      freightNet: built.freightNet,
+      freightGross: built.freightGross,
+      grossSum: check.grossSum,
+      parserVersion: CURRENT_DOC_LINES_PARSER_VERSION
+    };
+  } catch (err: any) {
+    return {
+      fileId: ctx.fileId,
+      verified: false,
+      note: `AI OCR hatası: ${err.message || 'Bilinmeyen hata'}`,
+      parserVersion: CURRENT_DOC_LINES_PARSER_VERSION
+    };
+  }
 }
 
 /** STF/belge kalemlerinin fatura tutarını tutup tutmadığını hesaplar (uydurma nakliye yok). */
