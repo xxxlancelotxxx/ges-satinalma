@@ -338,10 +338,11 @@ export function parseInvoiceText(rawText: string): ParsedInvoiceDocument {
       .replace(/(^|\s)Картинка(?=\s|$)/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-    // Baştaki tedarikçi artikel kodu (ör. "SR-091РНГР80(1 ,0)", "SAMC-03620000 1", "00000627664", "2215694") ürün adı değildir.
+    // Baştaki tedarikçi artikel kodu (ör. "SR-091РНГР80(1 ,0)", "SAMC-03620000 1", "00000627664", "0000063113 8", "2215694") ürün adı değildir.
     let article: string | undefined;
     const art =
       name.match(/^([A-ZА-Я]{2,6}-[0-9A-Za-zА-Яа-я()\-]+)(?:\s+([0-9,()]{1,4}))?(?=\s+\S)/) ||
+      name.match(/^(\d{8,12})\s+(\d{1,3})(?=\s+[А-ЯЁA-Za-z«"'])/) ||
       name.match(/^(\d{5,12})(?=\s+[А-ЯЁA-Za-z«"'])/);
     if (art) {
       article = `${art[1]}${art[2] || ''}`.replace(/\s+/g, '');

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { parseInvoiceText, verifyParsedInvoice, mapDocumentUnit } from '../src/utils/invoiceLineParser';
-import { readInvoiceDocumentText, buildLineCheck, isFreightOrServiceText, repairDocumentItems, cleanDocumentLineName, splitFreightFromDocumentItems } from './invoiceDocumentLines';
+import { readInvoiceDocumentText, buildLineCheck, isFreightOrServiceText, repairDocumentItems, cleanDocumentLineName, splitFreightFromDocumentItems, splitLeadingArticle, repairDocumentItemName, buildItemsFromParsedInvoice } from './invoiceDocumentLines';
 import { getMaterialBenchmarkUnit, convertMaterialUnit } from '../src/utils/constructionUnitConverter';
 
 // 1C "Счет на оплату" düzeni (Fatura 20560, STF.013158'in pdf-parse metin çıktısıyla aynı biçim):
@@ -163,5 +163,36 @@ const split = splitFreightFromDocumentItems([
   { lineSource: 'invoice_pdf', originalName: 'Транспортные услуги', totalPrice: 6393.44, grossTotalPrice: 7800 }
 ]);
 assert.deepEqual([split.items.length, split.moved, split.freightGross], [1, 1, 7800]);
+
+// ПЕТРОВИЧ: 11 haneli artikel PDF metninde ikiye bölünüyor ("0000063113 8"); ad kodsuz kalmalı, kod article'a gitmeli.
+assert.deepEqual(splitLeadingArticle('0000063113 8 Профиль углозащитный оцинкованный 31х31 мм 3 м 0,5 мм'), {
+  name: 'Профиль углозащитный оцинкованный 31х31 мм 3 м 0,5 мм', article: '00000631138'
+});
+assert.deepEqual(splitLeadingArticle('00000627664 Шпаклевка'), { name: 'Шпаклевка', article: '00000627664' });
+// Kısa sayı veya ölçüyle başlayan gerçek adlar dokunulmaz
+assert.equal(cleanDocumentLineName('12 Саморез 4,2х19'), '12 Саморез 4,2х19');
+assert.equal(cleanDocumentLineName('2000 мм Уровень'), '2000 мм Уровень');
+assert.equal(cleanDocumentLineName('2 3 4 5 6 7 1 0000010754 7 Сетка штукатурная'), 'Сетка штукатурная');
+const petrovich = repairDocumentItems([
+  {
+    lineSource: 'invoice_pdf', unit: 'ADET', quantity: 500,
+    originalName: '0000063113 8 Профиль углозащитный оцинкованный 31х31 мм 3 м 0,5 мм',
+    materialName: '0000063113 8 Профиль углозащитный Galvanizli 31x31 mm 3 m 0,5 mm'
+  },
+  { lineSource: 'invoice_pdf', unit: 'ADET', quantity: 1, originalName: 'Клапан КОК-Р', materialName: 'Klapan KOK-R' }
+]);
+assert.equal(petrovich.fixed, 1);
+assert.deepEqual(
+  [petrovich.items[0].originalName, petrovich.items[0].materialName, petrovich.items[0].article],
+  ['Профиль углозащитный оцинкованный 31х31 мм 3 м 0,5 мм', 'Профиль углозащитный Galvanizli 31x31 mm 3 m 0,5 mm', '00000631138']
+);
+const untouched = { lineSource: 'invoice_pdf', originalName: 'Клапан КОК-Р' };
+assert.equal(repairDocumentItemName(untouched), untouched);
+// AI (Gemini) okumasında da ad kodla gelebilir: kalem kodsuz kurulur
+const builtPetrovich = buildItemsFromParsedInvoice({
+  lines: [{ no: 8, name: '0000063113 8 Профиль углозащитный оцинкованный 31х31 мм 3 м 0,5 мм', quantity: 500, unitRaw: 'шт', price: 178, amount: 89000, grossAmount: 89000, netAmount: 72950.82, vatPct: 22 }],
+  warnings: []
+} as any, { docYear: '2026' });
+assert.deepEqual([builtPetrovich.items[0].originalName, builtPetrovich.items[0].article], ['Профиль углозащитный оцинкованный 31х31 мм 3 м 0,5 мм', '00000631138']);
 
 console.log('invoiceDocumentLines.test.ts: tüm testler geçti');

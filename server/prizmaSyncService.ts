@@ -15,7 +15,8 @@ import {
   readInvoiceDocumentText,
   readInvoiceDocumentWithGemini,
   splitFreightFromDocumentItems,
-  repairDocumentItems
+  repairDocumentItems,
+  repairDocumentItemName
 } from './invoiceDocumentLines';
 
 let defaultDb: any = null;
@@ -566,7 +567,7 @@ class PrizmaSyncService {
       const mappedItems = rawItemsList
         .map((it, idx) => {
           // Fatura belgesinden okunmuş kalem: isim, birim ve fiyat belgeden gelir; STF satırıyla ezilmez.
-          if (it.lineSource === 'invoice_pdf') return this.healInvoicePdfItemVat({ ...it }, defaultVatForDoc);
+          if (it.lineSource === 'invoice_pdf') return this.healInvoicePdfItemVat(repairDocumentItemName({ ...it }), defaultVatForDoc);
           const matchedRow = Array.isArray(cachedOrderRows)
             ? (cachedOrderRows.find((r: any) => `prizma_row_${r.id}` === it.id) || cachedOrderRows[idx])
             : undefined;
