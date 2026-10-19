@@ -98,11 +98,12 @@ Kullanıcı İlk Teklif belgesini (birinci belge) ve Son İndirimli Fatura belge
     - category: Malzemenin Ana Kategorisi (Aşağıdaki listeden BİRİNİ SEÇ)
     - quantity: Miktar (sayısal)
     - unit: Standart birim (Adet, Ton, m³, kg, torba, m, Litre vb.)
-    - unitPrice: Birim fiyat (KESİNLİKLE NET / KDV HARİÇ - Цена без НДС olarak hesaplanmış sayısal değer. Tabloda sadece KDV dahil fiyat varsa, KDV oranını [%20 veya %22 НДС] düşerek Net birim fiyatı hesapla!)
-    - grossUnitPrice: KDV / НДС Dahil birim fiyat (Цена с НДС)
-    - vatPercentage: Kalemin KDV / НДС oranı (örn: 22, 20, 10, 0)
-    - totalPrice: Satır Net toplam tutarı (Сумма без НДС)
-    - grossTotalPrice: Satır KDV Dahil toplam tutarı (Сумма с НДС)
+    - unitPrice: Birim fiyat (KESİNLİKLE BELGEDE / TABLODA YAZAN BİREBİR KDV / НДС DAHİL GERÇEK BİRİM FİYAT - Цена / Цена с НДС. Tablodaki 'Цена' sütununda yazan rakamı BİREBİR yaz, ASLA kendi başına 1,20 veya 1,22'ye bölerek KDV düşme! Eğer tabloda hem KDV hariç hem KDV dahil sütun varsa, KDV dahil satır toplamının miktara bölünmesiyle bulunan KDV dahil birim fiyatı [grossTotalPrice / quantity] yaz!)
+    - unitPriceNet: Varsa KDV / НДС Hariç net birim fiyat (Цена без НДС)
+    - grossUnitPrice: KDV / НДС Dahil birim fiyat (Цена с НДС - unitPrice ile birebir aynı olmalıdır)
+    - vatPercentage: Kalemin gerçek KDV / НДС oranı (örn: 22, 20, 10, 0). Eğer faturada oran açıkça yazmıyor ama en altta 'В том числе НДС: 17 506,41' ve 'Итого: 97 081,00' yazıyorsa, tax / (totalAmount - tax) oranından gerçek oranı (örn: %22) hesapla.
+    - totalPrice: Satır KDV / НДС Dahil toplam tutarı (Сумма / Итоговая сумма / Сумма с НДС - quantity × unitPrice değerine eşit olmalı ve tüm satırların totalPrice toplamı faturanın en altındaki totalAmount ile birebir örtüşmelidir!)
+    - grossTotalPrice: Satır KDV Dahil toplam tutarı (Сумма с НДС - totalPrice ile birebir aynı olmalıdır)
     - brand: Varsa marka
     - model: Varsa model
     - productCode: Varsa Artikül / Ürün Kodu
@@ -120,10 +121,10 @@ KATEGORİLER (SADECE AŞAĞIDAKİ 28 KESİN KANONİK KATEGORİDEN BİRİNİ SEÇ
 KRİTİK KATEGORİ VE AKSESUAR AYRIŞTIRMA KURALLARI ("İÇİN / ДЛЯ"):
 - İNŞAAT DEMİRİ KORUYUCU BAŞLIKLARI: "Колпачок для арматуры", "грибок", "güvenlik mantarı", "koruyucu başlık", "güvenlik başlığı" KESİNLİKLE "Sarf Malzeme & Hırdavat" kategorisindedir! Asla "İnşaat Demiri" yapılamaz. Örn: "Колпачок для арматуры 10-18 мм грибок (упаковка 1000 шт)" -> "İnşaat Demiri Güvenlik Başlığı Mantar Tip 10-18 mm (1000 Adetlik Paket)" (Sarf Malzeme & Hırdavat).
 - DONATI AKSESUARLARI: "фиксатор", "паспой", "paspayı", "çiroz", "donatı sehpası", "лягушка", "проволока вязальная", "bağ teli" -> "Donatı Malzemeleri" veya "Sarf Malzeme & Hırdavat".
-- DEMİR EL ALETLERİ & MAKİNELER: "крючок", "пистолет", "ножницы", "станок", "kesme makası", "bükme aparatı", "зубило", "keski" -> "Sarf Malzeme & Hırdavat".
-- KALIP/DONATI YAĞI & KATKILAR: "смазка для форм", "эмульсол", "добавка для бетона", "клей для плитки", "затирка" -> "Yapı Kimyasalları".
-- SADECE YAPISAL DONATI (пруток, арматура а500с, nervürlü demir, filmaşin, çelik hasır) "İnşaat Demiri & Çelik" kategorisindedir.
-- DİĞER: "труба для кабеля / kablo borusu" -> Elektrik & Otomasyon. "изоляция для труб" -> Yalıtım & Alçıpan. "хомут для труб" -> Sarf Malzeme & Hırdavat. "саморез для гипсокартона" -> Sarf Malzeme & Hırdavat. "профиль для гкл" -> Yalıtım & Alçıpan. "крестики для плитки" -> Sarf Malzeme & Hırdavat. "растворитель / tiner" -> Boya & Dış Cephe. "валик / rulo", "кисть / fırça" -> Sarf Malzeme & Hırdavat.
+- DEMİR EL ALETLERİ & MAKİNELER: "крючок", "пистолет", "ножницы", "станок", "kesme makası", "bükme aparatı", "зубило", "keski", "углошлифовальная", "отбойный молоток" -> "El Aletleri & Hırdavat".
+- KALIP/DONATI YAĞI & KATKILAR: "смазка для форм", "эмульсол", "добавка для бетона", "клей для плитки", "затирка" -> "Kimyasallar & Boya".
+- SADECE YAPISAL DONATI (пруток, арматура а500с, nervürlü demir, filmaşin, çelik hasır) "İnşaat Demiri" kategorisindedir.
+- DİĞER: "труба для кабеля / kablo borusu" -> Elektrik & Otomasyon. "изоляция для труб" -> Yalıtım & Alçıpan. "хомут для труб" -> Sarf Malzeme & Hırdavat. "саморез для гипсокартона" -> Sarf Malzeme & Hırdavat. "профиль для гкл" -> Yalıtım & Alçıpan. "крестики для плитки" -> Sarf Malzeme & Hırdavat. "растворитель / tiner" -> Kimyasallar & Boya. "валик / rulo", "кисть / fırça" -> Sarf Malzeme & Hırdavat.
 
 ${firstOfferText ? `\n--- İLK TEKLİF BELGESİ METİN/TABLO VERİSİ ---\n${firstOfferText}\n----------------------------------------------\n` : ''}
 ${pdfText ? `\n--- DİJİTAL BELGE METİN KATMANI ---\n${pdfText}\n-----------------------------------\n` : ''}
@@ -134,7 +135,7 @@ ${additionalPrompt ? `\nEk Kullanıcı Notu: ${additionalPrompt}\n` : ''}
 - ASLA uydurma değer üretme. Okunamayan alanları JSON'a ekleme.
 - Metin değerlerinin içinde çift tırnak (") kullanma, şirket ünvanlarında tırnak gerekiyorsa « » veya tek tırnak kullan (Örn: ООО «ТСК Дипломат»).
 - HIZ VE TOKEN TASARRUFU KURALI: 'items' dizisindeki her bir kalem için SADECE değeri olan alanları üret. Eğer bir alan (örn: brand, model, productCode, diameter, dimensions, quality, color vb.) belgede yoksa veya boşsa, o alanı JSON'a ASLA ekleme!
-- NET (KDV HARİÇ) BİRİM FİYAT & NAKLİYE AYRIŞTIRMA KURALI: "items" listesindeki her malzemenin "unitPrice" ve "totalPrice" değerleri KESİNLİKLE NET (KDV / НДС HARİÇ - Цена без НДС) olarak yazılmalı, KDV dahil karşılıkları ise "grossUnitPrice" ve "grossTotalPrice" alanlarına yazılmalıdır. Ayrıca faturadaki Nakliye / Hizmet (Доставка, Транспортные услуги, Автоуслуги, Манипулятор, Погрузка/разгрузка, Резка, Nakliye) satırları malzeme listesine ('items') ASLA eklenmemelidir!
+- BİREBİR FATURA FİYATI (KDV DAHİL) & MATEMATİKSEL SAĞLAMA KURALI: "items" listesindeki her malzemenin "unitPrice" ve "totalPrice" değerleri KESİNLİKLE faturada ödenecek KDV / НДС DAHİL gerçek tablo fiyatları olmalıdır (quantity × unitPrice = totalPrice ve Σ totalPrice = totalAmount). Örneğin tabloda Цена = 13 921,00 ve Сумма = 41 763,00 yazıyorsa unitPrice: 13921 ve totalPrice: 41763 yazılmalıdır; fiyatları ASLA 1,20 veya 1,22'ye bölerek KDV düşme! Ayrıca faturadaki Nakliye / Hizmet (Доставка, Транспортные услуги, Автоуслуги, Манипулятор, Погрузка/разгрузка, Резка, Nakliye) satırları malzeme listesine ('items') ASLA eklenmemelidir!
 - EXCEL/CSV TOPLAM SATIRI KURALI: Tablolardaki 'ИТОГО', 'ВСЕГО', 'Toplam', 'Genel Toplam', 'KDV', 'НДС', 'İndirim' satırları ÜRÜN KALEMİ DEĞİLDİR! Bunları 'items' listesine ASLA ekleme; sadece üst subtotal/tax/totalAmount alanlarına yaz.
 
 SADECE GEÇERLİ JSON DÖN (Şablon):
@@ -156,7 +157,7 @@ SADECE GEÇERLİ JSON DÖN (Şablon):
     {
       "originalName": "Арматура А500С Ø12 (11.7м ГОСТ 34028)",
       "materialName": "A500C İnşaat Demiri Ø12 (11.7m)",
-      "category": "İnşaat Demiri & Çelik",
+      "category": "İnşaat Demiri",
       "quantity": 10,
       "unit": "Ton",
       "unitPrice": 12000,
@@ -284,7 +285,7 @@ export function fallbackExtractSupplierFromText(textContext?: string, fileName?:
   // 1. Regex for Russian invoice seller labels
   const postMatch = fullText.match(/(?:Поставщик\s*(?:\(исполнитель\))?|Продавец|Исполнитель|Грузоотправитель|Организация)\s*[:：\t,-]\s*([^\r\n;]+)/i);
   if (postMatch && postMatch[1]) {
-    const rawSup = postMatch[1].split(/\s+(?:ИНН|КПП|Адрес|р\/с|тел\.?)\b/i)[0].trim();
+    const rawSup = postMatch[1].split(/[,\s]+(?:ИНН|КПП|ОГРН|Адрес|р\/с|тел\.?)\b/i)[0].trim();
     const candidate = extractSupplierName(rawSup);
     if (candidate && candidate.length > 2) return candidate;
   }
@@ -296,10 +297,10 @@ export function fallbackExtractSupplierFromText(textContext?: string, fileName?:
     if (candidate && candidate.length > 2) return candidate;
   }
 
-  // 3. Regex for common corporate entities with quotes (e.g. ООО "Строй-Комплект", АО «Северсталь», ИП Иванов)
-  const corpMatch = fullText.match(/(?:ООО|АО|ПАО|ЗАО|НАО)\s*["«“]([^"»”\r\n]{2,60})["»”]|(?:ООО|АО|ПАО|ЗАО|НАО)\s+([А-Яа-яЁёA-Za-z0-9\-_ ]{3,45})|ИП\s+([А-Яа-яЁёA-Za-z\-_]+(?:\s+[А-Яа-яЁёA-Za-z.\-_]+){1,2})/);
+  // 3. Regex for common corporate entities with quotes (e.g. ООО "ВсеИнструменты.ру", ООО "Строй-Комплект", АО «Северсталь», ИП Иванов)
+  const corpMatch = fullText.match(/(?:ООО|АО|ПАО|ЗАО|НАО)\s*["«“]([^"»”\r\n]{2,60})["»”]|(?:ООО|АО|ПАО|ЗАО|НАО)\s+([А-Яа-яЁёA-Za-z0-9.\-_ ]{3,45})|ИП\s+([А-Яа-яЁёA-Za-z\-_]+(?:\s+[А-Яа-яЁёA-Za-z.\-_]+){1,2})/);
   if (corpMatch) {
-    const found = corpMatch[0].split(/\s+(?:ИНН|КПП|Адрес|Покупатель)\b/i)[0].trim();
+    const found = corpMatch[0].split(/[,\s]+(?:ИНН|КПП|Адрес|Покупатель)\b/i)[0].trim();
     const candidate = extractSupplierName(found);
     if (candidate && candidate.length > 2) return candidate;
   }
@@ -314,6 +315,7 @@ export function fallbackExtractSupplierFromText(textContext?: string, fileName?:
   // 5. Filename keyword hints
   if (fileName) {
     const cleanFn = fileName.replace(/\.[^.]+$/, '').replace(/[_.\-+]/g, ' ').trim();
+    if (/vseinstrumenti|всеинструменты/i.test(cleanFn)) return 'ООО "ВсеИнструменты.ру"';
     if (/diplomat|дипломат/i.test(cleanFn)) return 'ООО "ТСК ДИПЛОМАТ"';
     if (/diler|дилер/i.test(cleanFn)) return 'Diler Demir Çelik A.Ş.';
     if (/kardemir/i.test(cleanFn)) return 'Kardemir Demir Çelik A.Ş.';
@@ -322,7 +324,7 @@ export function fallbackExtractSupplierFromText(textContext?: string, fileName?:
     if (/stroysnab|стройснаб/i.test(cleanFn)) return 'ООО "СтройСнаб"';
     if (/metallservice|металлсервис|металл-сервис/i.test(cleanFn)) return 'ООО "МЕТАЛЛ-СЕРВИС"';
     if (/stroykomplekt|стройкомплект/i.test(cleanFn)) return 'ООО "СтройКомплект"';
-    if (cleanFn.length >= 3 && !/^(fatura|teklif|belge|invoice|scan|image|img|doc|document|pdf|\d+)$/i.test(cleanFn)) {
+    if (cleanFn.length >= 3 && !/^(fatura|teklif|belge|invoice|scan|image|img|doc|document|pdf|[\d\s]+)$/i.test(cleanFn)) {
       return cleanFn;
     }
   }
@@ -336,6 +338,22 @@ const RU_MONTHS: Record<string, string> = {
   'сентябр': '09', 'октябр': '10', 'ноябр': '11', 'декабр': '12'
 };
 
+export function normalizeExtractedUnit(rawUnit?: string): string {
+  const u = (rawUnit || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!u || u === 'шт' || u === 'штук' || u === 'штука' || u === 'adet' || u === 'ad' || u === 'pcs') return 'Adet';
+  if (u === 'компл' || u === 'комплект' || u === 'set' || u === 'takım') return 'Set';
+  if (u === 'упак' || u === 'уп' || u === 'пачк' || u === 'пачка' || u === 'paket' || u === 'pk') return 'Paket';
+  if (u === 'т' || u === 'тн' || u.startsWith('тонн') || u === 'ton') return 'Ton';
+  if (u === 'кг' || u === 'kg') return 'kg';
+  if (u === 'м3' || u === 'м³' || u.includes('куб') || u === 'm3' || u === 'm³') return 'm³';
+  if (u === 'м2' || u === 'м²' || u.includes('кв') || u === 'm2' || u === 'm²') return 'm²';
+  if (u === 'м' || u === 'п.м' || u === 'п. м' || u === 'пог. м' || u === 'пог.м' || u === 'm' || u === 'mt' || u === 'mtül') return 'm';
+  if (u === 'л' || u.startsWith('литр') || u === 'lt' || u === 'litre') return 'Litre';
+  if (u === 'рул' || u === 'рулон' || u === 'rulo') return 'Rulo';
+  if (u === 'меш' || u === 'мешок' || u === 'torba') return 'Torba';
+  return rawUnit || 'Adet';
+}
+
 /**
  * Checks whether extracted PDF text is readable digital text (not garbled CMap glyphs)
  */
@@ -347,8 +365,148 @@ function isReadableDigitalText(text: string): boolean {
 }
 
 /**
- * Local Resilient Parser: Extracts supplier, invoiceNumber, date, currency, totalAmount, and line items
- * from PDF digital text or Excel/CSV content whenever AI models are unavailable or return empty results.
+ * Deterministically parses Russian & Turkish PDF digital invoice table rows (Счет на оплату, ВсеИнструменты.ру, 1С, УПД).
+ * Extracts exact quantities, units, VAT-inclusive unit prices, and row totals.
+ */
+export function extractDeterministicPdfTableRows(fullText: string, explicitTotal: number = 0): any[] {
+  if (!fullText || !fullText.trim()) return [];
+
+  // Narrow down to the table region if header/footer markers exist
+  let tableRegion = fullText;
+  const headerMatch = tableRegion.match(/(?:Товары\s*\(работы,\s*услуги\)|Наименование\s+товара|Сумма\s+без\s+скидки|Итоговая\s+сумма|Malzeme\s+Adı)/i);
+  if (headerMatch && headerMatch.index !== undefined) {
+    tableRegion = tableRegion.slice(headerMatch.index);
+  }
+  const footerMatch = tableRegion.match(/\n\s*(?:Итого\s*:|Всего\s+наименований|Всего\s+к\s+оплате|Руководитель\s+организации|Уполномоченный\s+по\s+доверенности)/i);
+  if (footerMatch && footerMatch.index !== undefined && footerMatch.index > 20) {
+    tableRegion = tableRegion.slice(0, footerMatch.index);
+  }
+
+  const rawLines = tableRegion.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const headerSkipRx = /^(?:№|Код|Товары\s*\(работы|Наименование|Кол-во|Ед\.|Цена|Сумма|Итоговая|Ставка\s+НДС|Страна\s+происхождения|Sıra\s*No|Malzeme\s*Adı)(?:\s|$)/i;
+  const summarySkipRx = /^(?:итого|всего|в\s*т\.?\s*ч\.?\s*ндс|в\s+том\s+числе\s+ндс|ндс|без\s*ндс|toplam|genel\s*toplam|ara\s*toplam|kdv)/i;
+
+  // Tail pattern at the end of a table row:
+  // <qty> <unit> <price1> <price2> [<price3>...]
+  const rowTailRx = /^(.*?)[\s\t]+(\d+(?:[\s\u00A0]\d{3})*(?:[.,]\d+)?)[\s\t]+(шт\.?|штук|компл\.?|комплект|упак\.?|уп\.?|п\.?\s*м\.?|пог\.?\s*м\.?|м2|м²|кв\.?\s*м\.?|м3|м³|куб\.?\s*м\.?|тн|тонн[аы]?|т\.?|кг\.?|гр\.?|л\.?|литр[а-я]*|рул\.?|меш\.?|лист[а-я]*|пачк[а-я]*|пар[аы]?|бухт[а-я]*|бочк[а-я]*|канистр[а-я]*|adet|ad\.?|ton|kg|m3|m2|mtül|mt|m|lt|paket|pk|torba|koli|rulo|takım|set)[\s\t]+((?:\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}[\s\t]*){1,6})$/i;
+
+  // Merge wrapped lines so each numbered table item is reconstructed into a single logical row
+  const logicalRows: string[] = [];
+  let currentBuffer = '';
+
+  for (const line of rawLines) {
+    if (line.startsWith('---')) continue;
+    if (headerSkipRx.test(line) && !rowTailRx.test(line)) continue;
+    if (summarySkipRx.test(line)) break;
+
+    const startsWithRowIdx = /^\d{1,3}(?:[\s\t.]+\d{5,16})?[\s\t]+[A-Za-zА-Яа-яЁёÇĞİÖŞÜçğıöşü]/.test(line);
+    if (startsWithRowIdx) {
+      if (currentBuffer && rowTailRx.test(currentBuffer)) {
+        logicalRows.push(currentBuffer);
+      }
+      // Always start a fresh row buffer when a new numbered item line starts (discards any pre-table header text)
+      currentBuffer = line;
+    } else {
+      currentBuffer = currentBuffer ? `${currentBuffer} ${line}` : line;
+    }
+
+    if (rowTailRx.test(currentBuffer)) {
+      logicalRows.push(currentBuffer);
+      currentBuffer = '';
+    }
+  }
+  if (currentBuffer && rowTailRx.test(currentBuffer)) {
+    logicalRows.push(currentBuffer);
+  }
+
+  const parsedItems: any[] = [];
+  for (const rowStr of logicalRows) {
+    const m = rowStr.match(rowTailRx);
+    if (!m) continue;
+
+    let prefix = m[1].trim();
+    const qty = parseNumberSafe(m[2]);
+    const rawUnit = m[3].trim();
+    const pricesBlock = m[4].trim();
+
+    if (qty <= 0) continue;
+
+    // Extract leading row index and optional product code / EAN-13 barcode (e.g. "1 4606059020599 Машина углошлифовальная...")
+    let rowNo: number | undefined = undefined;
+    let productCode = '';
+    const idxMatch = prefix.match(/^(\d{1,3})[.\s\t]+(.*)$/);
+    if (idxMatch) {
+      rowNo = Number(idxMatch[1]);
+      prefix = idxMatch[2].trim();
+    }
+    const codeMatch = prefix.match(/^(\d{5,16})[\s\t]+(.*)$/);
+    if (codeMatch && /[A-Za-zА-Яа-яЁёÇĞİÖŞÜçğıöşü]/.test(codeMatch[2])) {
+      productCode = codeMatch[1].trim();
+      prefix = codeMatch[2].trim();
+    }
+
+    if (!prefix || prefix.length < 2 || summarySkipRx.test(prefix)) continue;
+
+    // Extract all decimal currency amounts from the prices block
+    const priceTokens = pricesBlock.match(/\d{1,3}(?:[\s\u00A0]\d{3})*[.,]\d{2}|\d+[.,]\d{2}/g) || [];
+    const prices = priceTokens.map(p => parseNumberSafe(p)).filter(n => n > 0 && n < 1e11);
+    if (prices.length === 0) continue;
+
+    // The last currency column on Russian/Turkish invoices is always the row's final payable total (Сумма / Итоговая сумма / Всего с НДС)
+    const totalPrice = prices[prices.length - 1];
+    let unitPrice = prices[0];
+    let discountAmount = 0;
+
+    // Case 1: Standard row without discount where qty * prices[0] === totalPrice
+    if (Math.abs(qty * unitPrice - totalPrice) <= 1.0) {
+      unitPrice = prices[0];
+    } else if (prices.length >= 3 && Math.abs(qty * prices[0] - prices[1]) <= 1.0) {
+      // Case 2: Row with "Цена | Сумма без скидки | Скидка | Сумма" (e.g. 4 * 13921 = 55684, discount = 15, final total = 55669)
+      // Preserve exact invoice Цена (13921, 19959, 308) as unitPrice and record the row discount!
+      unitPrice = prices[0];
+      if (prices.length >= 4 && Math.abs(prices[1] - prices[2] - totalPrice) <= 1.5) {
+        discountAmount = prices[2];
+      } else if (prices[1] > totalPrice) {
+        discountAmount = Number((prices[1] - totalPrice).toFixed(2));
+      }
+    } else {
+      // Case 3: УПД where prices[0] is Цена без НДС and last column is Стоимость с НДС
+      const matchingCol = prices.find(p => Math.abs(qty * p - totalPrice) <= 0.5);
+      if (matchingCol !== undefined) {
+        unitPrice = matchingCol;
+      } else {
+        unitPrice = Number((totalPrice / qty).toFixed(2));
+      }
+    }
+
+    const unit = normalizeExtractedUnit(rawUnit);
+    const trName = translateRussianMaterialToTurkish(prefix) || prefix;
+    const cat = normalizeCategoryName('', `${trName} ${prefix}`);
+
+    parsedItems.push({
+      invoiceLineNo: rowNo,
+      productCode,
+      materialName: trName,
+      originalName: prefix,
+      category: cat,
+      quantity: qty,
+      unit,
+      unitPrice,
+      grossUnitPrice: unitPrice,
+      discountAmount,
+      totalPrice,
+      grossTotalPrice: totalPrice,
+      lineSource: 'invoice_pdf',
+      confidence: 0.99
+    });
+  }
+
+  return parsedItems;
+}
+
+/**
+ * Local Resilient Parser: Extracts supplier, invoiceNumber, date, currency, totalAmount, tax, and line items
+ * from PDF digital text or Excel/CSV content whenever AI models are unavailable or for deterministic table cross-checking.
  */
 export function fallbackExtractInvoiceFromTextOrCsv(
   textOrCsv?: string,
@@ -361,13 +519,13 @@ export function fallbackExtractInvoiceFromTextOrCsv(
   // 1. Extract Invoice / Offer Number
   let invoiceNumber = '';
   const invMatch =
-    fullText.match(/(?:Счет(?:\s+на\s+оплату)?|Счёт(?:\s+на\s+оплату)?|УПД|Fatura\s*No|Teklif\s*No|Belge\s*No|Invoice\s*(?:No|#)?)\s*(?:№|#|:)?\s*([A-Za-zА-Яа-я0-9\-_/]{1,25})/i) ||
-    fullText.match(/№\s*([A-Za-zА-Яа-я0-9\-_/]{2,20})\s+от/i);
+    fullText.match(/(?:Счет(?:\s+на\s+оплату)?|Счёт(?:\s+на\s+оплату)?|УПД|Fatura\s*No|Teklif\s*No|Belge\s*No|Invoice\s*(?:No|#)?)\s*(?:№|#|:)?\s*([A-Za-zА-Яа-я0-9\-_/]{2,30})/i) ||
+    fullText.match(/№\s*([A-Za-zА-Яа-я0-9\-_/]{2,25})\s+от/i);
   if (invMatch && invMatch[1]) {
     invoiceNumber = invMatch[1].trim();
   } else if (fileName) {
-    const fnNum = fileName.match(/(?:№|No|FT|TKF|INV)[_\-\s]*([A-Za-z0-9\-]{2,15})/i);
-    if (fnNum && fnNum[1]) invoiceNumber = fnNum[1];
+    const fnNum = fileName.match(/(\d{4}-\d{5,8}-\d{4,8})|(?:№|No|FT|TKF|INV)[_\-\s]*([A-Za-z0-9\-]{2,20})/i);
+    if (fnNum) invoiceNumber = (fnNum[1] || fnNum[2] || '').trim();
   }
   if (!invoiceNumber) {
     invoiceNumber = `BLG-${Date.now().toString().slice(-6)}`;
@@ -401,10 +559,10 @@ export function fallbackExtractInvoiceFromTextOrCsv(
   else if (/\b(?:USD|\$)\b/i.test(fullText)) currency = 'USD';
   else if (/\b(?:EUR|€)\b/i.test(fullText)) currency = 'EUR';
 
-  // 4. Extract Grand Total from Explicit Total Labels (ИТОГО / ВСЕГО К ОПЛАТЕ / Genel Toplam)
+  // 4. Extract Grand Total & Explicit VAT (НДС / KDV) from Labels
   let explicitTotal = 0;
   const totalRegexes = [
-    /(?:Всего\s+к\s+оплате|Итого\s+с\s+НДС|Всего\s+наименований[^\r\n]*?на\s+сумму|ИТОГО|ВСЕГО|Genel\s+Toplam|Ödenecek\s+Tutar|Toplam\s+Tutar)\s*[:：;,\t ]*\s*([\d\s\u00A0.,]{3,22})/gi
+    /(?:Всего\s+к\s+оплате|Итого\s+с\s+НДС|Всего\s+наименований[^\r\n]*?на\s+сумму|Итого|ВСЕГО|Genel\s+Toplam|Ödenecek\s+Tutar|Toplam\s+Tutar)\s*[:：;,\t ]*\s*(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+(?:[.,]\d{2})?)/gi
   ];
   for (const rgx of totalRegexes) {
     let m: RegExpExecArray | null;
@@ -416,117 +574,154 @@ export function fallbackExtractInvoiceFromTextOrCsv(
     }
   }
 
-  // 5. Parse CSV / Table Lines for Items & Sum
-  const fallbackItems: any[] = [];
-  let sumLineTotals = 0;
-  const lines = fullText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  let explicitTax = 0;
+  const taxRegexes = [
+    /(?:В\s+том\s+числе\s+НДС|В\s+т\.?\s*ч\.?\s*НДС|Сумма\s+НДС|Итого\s+НДС|KDV\s*Tutarı|Toplam\s*KDV)(?:\s*\(\d+%?\))?\s*[:：;,\t ]*\s*(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+(?:[.,]\d{2})?)/gi
+  ];
+  for (const rgx of taxRegexes) {
+    let m: RegExpExecArray | null;
+    while ((m = rgx.exec(fullText)) !== null) {
+      const candidateTax = parseNumberSafe(m[1]);
+      if (candidateTax > explicitTax && candidateTax < (explicitTotal || 1e11)) {
+        explicitTax = candidateTax;
+      }
+    }
+  }
 
-  const summaryKeywordRegex = /^(?:итого|всего|в\s*т\.?\s*ч\.?\s*ндс|ндс|без\s*ндс|toplam|genel\s*toplam|ara\s*toplam|kdv|iskonto|indirim|total|subtotal|сумма)/i;
-  const headerKeywordRegex = /(?:наименование|товары\s*\(работы|malzeme\s*adı|ürün\s*adı|birim\s*fiyat|количество|кол-во|ед\.\s*изм|цена)/i;
+  // 5. Try Deterministic PDF Table Parser first
+  let fallbackItems: any[] = [];
+  if (!isSummaryOnly) {
+    const pdfRows = extractDeterministicPdfTableRows(fullText, explicitTotal);
+    if (pdfRows.length > 0) {
+      fallbackItems = pdfRows;
+    }
+  }
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.startsWith('---')) continue;
-    if (headerKeywordRegex.test(line)) continue;
+  // 6. If no PDF table rows matched (e.g. semicolon/comma CSV from Excel), parse CSV rows safely
+  let sumLineTotals = fallbackItems.reduce((acc, it) => acc + (Number(it.totalPrice) || 0), 0);
 
-    const parts = (line.includes(';') ? line.split(';') : line.split(',')).map(p => p.replace(/^["']|["']$/g, '').trim()).filter(Boolean);
-    if (parts.length >= 2) {
-      const joinedLower = parts.join(' ').toLowerCase();
-      if (summaryKeywordRegex.test(parts[0]) || summaryKeywordRegex.test(joinedLower)) {
-        // Check if this summary row has the grand total
-        if (/(?:итого|всего|genel\s*toplam|toplam)/i.test(joinedLower) && !/(?:ндс|kdv|iskonto)/i.test(parts[0])) {
-          const numsInSummary = parts.map(p => parseNumberSafe(p)).filter(n => n > 0 && n < 1e11);
-          if (numsInSummary.length > 0) {
-            const maxSummaryNum = Math.max(...numsInSummary);
-            if (maxSummaryNum > explicitTotal) explicitTotal = maxSummaryNum;
+  if (!isSummaryOnly && fallbackItems.length === 0) {
+    const lines = fullText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const summaryKeywordRegex = /^(?:итого|всего|в\s*т\.?\s*ч\.?\s*ндс|ндс|без\s*ндс|toplam|genel\s*toplam|ara\s*toplam|kdv|iskonto|indirim|total|subtotal|сумма)/i;
+    const headerKeywordRegex = /(?:наименование|товары\s*\(работы|malzeme\s*adı|ürün\s*adı|birim\s*fiyat|количество|кол-во|ед\.\s*изм|цена)/i;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith('---')) continue;
+      if (headerKeywordRegex.test(line)) continue;
+
+      // Only split by comma if it's an actual multi-column CSV line (not a Russian text line with decimal comma)
+      const hasSemicolon = line.includes(';');
+      const hasTabs = line.includes('\t');
+      const commaCount = (line.match(/,/g) || []).length;
+      if (!hasSemicolon && !hasTabs && commaCount < 3) continue;
+
+      const delimiter = hasSemicolon ? ';' : (hasTabs ? '\t' : ',');
+      const parts = line.split(delimiter).map(p => p.replace(/^["']|["']$/g, '').trim()).filter(Boolean);
+      if (parts.length >= 2) {
+        const joinedLower = parts.join(' ').toLowerCase();
+        if (summaryKeywordRegex.test(parts[0]) || summaryKeywordRegex.test(joinedLower)) {
+          if (/(?:итого|всего|genel\s*toplam|toplam)/i.test(joinedLower) && !/(?:ндс|kdv|iskonto)/i.test(parts[0])) {
+            const numsInSummary = parts.map(p => parseNumberSafe(p)).filter(n => n > 0 && n < 1e11);
+            if (numsInSummary.length > 0) {
+              const maxSummaryNum = Math.max(...numsInSummary);
+              if (maxSummaryNum > explicitTotal) explicitTotal = maxSummaryNum;
+            }
+          }
+          continue;
+        }
+
+        let nameColIdx = -1;
+        for (let c = 0; c < parts.length; c++) {
+          const cell = parts[c];
+          if (cell.length >= 3 && /[A-Za-zА-Яа-яЁёÇĞİÖŞÜçğıöşü]/.test(cell) && !/^\d+$/.test(cell)) {
+            nameColIdx = c;
+            break;
           }
         }
-        continue;
-      }
+        if (nameColIdx === -1) continue;
 
-      // Find first non-numeric text column as material description
-      let nameColIdx = -1;
-      for (let c = 0; c < parts.length; c++) {
-        const cell = parts[c];
-        if (cell.length >= 3 && /[A-Za-zА-Яа-яЁёÇĞİÖŞÜçğıöşü]/.test(cell) && !/^\d+$/.test(cell)) {
-          nameColIdx = c;
-          break;
-        }
-      }
-      if (nameColIdx === -1) continue;
+        const rawOriginalName = parts[nameColIdx];
+        if (summaryKeywordRegex.test(rawOriginalName)) continue;
 
-      const rawOriginalName = parts[nameColIdx];
-      if (summaryKeywordRegex.test(rawOriginalName)) continue;
+        const afterCols = parts.slice(nameColIdx + 1);
+        let unit = 'Adet';
+        const numericValues: number[] = [];
 
-      const afterCols = parts.slice(nameColIdx + 1);
-      let unit = 'Adet';
-      const numericValues: number[] = [];
-
-      for (const col of afterCols) {
-        if (/^(?:шт\.?|т|тн|тонн[аы]?|м3|м³|м2|м²|п\.?\s*м\.?|м|кг|л|упак\.?|компл\.?|рул\.?|меш\.?|adet|ton|kg|m3|m2|m|lt|paket|torba|koli)$/i.test(col)) {
-          unit = col;
-        } else {
-          const num = parseNumberSafe(col);
-          if (num > 0 && num < 1e10) {
-            numericValues.push(num);
+        for (const col of afterCols) {
+          if (/^(?:шт\.?|т|тн|тонн[аы]?|м3|м³|м2|м²|п\.?\s*м\.?|м|кг|л|упак\.?|компл\.?|рул\.?|меш\.?|adet|ton|kg|m3|m2|m|lt|paket|torba|koli)$/i.test(col)) {
+            unit = normalizeExtractedUnit(col);
+          } else {
+            const num = parseNumberSafe(col);
+            if (num > 0 && num < 1e10) {
+              numericValues.push(num);
+            }
           }
         }
-      }
 
-      if (numericValues.length > 0) {
-        let qty = 1;
-        let unitPrice = numericValues[0];
-        let totalPrice = numericValues[numericValues.length - 1];
+        if (numericValues.length > 0) {
+          let qty = 1;
+          let unitPrice = numericValues[0];
+          let totalPrice = numericValues[numericValues.length - 1];
 
-        if (numericValues.length >= 3) {
-          qty = numericValues[0];
-          unitPrice = numericValues[1];
-          totalPrice = numericValues[numericValues.length - 1];
-        } else if (numericValues.length === 2) {
-          qty = numericValues[0];
-          totalPrice = numericValues[1];
-          unitPrice = qty > 0 ? Number((totalPrice / qty).toFixed(2)) : totalPrice;
-        }
+          if (numericValues.length >= 3) {
+            qty = numericValues[0];
+            unitPrice = numericValues[1];
+            totalPrice = numericValues[numericValues.length - 1];
+            if (Math.abs(qty * unitPrice - totalPrice) > 1.0) {
+              unitPrice = qty > 0 ? Number((totalPrice / qty).toFixed(2)) : totalPrice;
+            }
+          } else if (numericValues.length === 2) {
+            qty = numericValues[0];
+            totalPrice = numericValues[1];
+            unitPrice = qty > 0 ? Number((totalPrice / qty).toFixed(2)) : totalPrice;
+          }
 
-        if (totalPrice > 0) {
-          sumLineTotals += totalPrice;
-          const trName = translateRussianMaterialToTurkish(rawOriginalName) || rawOriginalName;
-          const cat = normalizeCategoryName('', `${trName} ${rawOriginalName}`);
-          fallbackItems.push({
-            materialName: trName,
-            originalName: rawOriginalName,
-            category: cat,
-            quantity: qty,
-            unit,
-            unitPrice,
-            totalPrice,
-            confidence: 0.85
-          });
+          if (totalPrice > 0) {
+            sumLineTotals += totalPrice;
+            const trName = translateRussianMaterialToTurkish(rawOriginalName) || rawOriginalName;
+            const cat = normalizeCategoryName('', `${trName} ${rawOriginalName}`);
+            fallbackItems.push({
+              materialName: trName,
+              originalName: rawOriginalName,
+              category: cat,
+              quantity: qty,
+              unit,
+              unitPrice,
+              grossUnitPrice: unitPrice,
+              totalPrice,
+              grossTotalPrice: totalPrice,
+              confidence: 0.90
+            });
+          }
         }
       }
     }
   }
 
   const finalTotal = explicitTotal > 0 ? explicitTotal : sumLineTotals;
+  const finalSubtotal = explicitTax > 0 && finalTotal > explicitTax
+    ? Number((finalTotal - explicitTax).toFixed(2))
+    : finalTotal;
 
   return {
     documentType: isSummaryOnly ? 'offer' : 'invoice',
-    supplier: { value: supplier, confidence: 0.85 },
-    vendorName: { value: supplier, confidence: 0.85 },
-    invoiceNumber: { value: invoiceNumber, confidence: 0.85 },
-    date: { value: date, confidence: 0.85 },
-    currency: { value: currency, confidence: 0.90 },
-    totalAmount: { value: finalTotal, confidence: 0.85 },
-    subtotal: { value: finalTotal, confidence: 0.85 },
-    tax: { value: 0, confidence: 0.80 },
+    supplier: { value: supplier, confidence: 0.90 },
+    vendorName: { value: supplier, confidence: 0.90 },
+    invoiceNumber: { value: invoiceNumber, confidence: 0.90 },
+    date: { value: date, confidence: 0.90 },
+    currency: { value: currency, confidence: 0.95 },
+    totalAmount: { value: finalTotal, confidence: 0.95 },
+    subtotal: { value: finalSubtotal, confidence: 0.90 },
+    tax: { value: explicitTax, confidence: 0.90 },
     itemCount: fallbackItems.length || 1,
     items: isSummaryOnly ? [] : fallbackItems,
-    overallConfidence: 0.85,
+    overallConfidence: 0.92,
     rawWarnings: []
   };
 }
 
-// Full Two-Stage Processing Pipeline with Multi-Model Fallback & Argon Escalation
+// Full Two-Stage Processing Pipeline with Multi-Model Fallback, Argon Escalation & Deterministic PDF Table Reconciliation
 export async function processInvoiceTwoStages(params: {
   base64Input?: string;
   mimeType?: string;
@@ -656,7 +851,6 @@ export async function processInvoiceTwoStages(params: {
     const contents = buildMultimodalContents(lightPrompt);
 
     try {
-      // Pass 1: Fast Flash chain starting with gemini-3.8-flash
       const genResult = await generateContentWithResilience(ai, {
         contents,
         config: { responseMimeType: "application/json" },
@@ -670,7 +864,6 @@ export async function processInvoiceTwoStages(params: {
       rawExtracted = robustParseJSON(genResult.text || '{}');
 
       const extractedTotal = parseNumberSafe(rawExtracted?.totalAmount?.value ?? rawExtracted?.totalAmount ?? 0);
-      // Escalate to gemini-4-argon if Flash couldn't read totalAmount on a complex document
       if (extractedTotal <= 0 && !usedModel.includes('argon')) {
         console.log('[Gemini AI OCR] Zorlu ilk teklif belgesi tespit edildi, gemini-4-argon devreye alınıyor...');
         retryCount++;
@@ -705,7 +898,6 @@ export async function processInvoiceTwoStages(params: {
       usedModel = 'local-resilient-parser';
     }
 
-    // Supplement missing fields from local parser if AI left totalAmount or supplier empty
     const localSupplement = fallbackExtractInvoiceFromTextOrCsv(
       [effectiveExcelCsv, extractedPdfText].filter(Boolean).join('\n\n'),
       params.fileName,
@@ -739,7 +931,7 @@ export async function processInvoiceTwoStages(params: {
       tax: 0,
       totalAmount: resolvedTotal,
       itemCount: parseNumberSafe(rawExtracted.itemCount?.value ?? rawExtracted.itemCount ?? rawExtracted.itemsCount ?? (Array.isArray(rawExtracted.items) && rawExtracted.items.length > 0 ? rawExtracted.items.length : localSupplement.itemCount)),
-      category: rawExtracted.category || 'İnşaat Demiri & Çelik',
+      category: rawExtracted.category || 'İnşaat Demiri',
       summary: rawExtracted.summary || 'İlk teklif özeti (hızlı okuma)',
       items: [],
       overallConfidence: parseNumberSafe(rawExtracted.overallConfidence ?? 0.95),
@@ -786,8 +978,15 @@ export async function processInvoiceTwoStages(params: {
   );
   const contents = buildMultimodalContents(stage1Prompt);
 
+  // Run Deterministic Local PDF/CSV Parser in parallel (Channel 1)
+  const localFallback = fallbackExtractInvoiceFromTextOrCsv(
+    [effectiveExcelCsv, extractedPdfText].filter(Boolean).join('\n\n'),
+    params.fileName,
+    false
+  );
+
   try {
-    // Pass 1: Fast & accurate gemini-3.8-flash with multi-model resilience
+    // Channel 2: Multi-model Gemini chain starting with gemini-3.8-flash
     const genResult = await generateContentWithResilience(ai, {
       contents,
       config: { responseMimeType: "application/json" },
@@ -801,11 +1000,32 @@ export async function processInvoiceTwoStages(params: {
     rawExtracted = robustParseJSON(genResult.text || '{}');
 
     const extractedTotal = parseNumberSafe(rawExtracted?.totalAmount?.value ?? rawExtracted?.totalAmount ?? 0);
-    const extractedItemsCount = Array.isArray(rawExtracted?.items) ? rawExtracted.items.length : 0;
+    const extractedItems = Array.isArray(rawExtracted?.items) ? rawExtracted.items : [];
+    const extractedItemsCount = extractedItems.length;
+    const rawItemsSum = extractedItems.reduce((acc: number, it: any) => {
+      const q = parseNumberSafe(it?.quantity) || 1;
+      const gTot = parseNumberSafe(it?.grossTotalPrice);
+      const tTot = parseNumberSafe(it?.totalPrice);
+      const uP = parseNumberSafe(it?.grossUnitPrice || it?.unitPrice);
+      return acc + (gTot > 0 ? gTot : (tTot > 0 ? tTot : q * uP));
+    }, 0);
 
-    // Smart Escalation to gemini-4-argon if Flash struggled (missing items or totalAmount on a full scan)
-    if ((extractedItemsCount === 0 || extractedTotal <= 0) && !usedModel.includes('argon')) {
-      console.log(`[Gemini AI OCR] Zorlu fatura/tablo tespit edildi (kalem: ${extractedItemsCount}, tutar: ${extractedTotal}), gemini-4-argon devreye alınıyor...`);
+    // Smart Escalation to gemini-4-argon if Flash missed items/total OR if item sum deviates from invoice total when no deterministic PDF table is available
+    const hasDeterministicPdfMatch =
+      localFallback.items.length > 0 &&
+      localFallback.totalAmount.value > 0 &&
+      Math.abs(localFallback.items.reduce((s: number, x: any) => s + (Number(x.totalPrice) || 0), 0) - localFallback.totalAmount.value) <= 2.0;
+
+    const hasUnexplainedMathMismatch =
+      !hasDeterministicPdfMatch &&
+      extractedTotal > 0 &&
+      rawItemsSum > 0 &&
+      Math.abs(rawItemsSum - extractedTotal) > 2.0 &&
+      Math.abs((extractedTotal / rawItemsSum) - 1.20) > 0.015 &&
+      Math.abs((extractedTotal / rawItemsSum) - 1.22) > 0.015;
+
+    if ((extractedItemsCount === 0 || extractedTotal <= 0 || hasUnexplainedMathMismatch) && !usedModel.includes('argon')) {
+      console.log(`[Gemini AI OCR] Zorlu fatura veya tutar uyuşmazlığı tespit edildi (kalem: ${extractedItemsCount}, kalemToplam: ${rawItemsSum}, genelToplam: ${extractedTotal}), gemini-4-argon devreye alınıyor...`);
       retryCount++;
       try {
         const argonRes = await generateContentWithResilience(ai, {
@@ -816,31 +1036,20 @@ export async function processInvoiceTwoStages(params: {
         const argonParsed = robustParseJSON(argonRes.text || '{}');
         const argonItems = Array.isArray(argonParsed?.items) ? argonParsed.items.length : 0;
         const argonTotal = parseNumberSafe(argonParsed?.totalAmount?.value ?? argonParsed?.totalAmount ?? 0);
-        if (argonItems > extractedItemsCount || (extractedTotal <= 0 && argonTotal > 0)) {
+        if (argonItems > 0 && argonTotal > 0) {
           rawExtracted = argonParsed;
           usedModel = argonRes.usedModel;
         }
       } catch (argonErr: any) {
-        console.warn('[Gemini AI OCR] Argon ek analizi tamamlanamadı, mevcut veri korunuyor:', argonErr?.message);
+        console.warn('[Gemini AI OCR] Argon ek analizi tamamlanamadı, mevcut veri ve dijital tablo doğrulaması kullanılacak:', argonErr?.message);
       }
     }
   } catch (err: any) {
     retryCount++;
-    console.warn('[AI Full OCR] AI servisleri yanıt veremedi, yerel akıllı ayrıştırıcı devreye alınıyor:', err?.message);
-    rawExtracted = fallbackExtractInvoiceFromTextOrCsv(
-      [effectiveExcelCsv, extractedPdfText].filter(Boolean).join('\n\n'),
-      params.fileName,
-      false
-    );
+    console.warn('[AI Full OCR] AI servisleri yanıt veremedi, deterministik dijital tablo ayrıştırıcısı devreye alınıyor:', err?.message);
+    rawExtracted = localFallback;
     usedModel = 'local-resilient-parser';
   }
-
-  // Local Resilient Supplement if AI returned empty object or missed items/totals when text/CSV is available
-  const localFallback = fallbackExtractInvoiceFromTextOrCsv(
-    [effectiveExcelCsv, extractedPdfText].filter(Boolean).join('\n\n'),
-    params.fileName,
-    false
-  );
 
   if (!rawExtracted || typeof rawExtracted !== 'object') {
     rawExtracted = localFallback;
@@ -851,6 +1060,9 @@ export async function processInvoiceTwoStages(params: {
     }
     if (parseNumberSafe(rawExtracted.totalAmount?.value ?? rawExtracted.totalAmount ?? 0) <= 0 && localFallback.totalAmount.value > 0) {
       rawExtracted.totalAmount = localFallback.totalAmount;
+    }
+    if (parseNumberSafe(rawExtracted.tax?.value ?? rawExtracted.tax ?? 0) <= 0 && localFallback.tax?.value > 0) {
+      rawExtracted.tax = localFallback.tax;
     }
   }
 
@@ -873,11 +1085,63 @@ export async function processInvoiceTwoStages(params: {
     'Tedarikçi Firma';
 
   const resolvedDateStr = extractStringSafe(standardized.date) || extractStringSafe(rawExtracted.date) || extractStringSafe(localFallback.date, new Date().toISOString().split('T')[0]);
-  const defaultVatPct = resolvedDateStr.startsWith('2025') ? 20 : 22;
+  const resolvedCurrency = extractStringSafe(standardized.currency) || extractStringSafe(rawExtracted.currency, localFallback.currency?.value || 'RUB');
+
+  // Resolve authoritative Invoice Grand Total and Tax Amount
+  const aiTotalAmount = parseNumberSafe(standardized.totalAmount?.value ?? standardized.totalAmount ?? rawExtracted.totalAmount?.value ?? 0);
+  const pdfExplicitTotal = parseNumberSafe(localFallback.totalAmount?.value ?? 0);
+  const rawTotalAmount = pdfExplicitTotal > 0 && (aiTotalAmount <= 0 || Math.abs(aiTotalAmount - pdfExplicitTotal) > 1.0)
+    ? pdfExplicitTotal
+    : (aiTotalAmount > 0 ? aiTotalAmount : pdfExplicitTotal);
+
+  const aiTaxAmount = parseNumberSafe(standardized.tax?.value ?? standardized.tax ?? rawExtracted.tax?.value ?? 0);
+  const pdfExplicitTax = parseNumberSafe(localFallback.tax?.value ?? 0);
+  const resolvedTaxAmount = pdfExplicitTax > 0 ? pdfExplicitTax : aiTaxAmount;
+
+  // Determine exact invoice-level VAT percentage from tax / (total - tax)
+  let defaultVatPct = resolvedDateStr.startsWith('2025') ? 20 : 22;
+  if (rawTotalAmount > 0 && resolvedTaxAmount > 0 && rawTotalAmount > resolvedTaxAmount) {
+    const impliedVat = (resolvedTaxAmount / (rawTotalAmount - resolvedTaxAmount)) * 100;
+    if (Math.abs(impliedVat - 22) <= 1.2) defaultVatPct = 22;
+    else if (Math.abs(impliedVat - 20) <= 1.2) defaultVatPct = 20;
+    else if (Math.abs(impliedVat - 18) <= 1.2) defaultVatPct = 18;
+    else if (Math.abs(impliedVat - 10) <= 1.2) defaultVatPct = 10;
+    else if (Math.abs(impliedVat - 5) <= 0.8) defaultVatPct = 5;
+  }
+
   let excludedFreightNetSum = 0;
   let excludedFreightGrossSum = 0;
+  const reconciliationNotes: string[] = [];
 
-  const mappedItems = (standardized.items || [])
+  // Helper to check if an item is a freight/delivery service line
+  const isFreightItem = (nameStr: string) => {
+    const m = nameStr.toLowerCase();
+    return (
+      /доставк|организация\s*доставк|грузоперевоз|перевозк|транспортн|автоуслуг|манипулятор|логистик|погруз|разгруз|услуг[аи]\s+по|\bnakliye\b|teslimat\s*hizmet|kargo/i.test(m) &&
+      !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел|швеллер|угол|труба|арматур|лист|балка|сетка|кабель|провод|доска|брус|фанер/i.test(m)
+    );
+  };
+
+  // Pre-check whether AI put VAT-inclusive prices in grossUnitPrice/grossTotalPrice or unitPrice/totalPrice
+  const nonFreightRawItems = (standardized.items || []).filter((it: any) => !isFreightItem(`${it?.materialName || ''} ${it?.originalName || ''}`));
+  const sumAiUnitPriceCol = nonFreightRawItems.reduce((s: number, it: any) => {
+    const q = parseNumberSafe(it?.quantity) || 1;
+    const t = parseNumberSafe(it?.totalPrice) || Number((q * parseNumberSafe(it?.unitPrice)).toFixed(2));
+    return s + t;
+  }, 0);
+  const sumAiGrossPriceCol = nonFreightRawItems.reduce((s: number, it: any) => {
+    const q = parseNumberSafe(it?.quantity) || 1;
+    const t = parseNumberSafe(it?.grossTotalPrice) || Number((q * parseNumberSafe(it?.grossUnitPrice)).toFixed(2));
+    return s + t;
+  }, 0);
+
+  const preferAiGrossCol =
+    rawTotalAmount > 0 &&
+    sumAiGrossPriceCol > 0 &&
+    Math.abs(sumAiGrossPriceCol - rawTotalAmount) <= 2.5 &&
+    Math.abs(sumAiUnitPriceCol - rawTotalAmount) > 2.5;
+
+  let mappedItems = (standardized.items || [])
     .map((it: any) => {
       let rawName = it.materialName || it.originalName || 'Malzeme Kalemi';
       let origName = it.originalName || it.materialName || '';
@@ -905,35 +1169,45 @@ export async function processInvoiceTwoStages(params: {
       }
 
       const qty = parseNumberSafe(it.quantity) || 1;
-      const vatPct = it.vatPercentage !== undefined && it.vatPercentage !== null ? parseNumberSafe(it.vatPercentage) : defaultVatPct;
-      let uPriceNet = parseNumberSafe(it.unitPriceNet ?? it.unitPrice) || 0;
-      let uPriceGross = parseNumberSafe(it.grossUnitPrice) || 0;
-      let tPriceNet = parseNumberSafe(it.totalPrice) || Number((qty * uPriceNet).toFixed(2));
-      let tPriceGross = parseNumberSafe(it.grossTotalPrice) || 0;
+      const vatPct = defaultVatPct;
 
-      if (uPriceNet <= 0 && qty > 0 && tPriceNet > 0) {
-        uPriceNet = Number((tPriceNet / qty).toFixed(2));
+      // Resolve exact VAT-inclusive (KDV Dahil) unitPrice and totalPrice
+      let uPriceGross = preferAiGrossCol
+        ? (parseNumberSafe(it.grossUnitPrice) || parseNumberSafe(it.unitPrice) || 0)
+        : (parseNumberSafe(it.unitPrice) || parseNumberSafe(it.grossUnitPrice) || 0);
+      let tPriceGross = preferAiGrossCol
+        ? (parseNumberSafe(it.grossTotalPrice) || parseNumberSafe(it.totalPrice) || 0)
+        : (parseNumberSafe(it.totalPrice) || parseNumberSafe(it.grossTotalPrice) || 0);
+
+      if (uPriceGross <= 0 && qty > 0 && tPriceGross > 0) {
+        uPriceGross = Number((tPriceGross / qty).toFixed(2));
       }
-      if (uPriceGross <= 0 && uPriceNet > 0) {
-        uPriceGross = vatPct > 0 ? Number((uPriceNet * (1 + vatPct / 100)).toFixed(2)) : uPriceNet;
-      }
-      if (tPriceGross <= 0) {
+      if (tPriceGross <= 0 && uPriceGross > 0) {
         tPriceGross = Number((qty * uPriceGross).toFixed(2));
       }
+
+      const uPriceNet = vatPct > 0
+        ? Number((uPriceGross / (1 + vatPct / 100)).toFixed(2))
+        : uPriceGross;
+      const tPriceNet = vatPct > 0
+        ? Number((tPriceGross / (1 + vatPct / 100)).toFixed(2))
+        : tPriceGross;
 
       return {
         materialName: rawName,
         originalName: origName,
         category: normalizeCategoryName(cat, `${rawName} ${origName}`),
         quantity: qty,
-        unit: it.unit || 'Adet',
-        unitPrice: uPriceNet,
+        unit: normalizeExtractedUnit(it.unit || 'Adet'),
+        unitPrice: uPriceGross,
         unitPriceNet: uPriceNet,
         grossUnitPrice: uPriceGross,
-        totalPrice: tPriceNet,
+        totalPrice: tPriceGross,
+        netTotalPrice: tPriceNet,
         grossTotalPrice: tPriceGross,
         vatPercentage: vatPct,
         isNetNormalized: true,
+        isGrossInvoicePrice: true,
         discountAmount: parseNumberSafe(it.discountAmount) || 0,
         brand: it.brand || '',
         model: it.model || '',
@@ -946,21 +1220,229 @@ export async function processInvoiceTwoStages(params: {
       };
     })
     .filter((it: any) => {
-      const m = `${it.materialName || ''} ${it.originalName || ''}`.toLowerCase();
-      const isFreightOrService =
-        (/доставк|организация\s*доставк|грузоперевоз|перевозк|транспортн|автоуслуг|манипулятор|логистик|погруз|разгруз|услуг[аи]\s+по|\bnakliye\b|teslimat\s*hizmet|kargo/i.test(m) &&
-         !/шлифмашин|диск|круг|лента|шкурка|ремонтн.*состав|монтажн.*пен|монтажн.*пистолет|монтажн.*коробк|монтажн.*лент|монтажн.*клин|монтажн.*дюбел|швеллер|угол|труба|арматур|лист|балка|сетка|кабель|провод|доска|брус|фанер/i.test(m));
-      if (isFreightOrService) {
-        excludedFreightNetSum += Number(it.totalPrice) || 0;
-        excludedFreightGrossSum += Number(it.grossTotalPrice) || Number(it.totalPrice) || 0;
+      if (isFreightItem(`${it.materialName || ''} ${it.originalName || ''}`)) {
+        excludedFreightNetSum += Number(it.netTotalPrice || it.unitPriceNet * it.quantity) || 0;
+        excludedFreightGrossSum += Number(it.grossTotalPrice || it.totalPrice) || 0;
         return false;
       }
       return true;
     });
 
-  const computedItemsSum = mappedItems.reduce((acc: number, item: any) => acc + (Number(item.grossTotalPrice || item.totalPrice) || 0), 0);
-  const rawTotalAmount = parseNumberSafe(standardized.totalAmount?.value ?? standardized.totalAmount ?? rawExtracted.totalAmount?.value ?? 0);
+  // ============================================================================
+  // MATHEMATICAL RECONCILIATION & AUTO-REPAIR LAYER (4 STAGES)
+  // ============================================================================
+  const pdfTableItems = (localFallback.items || []).filter(
+    (it: any) => !isFreightItem(`${it.materialName || ''} ${it.originalName || ''}`)
+  );
+  const pdfTableSum = pdfTableItems.reduce((s: number, it: any) => s + (Number(it.totalPrice) || 0), 0);
+  const targetGoodsTotal = rawTotalAmount > excludedFreightGrossSum
+    ? Number((rawTotalAmount - excludedFreightGrossSum).toFixed(2))
+    : rawTotalAmount;
+
+  // STAGE 1: Deterministic PDF Digital Table Cross-Check & Lock
+  if (pdfTableItems.length > 0 && targetGoodsTotal > 0 && Math.abs(pdfTableSum - targetGoodsTotal) <= 2.0) {
+    if (mappedItems.length === pdfTableItems.length) {
+      mappedItems = mappedItems.map((aiItem: any, idx: number) => {
+        const pdfRow = pdfTableItems[idx];
+        const priceDiff = Math.abs((Number(aiItem.unitPrice) || 0) - (Number(pdfRow.unitPrice) || 0));
+        const totalDiff = Math.abs((Number(aiItem.totalPrice) || 0) - (Number(pdfRow.totalPrice) || 0));
+        const qtyDiff = Math.abs((Number(aiItem.quantity) || 0) - (Number(pdfRow.quantity) || 0));
+
+        if (priceDiff > 0.01 || totalDiff > 0.01 || qtyDiff > 0.001) {
+          reconciliationNotes.push(
+            `Kalem #${idx + 1} (${aiItem.materialName}): Birim fiyat ve toplam PDF dijital tablosundan birebir eşitlendi (${pdfRow.unitPrice.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ${resolvedCurrency}).`
+          );
+        }
+
+        const lockedUnitGross = Number(pdfRow.unitPrice);
+        const lockedTotalGross = Number(pdfRow.totalPrice);
+        const lockedDiscount = Number(pdfRow.discountAmount || aiItem.discountAmount || 0);
+        const lockedQty = Number(pdfRow.quantity);
+        const vatPct = Number(aiItem.vatPercentage || defaultVatPct);
+        const lockedUnitNet = vatPct > 0 ? Number((lockedUnitGross / (1 + vatPct / 100)).toFixed(2)) : lockedUnitGross;
+        const lockedTotalNet = vatPct > 0 ? Number((lockedTotalGross / (1 + vatPct / 100)).toFixed(2)) : lockedTotalGross;
+
+        return {
+          ...aiItem,
+          originalName: pdfRow.originalName || aiItem.originalName,
+          productCode: aiItem.productCode || pdfRow.productCode || '',
+          quantity: lockedQty,
+          unit: pdfRow.unit || aiItem.unit,
+          unitPrice: lockedUnitGross,
+          grossUnitPrice: lockedUnitGross,
+          unitPriceNet: lockedUnitNet,
+          discountAmount: lockedDiscount,
+          totalPrice: lockedTotalGross,
+          grossTotalPrice: lockedTotalGross,
+          netTotalPrice: lockedTotalNet,
+          lineSource: 'invoice_pdf',
+          isGrossInvoicePrice: true
+        };
+      });
+    } else {
+      const currentAiSum = mappedItems.reduce((s: number, it: any) => s + (Number(it.totalPrice) || 0), 0);
+      if (Math.abs(currentAiSum - targetGoodsTotal) > 2.0) {
+        reconciliationNotes.push(
+          `AI kalem listesi (${mappedItems.length} satır) yerine genel toplamla birebir örtüşen PDF dijital tablosu (${pdfTableItems.length} satır = ${pdfTableSum.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ${resolvedCurrency}) baz alındı.`
+        );
+        mappedItems = pdfTableItems.map((pdfRow: any, idx: number) => {
+          const vatPct = defaultVatPct;
+          const lockedUnitGross = Number(pdfRow.unitPrice);
+          const lockedTotalGross = Number(pdfRow.totalPrice);
+          const lockedDiscount = Number(pdfRow.discountAmount || 0);
+          const lockedUnitNet = vatPct > 0 ? Number((lockedUnitGross / (1 + vatPct / 100)).toFixed(2)) : lockedUnitGross;
+          const lockedTotalNet = vatPct > 0 ? Number((lockedTotalGross / (1 + vatPct / 100)).toFixed(2)) : lockedTotalGross;
+          const matchedAi = mappedItems.find((a: any) =>
+            (pdfRow.productCode && a.productCode === pdfRow.productCode) ||
+            Math.abs((Number(a.totalPrice) || 0) - lockedTotalGross) < 1.0
+          ) || mappedItems[idx];
+
+          return {
+            materialName: matchedAi?.materialName || pdfRow.materialName,
+            originalName: pdfRow.originalName,
+            category: matchedAi?.category || pdfRow.category,
+            quantity: Number(pdfRow.quantity),
+            unit: pdfRow.unit,
+            unitPrice: lockedUnitGross,
+            grossUnitPrice: lockedUnitGross,
+            unitPriceNet: lockedUnitNet,
+            discountAmount: lockedDiscount,
+            totalPrice: lockedTotalGross,
+            grossTotalPrice: lockedTotalGross,
+            netTotalPrice: lockedTotalNet,
+            vatPercentage: vatPct,
+            isNetNormalized: true,
+            isGrossInvoicePrice: true,
+            lineSource: 'invoice_pdf',
+            productCode: pdfRow.productCode || matchedAi?.productCode || '',
+            brand: matchedAi?.brand || '',
+            model: matchedAi?.model || '',
+            diameter: matchedAi?.diameter || '',
+            dimensions: matchedAi?.dimensions || '',
+            quality: matchedAi?.quality || '',
+            color: matchedAi?.color || '',
+            confidence: 0.99
+          };
+        });
+      }
+    }
+  }
+
+  // STAGE 2: Reverse Accidental AI VAT Division on Image/Scanned Invoices (1.20x / 1.22x / 1.18x / 1.10x)
+  const sumBeforeVatCheck = mappedItems.reduce((s: number, it: any) => s + (Number(it.totalPrice) || 0), 0);
+  if (targetGoodsTotal > 0 && sumBeforeVatCheck > 0 && Math.abs(targetGoodsTotal - sumBeforeVatCheck) > 2.0) {
+    const ratio = targetGoodsTotal / sumBeforeVatCheck;
+    const candidateMultipliers = [1.22, 1.20, 1.18, 1.10, 1 + defaultVatPct / 100];
+    const matchedMultiplier = candidateMultipliers.find(m => Math.abs(ratio - m) <= 0.015);
+
+    if (matchedMultiplier !== undefined) {
+      reconciliationNotes.push(
+        `Kalem birim fiyatlarında yanlışlıkla düşülen KDV oranı (×${matchedMultiplier.toFixed(2)}) tespit edilerek faturadaki gerçek KDV dahil fiyatlara (${targetGoodsTotal.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ${resolvedCurrency}) eşitlendi.`
+      );
+      mappedItems = mappedItems.map((it: any) => {
+        const qty = Number(it.quantity) || 1;
+        // Prefer exact VAT multiplier (e.g. 1.22 or 1.20) when it snaps unitPrice to a clean integer (e.g. 11410.66 * 1.22 = 13921.0052 -> 13921)
+        const multUnit = Number(it.unitPrice) * matchedMultiplier;
+        const nearIntMultUnit = Math.round(multUnit);
+        let restoredUnit = Math.abs(multUnit - nearIntMultUnit) <= 0.025
+          ? nearIntMultUnit
+          : Number((Number(it.unitPrice) * ratio).toFixed(2));
+
+        let restoredTotal = Number((Number(it.totalPrice) * ratio).toFixed(2));
+        const exactLineTotal = Number((qty * restoredUnit - (Number(it.discountAmount) || 0)).toFixed(2));
+        if (Math.abs(exactLineTotal - restoredTotal) <= Math.max(0.5, qty * 0.02)) {
+          restoredTotal = exactLineTotal;
+        }
+
+        const vatPct = Number(it.vatPercentage || defaultVatPct);
+        const netUnit = vatPct > 0 ? Number((restoredUnit / (1 + vatPct / 100)).toFixed(2)) : restoredUnit;
+        const netTotal = vatPct > 0 ? Number((restoredTotal / (1 + vatPct / 100)).toFixed(2)) : restoredTotal;
+
+        return {
+          ...it,
+          unitPrice: restoredUnit,
+          grossUnitPrice: restoredUnit,
+          unitPriceNet: netUnit,
+          totalPrice: restoredTotal,
+          grossTotalPrice: restoredTotal,
+          netTotalPrice: netTotal,
+          isGrossInvoicePrice: true
+        };
+      });
+    }
+  }
+
+  // STAGE 3: Row-level Multiplication & Discount Consistency (quantity × unitPrice - discountAmount === totalPrice)
+  const sumAfterVatCheck = mappedItems.reduce((s: number, it: any) => s + (Number(it.totalPrice) || 0), 0);
+  const rowTotalsMatchGrandTotal = targetGoodsTotal > 0 && Math.abs(sumAfterVatCheck - targetGoodsTotal) <= 1.5;
+
+  mappedItems = mappedItems.map((it: any, idx: number) => {
+    const qty = Number(it.quantity) || 1;
+    let uPrice = Number(it.unitPrice) || 0;
+    let tPrice = Number(it.totalPrice) || 0;
+    let discAmt = Number(it.discountAmount) || 0;
+
+    if (qty > 0 && tPrice > 0 && uPrice > 0) {
+      const expectedAfterDisc = Number((qty * uPrice - discAmt).toFixed(2));
+      if (Math.abs(expectedAfterDisc - tPrice) > 0.5) {
+        if (rowTotalsMatchGrandTotal) {
+          // Check if uPrice was accidentally divided by VAT (e.g. 11410.66 = 13921 / 1.22) while tPrice is already gross (55669)
+          const vatCandidates = [1.22, 1.20, 1.18, 1.10, 1 + defaultVatPct / 100];
+          let restoredFromVat = false;
+          for (const vm of vatCandidates) {
+            const candidateGrossUnit = uPrice * vm;
+            const snappedUnit = Math.abs(candidateGrossUnit - Math.round(candidateGrossUnit)) <= 0.025
+              ? Math.round(candidateGrossUnit)
+              : Number(candidateGrossUnit.toFixed(2));
+            const grossBeforeDisc = Number((qty * snappedUnit).toFixed(2));
+            if (grossBeforeDisc >= tPrice && (grossBeforeDisc - tPrice) <= Math.max(100, tPrice * 0.02)) {
+              reconciliationNotes.push(
+                `Kalem #${idx + 1} (${it.materialName}): Birim fiyatta düşülen KDV (×${vm.toFixed(2)}) geri eklenerek faturadaki birebir birim fiyata (${uPrice} → ${snappedUnit}) düzeltildi.`
+              );
+              uPrice = snappedUnit;
+              discAmt = Number((grossBeforeDisc - tPrice).toFixed(2));
+              restoredFromVat = true;
+              break;
+            }
+          }
+
+          if (!restoredFromVat) {
+            const correctedUnit = Number((tPrice / qty).toFixed(2));
+            reconciliationNotes.push(
+              `Kalem #${idx + 1} (${it.materialName}): Birim fiyat satır toplamı / miktar (${tPrice} / ${qty} = ${correctedUnit}) ile doğrulandı.`
+            );
+            uPrice = correctedUnit;
+          }
+        } else {
+          tPrice = expectedAfterDisc;
+        }
+      }
+    }
+
+    const vatPct = Number(it.vatPercentage || defaultVatPct);
+    const uPriceNet = vatPct > 0 ? Number((uPrice / (1 + vatPct / 100)).toFixed(2)) : uPrice;
+    const tPriceNet = vatPct > 0 ? Number((tPrice / (1 + vatPct / 100)).toFixed(2)) : tPrice;
+
+    return {
+      ...it,
+      unitPrice: uPrice,
+      grossUnitPrice: uPrice,
+      unitPriceNet: uPriceNet,
+      discountAmount: discAmt,
+      totalPrice: tPrice,
+      grossTotalPrice: tPrice,
+      netTotalPrice: tPriceNet,
+      isGrossInvoicePrice: true
+    };
+  });
+
+  const computedItemsSum = Number(
+    mappedItems.reduce((acc: number, item: any) => acc + (Number(item.totalPrice) || 0), 0).toFixed(2)
+  );
   const finalTotalAmount = rawTotalAmount > 0 ? rawTotalAmount : computedItemsSum;
+  const finalSubtotalAmount = resolvedTaxAmount > 0 && finalTotalAmount > resolvedTaxAmount
+    ? Number((finalTotalAmount - resolvedTaxAmount).toFixed(2))
+    : parseNumberSafe(standardized.subtotal?.value ?? standardized.subtotal ?? rawExtracted.subtotal?.value ?? finalTotalAmount);
 
   const finalExtracted: any = {
     documentType: standardized.documentType || rawExtracted.documentType || 'invoice',
@@ -971,11 +1453,14 @@ export async function processInvoiceTwoStages(params: {
     taxId: extractStringSafe(standardized.taxId) || extractStringSafe(rawExtracted.taxId),
     invoiceNumber: extractStringSafe(standardized.invoiceNumber) || extractStringSafe(rawExtracted.invoiceNumber) || extractStringSafe(localFallback.invoiceNumber),
     date: resolvedDateStr,
-    currency: extractStringSafe(standardized.currency) || extractStringSafe(rawExtracted.currency, 'RUB'),
-    subtotal: parseNumberSafe(standardized.subtotal?.value ?? standardized.subtotal ?? rawExtracted.subtotal?.value ?? finalTotalAmount),
+    currency: resolvedCurrency,
+    subtotal: finalSubtotalAmount,
     discount: parseNumberSafe(standardized.discount?.value ?? standardized.discount ?? rawExtracted.discount?.value ?? 0),
-    tax: parseNumberSafe(standardized.tax?.value ?? standardized.tax ?? rawExtracted.tax?.value ?? 0),
+    tax: resolvedTaxAmount,
+    vatRate: defaultVatPct,
     totalAmount: finalTotalAmount,
+    calculatedItemsSum: computedItemsSum,
+    reconciliationNotes,
     ...(excludedFreightNetSum > 0 ? {
       excludedFreightAmount: Number(excludedFreightNetSum.toFixed(2)),
       excludedFreightGrossAmount: Number(excludedFreightGrossSum.toFixed(2))

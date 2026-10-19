@@ -669,7 +669,11 @@ export function sortCategoriesByPriority(categoryList: string[]): string[] {
 const PHRASE_TRANSLATIONS: Array<[RegExp, string]> = [
   [/^канцелярские\s+и\s+офисные\s+товары\s*\((.+)\)$/gi, '$1'],
   [/^строительно-монтажный\s+материал\s*\/\s*тмц\s*\((.+)\)$/gi, '$1'],
-  [/угловая\s+шлифмашина|ушм/gi, 'Avuç Taşlama Makinesi (Spiral)'],
+  [/машина\s+углошлифовальная|углошлифовальная\s+машина|угловая\s+шлифмашина|угловая\s+шлифовальная\s+машина|ушм/gi, 'Avuç Taşlama Makinesi (Spiral)'],
+  [/молоток\s+отбойный|отбойный\s+молоток/gi, 'Kırıcı Delici (Hilti / Отбойный молоток)'],
+  [/шпилька\s+резьбовая/gi, 'Saplama (Tij / Gijon)'],
+  [/с\s+цинковым\s+покрытием/gi, 'Galvaniz Kaplamalı'],
+  [/профессионал/gi, 'Profesyonel'],
   [/пила\s+циркулярная\s+сетевая|пила\s+дисковая|дисковая\s+пила/gi, 'Daire Testere Makinesi'],
   [/диск\s+пильный\s+по\s+дереву/gi, 'Ahşap Kesici Daire Testere Bıçağı'],
   [/диск\s+отрезной\s+по\s+металлу/gi, 'Metal Kesici Taş Disk'],

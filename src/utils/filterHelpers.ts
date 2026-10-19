@@ -10,13 +10,13 @@ export interface DateFilterState {
 }
 
 export const DATE_PRESETS = [
-  { key: 'all', label: 'Tüm Tarihler' },
-  { key: 'this_month', label: 'Bu Ay' },
-  { key: 'last_month', label: 'Geçen Ay' },
-  { key: 'last_30_days', label: 'Son 30 Gün' },
-  { key: 'last_90_days', label: 'Son 90 Gün' },
-  { key: 'year_2026', label: '2026 Yılı' },
-  { key: 'year_2025', label: '2025 Yılı' }
+  { key: 'all', label: 'Tüm Tarihler', labelRu: 'Все даты' },
+  { key: 'this_month', label: 'Bu Ay', labelRu: 'Этот месяц' },
+  { key: 'last_month', label: 'Geçen Ay', labelRu: 'Прошлый месяц' },
+  { key: 'last_30_days', label: 'Son 30 Gün', labelRu: 'Последние 30 дней' },
+  { key: 'last_90_days', label: 'Son 90 Gün', labelRu: 'Последние 90 дней' },
+  { key: 'year_2026', label: '2026 Yılı', labelRu: '2026 год' },
+  { key: 'year_2025', label: '2025 Yılı', labelRu: '2025 год' }
 ];
 
 export function matchesDateFilter(rawDate?: string, filter?: DateFilterState): boolean {
@@ -89,14 +89,15 @@ export function matchesDateFilter(rawDate?: string, filter?: DateFilterState): b
   }
 }
 
-export function getDateFilterDisplayLabel(filter?: DateFilterState): string {
-  if (!filter || !filter.preset || filter.preset === 'all') return 'Tüm Tarihler';
+export function getDateFilterDisplayLabel(filter?: DateFilterState, lang: 'TR' | 'RU' = 'TR'): string {
+  const isRu = lang === 'RU';
+  if (!filter || !filter.preset || filter.preset === 'all') return isRu ? 'Все даты' : 'Tüm Tarihler';
   const preset = DATE_PRESETS.find(p => p.key === filter.preset);
-  if (preset) return preset.label;
+  if (preset) return isRu ? preset.labelRu : preset.label;
   if (filter.preset === 'custom') {
     if (filter.startDate && filter.endDate) return `${filter.startDate} - ${filter.endDate}`;
     if (filter.startDate) return `≥ ${filter.startDate}`;
     if (filter.endDate) return `≤ ${filter.endDate}`;
   }
-  return 'Filtreli';
+  return isRu ? 'Фильтр' : 'Filtreli';
 }

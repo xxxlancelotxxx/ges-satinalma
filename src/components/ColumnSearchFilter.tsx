@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Search, X, Check, Filter } from 'lucide-react';
+import { Search, X } from 'lucide-react';
+import { useLanguage } from '../context/LanguageContext';
 
 interface Props {
   label: string;
@@ -15,11 +16,14 @@ export const ColumnSearchFilter: React.FC<Props> = ({
   label,
   value,
   onChange,
-  placeholder = 'Filtrede ara...',
+  placeholder,
   className = '',
   align = 'left',
   dark = false
 }) => {
+  const { language } = useLanguage();
+  const isRu = language === 'RU';
+  const effectivePlaceholder = placeholder || (isRu ? 'Поиск в фильтре...' : 'Filtrede ara...');
   const [isOpen, setIsOpen] = useState(false);
   const [tempVal, setTempVal] = useState(value);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -80,7 +84,7 @@ export const ColumnSearchFilter: React.FC<Props> = ({
               ? 'bg-slate-800/90 hover:bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
               : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-700 hover:text-slate-900 shadow-2xs'
         }`}
-        title={`${label}: ${hasValue ? value : 'Tümü'}`}
+        title={`${label}: ${hasValue ? value : (isRu ? 'Все' : 'Tümü')}`}
       >
         <Search className={`w-3 h-3 shrink-0 ${hasValue ? 'text-indigo-500' : 'text-slate-400'}`} />
         <span className="truncate max-w-[100px]">
@@ -100,7 +104,7 @@ export const ColumnSearchFilter: React.FC<Props> = ({
         >
           <div className="flex items-center justify-between mb-2">
             <span className={`text-[11px] font-bold uppercase tracking-wider ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
-              {label} Filtrele
+              {isRu ? `Фильтр: ${label}` : `${label} Filtrele`}
             </span>
             {hasValue && (
               <button
@@ -108,7 +112,7 @@ export const ColumnSearchFilter: React.FC<Props> = ({
                 onClick={handleClear}
                 className="text-[10px] font-bold text-indigo-500 hover:underline cursor-pointer"
               >
-                Temizle
+                {isRu ? 'Очистить' : 'Temizle'}
               </button>
             )}
           </div>
@@ -120,7 +124,7 @@ export const ColumnSearchFilter: React.FC<Props> = ({
                 type="text"
                 value={tempVal}
                 onChange={(e) => setTempVal(e.target.value)}
-                placeholder={placeholder}
+                placeholder={effectivePlaceholder}
                 className={`w-full px-2.5 py-1.5 text-xs rounded-lg border outline-none font-sans ${
                   dark
                     ? 'bg-slate-950 border-slate-700 focus:border-indigo-500 text-white placeholder-slate-500'
@@ -143,14 +147,14 @@ export const ColumnSearchFilter: React.FC<Props> = ({
                 type="submit"
                 className="flex-1 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer"
               >
-                Filtrele
+                {isRu ? 'Применить' : 'Filtrele'}
               </button>
               <button
                 type="button"
                 onClick={() => setIsOpen(false)}
                 className="px-2 py-1 text-xs text-slate-400 hover:text-slate-600"
               >
-                İptal
+                {isRu ? 'Отмена' : 'İptal'}
               </button>
             </div>
           </form>

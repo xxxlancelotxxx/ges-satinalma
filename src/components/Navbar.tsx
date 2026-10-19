@@ -124,7 +124,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           label: t('navDiscountEntry'),
           desc: t('subDescDiscountEntry'),
           icon: PlusCircle,
-          badge: 'İndirim & TDF',
+          badge: language === 'RU' ? 'Скидки и TDF' : 'İndirim & TDF',
           iconBg: 'bg-amber-500/15 border border-amber-500/30',
           iconColor: 'text-amber-400'
         },
@@ -157,10 +157,10 @@ export const Navbar: React.FC<NavbarProps> = ({
         },
         {
           id: 'prizma-invoices',
-          label: 'Prizma Faturaları (Son 3 Ay)',
-          desc: 'PM.gescons.ru STF/BTF fatura ve malzeme kalemleri',
+          label: language === 'RU' ? 'Счета Prizma (Последние 3 мес.)' : 'Prizma Faturaları (Son 3 Ay)',
+          desc: language === 'RU' ? 'PM.gescons.ru STF/BTF счета и позиции материалов' : 'PM.gescons.ru STF/BTF fatura ve malzeme kalemleri',
           icon: Layers,
-          badge: 'ERP 3 Ay',
+          badge: language === 'RU' ? 'ERP 3 мес.' : 'ERP 3 Ay',
           iconBg: 'bg-blue-600/20 border border-blue-500/40',
           iconColor: 'text-blue-400'
         }
@@ -300,14 +300,14 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <button
                   onClick={() => setShowPasswordModal(true)}
                   className="p-1 hover:bg-amber-500/20 text-slate-400 hover:text-amber-400 rounded-lg transition-colors cursor-pointer"
-                  title="Şifre Değiştir"
+                  title={language === 'RU' ? 'Изменить пароль' : 'Şifre Değiştir'}
                 >
                   <KeyRound className="w-3.5 h-3.5" />
                 </button>
                 <button
                   onClick={logout}
                   className="p-1 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 rounded-lg transition-colors cursor-pointer"
-                  title="Güvenli Çıkış Yap"
+                  title={language === 'RU' ? 'Безопасный выход' : 'Güvenli Çıkış Yap'}
                 >
                   <LogOut className="w-3.5 h-3.5" />
                 </button>
@@ -319,10 +319,10 @@ export const Navbar: React.FC<NavbarProps> = ({
               <button
                 onClick={onOpenBackupModal}
                 className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-indigo-950/60 hover:bg-indigo-900/80 text-indigo-300 hover:text-indigo-200 border border-indigo-800/80 text-xs font-bold transition-all cursor-pointer shadow-sm"
-                title="Veri Güvenliği ve Otomatik Yedekleme Merkezi (Yalnızca Yönetici)"
+                title={language === 'RU' ? 'Центр безопасности данных и резервного копирования (Только Админ)' : 'Veri Güvenliği ve Otomatik Yedekleme Merkezi (Yalnızca Yönetici)'}
               >
                 <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
-                <span className="hidden lg:inline">Yedekleme & Güvenlik</span>
+                <span className="hidden lg:inline">{language === 'RU' ? 'Резерв и Безопасность' : 'Yedekleme & Güvenlik'}</span>
               </button>
             )}
 
@@ -331,10 +331,10 @@ export const Navbar: React.FC<NavbarProps> = ({
               <button
                 onClick={onOpenTrashModal}
                 className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-rose-400 hover:text-rose-300 border border-slate-800 text-xs font-bold transition-all cursor-pointer relative"
-                title="Silinen Faturalar & Çöp Kutusu"
+                title={language === 'RU' ? 'Удаленные счета и Корзина' : 'Silinen Faturalar & Çöp Kutusu'}
               >
                 <Trash2 className="w-3.5 h-3.5 text-rose-500" />
-                <span className="hidden md:inline">Çöp Kutusu</span>
+                <span className="hidden md:inline">{language === 'RU' ? 'Корзина' : 'Çöp Kutusu'}</span>
                 {trashCount > 0 && (
                   <span className="px-1.5 py-0.2 bg-rose-600 text-white rounded-full text-[10px] font-mono">
                     {trashCount}
@@ -351,11 +351,11 @@ export const Navbar: React.FC<NavbarProps> = ({
                   ? 'bg-blue-600 text-white border-blue-400 ring-1 ring-blue-300'
                   : 'bg-slate-950 text-blue-300 border-blue-500/30 hover:border-blue-400/60 hover:bg-slate-900'
               }`}
-              title="Prizma (Son 3 Ay) Faturaları ve Malzeme Ekranına Git"
+              title={language === 'RU' ? 'Перейти к счетам Prizma (Последние 3 мес.)' : 'Prizma (Son 3 Ay) Faturaları ve Malzeme Ekranına Git'}
             >
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
               <span className="font-black text-white">П</span>
-              <span>Prizma (Son 3 Ay)</span>
+              <span>{language === 'RU' ? 'Prizma (3 мес.)' : 'Prizma (Son 3 Ay)'}</span>
             </button>
 
             {/* TR / RU Flag Language Selector */}
@@ -392,7 +392,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <PlusCircle className="w-4 h-4" />
               <span className="hidden sm:inline">{t('addDiscountBtn')}</span>
-              <span className="sm:hidden">+ İndirim</span>
+              <span className="sm:hidden">{language === 'RU' ? '+ Скидка' : '+ İndirim'}</span>
             </button>
           </div>
         </div>
@@ -466,7 +466,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     {/* Category Header Label */}
                     <div className="px-3 py-1.5 border-b border-slate-800/80 mb-1 flex items-center justify-between text-[11px] text-slate-400 font-bold uppercase tracking-wider">
                       <span>{group.label}</span>
-                      <span className="text-[10px] text-slate-500 font-normal">{group.items.length} Modül</span>
+                      <span className="text-[10px] text-slate-500 font-normal">{group.items.length} {language === 'RU' ? 'Мод.' : 'Modül'}</span>
                     </div>
 
                     {/* Sub-items List */}

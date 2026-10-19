@@ -246,9 +246,17 @@ export const DiscountEntryForm: React.FC<Props> = ({
       unit: string;
       quantity: number;
       unitPrice: number;
+      grossUnitPrice?: number;
       totalPrice: number;
+      grossTotalPrice?: number;
+      unitPriceNet?: number;
+      vatPercentage?: number;
+      isGrossInvoicePrice?: boolean;
+      lineSource?: string;
       discountAmount?: number;
     }>;
+    reconciliationStatus?: 'EXACT_MATCH' | 'CORRECTED_FROM_PDF' | 'MISMATCH_WARNING';
+    reconciliationNotes?: string[];
     rounds?: NegotiationRound[];
   } | null>(null);
 
@@ -1235,7 +1243,11 @@ export const DiscountEntryForm: React.FC<Props> = ({
           throw new Error(`Sunucu yanıtı geçersiz (${res.status}): ${resText.slice(0, 100)}`);
         }
         if (res.ok && data.success && data.extracted) {
-          extractedData = data.extracted;
+          extractedData = {
+            ...data.extracted,
+            _reconciliationStatus: data.validation?.reconciliationStatus,
+            _reconciliationNotes: data.validation?.reconciliationNotes
+          };
           if (data.usedModel) {
             usedModelName = data.usedModel;
           }
@@ -1323,16 +1335,27 @@ export const DiscountEntryForm: React.FC<Props> = ({
       const finalCategory = mappedCategory || 'Diğer Malzeme';
 
       const rawItems = Array.isArray(extractedData?.items) ? extractedData.items : [];
-      const formattedItems = rawItems.map((it: any) => ({
-        materialName: it.materialName || 'İnşaat Malzemesi',
-        originalName: it.originalName || it.materialName || '',
-        category: it.category || finalCategory,
-        unit: it.unit || 'Adet',
-        quantity: Number(it.quantity) || 1,
-        unitPrice: Number(it.unitPrice) || 0,
-        totalPrice: Number(it.totalPrice) || (Number(it.quantity) * Number(it.unitPrice)),
-        discountAmount: Number(it.discountAmount) || 0
-      }));
+      const formattedItems = rawItems.map((it: any) => {
+        const qty = Number(it.quantity) || 1;
+        const uPrice = Number(it.unitPrice) || 0;
+        const tPrice = Number(it.totalPrice) || Number((qty * uPrice).toFixed(2));
+        return {
+          materialName: it.materialName || 'İnşaat Malzemesi',
+          originalName: it.originalName || it.materialName || '',
+          category: it.category || finalCategory,
+          unit: it.unit || 'Adet',
+          quantity: qty,
+          unitPrice: uPrice,
+          grossUnitPrice: Number(it.grossUnitPrice ?? uPrice) || 0,
+          totalPrice: tPrice,
+          grossTotalPrice: Number(it.grossTotalPrice ?? tPrice) || 0,
+          unitPriceNet: Number(it.unitPriceNet) || 0,
+          vatPercentage: Number(it.vatPercentage ?? extractedData?.vatPercentage ?? 20),
+          isGrossInvoicePrice: true,
+          lineSource: it.lineSource || 'AI',
+          discountAmount: Number(it.discountAmount) || 0
+        };
+      });
 
       // Calculate Agreed Price (Son Anlaşılan Net Fiyat)
       const prevOfferNum = Number(offerPrice) || 0;
@@ -1411,6 +1434,8 @@ export const DiscountEntryForm: React.FC<Props> = ({
           scopeDeductionAmount: Number(extractedData?.scopeDeductionAmount?.value || extractedData?.scopeDeductionAmount) || undefined,
           scopeDeductionReason: extractedData?.scopeDeductionReason?.value || extractedData?.scopeDeductionReason || undefined,
           items: formattedItems,
+          reconciliationStatus: extractedData?._reconciliationStatus,
+          reconciliationNotes: extractedData?._reconciliationNotes,
           rounds: negotiationRounds.length > 0 ? [...negotiationRounds] : []
         });
 
@@ -5486,6 +5511,102 @@ export const DiscountEntryForm: React.FC<Props> = ({
                     </div>
                   </div>
                 )}
+
+                {/* Extracted Line Items & Live Mathematical Reconciliation */}
+                {aiReviewModal.items && aiReviewModal.items.length > 0 && (() => {
+                  const targetDocTotal = aiReviewModal.offerType === 'first'
+                    ? (Number(aiReviewModal.offerPrice) || 0)
+                    : (Number(aiReviewModal.agreedPrice) || Number(aiReviewModal.offerPrice) || 0);
+                  const liveItemsSum = Number(
+                    aiReviewModal.items.reduce((acc, it) => acc + (Number(it.totalPrice) || 0), 0).toFixed(2)
+                  );
+                  const liveDiff = Number(Math.abs(targetDocTotal - liveItemsSum).toFixed(2));
+                  const isExactMatch = liveDiff <= 1.50;
+                  const reconNotes = aiReviewModal.reconciliationNotes || [];
+
+                  return (
+                    <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3 space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center space-x-1.5">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Okunan Fatura Kalemleri ({aiReviewModal.items.length} Kalem — KDV Dahil Birebir)</span>
+                        </span>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                          isExactMatch
+                            ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/40'
+                            : 'bg-amber-950/80 text-amber-300 border-amber-500/40'
+                        }`}>
+                          {isExactMatch
+                            ? `✓ Matematiksel Sağlama Tam (${formatRuble(liveItemsSum)})`
+                            : `⚠️ Kalem Toplamı: ${formatRuble(liveItemsSum)} (Fark: ${formatRuble(liveDiff)})`}
+                        </span>
+                      </div>
+
+                      {reconNotes.length > 0 && (
+                        <div className="text-[10px] text-emerald-300/90 bg-emerald-950/40 border border-emerald-500/30 rounded-lg px-2.5 py-1.5 space-y-0.5">
+                          {reconNotes.map((note, nIdx) => (
+                            <div key={nIdx}>• {note}</div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="overflow-x-auto max-h-48 overflow-y-auto border border-slate-800 rounded-lg">
+                        <table className="w-full text-left border-collapse text-[11px]">
+                          <thead>
+                            <tr className="bg-slate-900 text-slate-400 border-b border-slate-800">
+                              <th className="py-1.5 px-2 font-semibold">#</th>
+                              <th className="py-1.5 px-2 font-semibold">Malzeme (TR / Orijinal)</th>
+                              <th className="py-1.5 px-2 font-semibold text-right">Miktar</th>
+                              <th className="py-1.5 px-2 font-semibold text-right">Birim Fiyat (KDV Dahil)</th>
+                              <th className="py-1.5 px-2 font-semibold text-right">Satır Toplamı</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800/70">
+                            {aiReviewModal.items.map((item, idx) => (
+                              <tr key={idx} className="hover:bg-slate-900/50">
+                                <td className="py-1.5 px-2 text-slate-500 font-mono">{idx + 1}</td>
+                                <td className="py-1.5 px-2">
+                                  <div className="font-semibold text-slate-200">{item.materialName}</div>
+                                  {item.originalName && item.originalName !== item.materialName && (
+                                    <div className="text-[10px] text-slate-400 truncate max-w-xs">{item.originalName}</div>
+                                  )}
+                                </td>
+                                <td className="py-1.5 px-2 text-right font-mono text-slate-300">
+                                  {item.quantity} {item.unit}
+                                </td>
+                                <td className="py-1.5 px-2 text-right">
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    value={item.unitPrice}
+                                    onChange={(e) => {
+                                      const newUp = Number(e.target.value) || 0;
+                                      const newTp = Number(((Number(item.quantity) || 1) * newUp).toFixed(2));
+                                      const nextItems = [...aiReviewModal.items];
+                                      nextItems[idx] = {
+                                        ...nextItems[idx],
+                                        unitPrice: newUp,
+                                        grossUnitPrice: newUp,
+                                        totalPrice: newTp,
+                                        grossTotalPrice: newTp,
+                                        isGrossInvoicePrice: true
+                                      };
+                                      setAiReviewModal({ ...aiReviewModal, items: nextItems });
+                                    }}
+                                    className="w-24 text-right bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 font-mono font-bold text-slate-100 text-[11px]"
+                                  />
+                                </td>
+                                <td className="py-1.5 px-2 text-right font-mono font-bold text-amber-300">
+                                  {formatRuble(item.totalPrice)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             {/* Inline Error & Duplicate Confirmation right above the Save button inside Modal */}
             {notification?.type === 'error' && (

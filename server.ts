@@ -1375,6 +1375,11 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
       unitPriceNet = storedVatPct > 0
         ? Number((grossUnitPrice / (1 + storedVatPct / 100)).toFixed(2))
         : grossUnitPrice;
+    } else if (it.isGrossInvoicePrice && rawUnitPrice > 0) {
+      grossUnitPrice = Number(rawUnitPrice.toFixed(2));
+      unitPriceNet = effectiveVatPct > 0
+        ? Number((grossUnitPrice / (1 + effectiveVatPct / 100)).toFixed(2))
+        : grossUnitPrice;
     } else if (it.isNetNormalized && it.unitPriceNet > 0 && it.grossUnitPrice > 0 && !isIpMalyavin) {
       grossUnitPrice = Number(Number(it.grossUnitPrice).toFixed(2));
       unitPriceNet = Number(Number(it.unitPriceNet).toFixed(2));
@@ -1401,9 +1406,9 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
     }
 
     // Fatura belgesinden okunan satırda tutarlar belgedeki gibi kalır (yuvarlanmış birim fiyat × miktar kuruş kaydırır)
-    const isDocumentLine = it.lineSource === 'invoice_pdf' && Number(it.totalPrice) > 0 && Number(it.grossTotalPrice) > 0;
-    const rawDocNetTotal = Number(it.totalPrice);
-    const rawDocGrossTotal = Number(it.grossTotalPrice);
+    const isDocumentLine = (it.lineSource === 'invoice_pdf' || it.isGrossInvoicePrice) && (Number(it.totalPrice) > 0 || Number(it.grossTotalPrice) > 0);
+    const rawDocNetTotal = Number(it.netTotalPrice || it.totalPrice);
+    const rawDocGrossTotal = Number(it.grossTotalPrice || it.totalPrice);
     const netTotalPrice = isDocumentLine
       ? (effectiveVatPct > 0 && Math.abs(rawDocNetTotal - rawDocGrossTotal) < 0.05
           ? Number((rawDocGrossTotal / (1 + effectiveVatPct / 100)).toFixed(2))
@@ -1417,11 +1422,12 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
       originalName: origRu,
       originalMaterialName: origRu,
       category: normCat,
-      unitPrice: unitPriceNet,
+      unitPrice: it.isGrossInvoicePrice ? grossUnitPrice : unitPriceNet,
       unitPriceNet,
       grossUnitPrice,
-      totalPrice: netTotalPrice,
+      totalPrice: it.isGrossInvoicePrice ? grossTotalPrice : netTotalPrice,
       grossTotalPrice,
+      netTotalPrice,
       vatPercentage: effectiveVatPct,
       isNetNormalized: true,
       isPortalAmbiguous,
@@ -6273,9 +6279,44 @@ app.post('/api/invoices', async (req, res) => {
     const id = `inv_${Date.now()}`;
     let normItems = req.body.items;
     if (Array.isArray(normItems)) {
+      const invTotalNum = Number(req.body.totalAmount) || 0;
+      const sumRawItemTotals = normItems.reduce((acc: number, x: any) => {
+        const q = Number(x?.quantity) || 1;
+        const t = Number(x?.totalPrice) || Number((q * (Number(x?.unitPrice) || 0)).toFixed(2));
+        return acc + t;
+      }, 0);
+      const itemsMatchGrossTotal = invTotalNum > 0 && sumRawItemTotals > 0 && Math.abs(sumRawItemTotals - invTotalNum) / invTotalNum <= 0.015;
+      const docYearStr = String(req.body.date || new Date().toISOString()).slice(0, 4);
+      const defaultVatRate = Number(req.body.vatRate) || (docYearStr === '2025' ? 20 : 22);
+
       normItems = normItems.map((it: any) => {
         const norm = smartNormalizeItem(it);
         const canonCat = smartNormalizeCategory(norm.category || it.category, norm.materialName || it.materialName);
+        const qty = Number(it.quantity) || 1;
+        const uPrice = Number(it.unitPrice) || 0;
+        const tPrice = Number(it.totalPrice) || Number((qty * uPrice).toFixed(2));
+        const vatPct = it.vatPercentage !== undefined && it.vatPercentage !== null ? Number(it.vatPercentage) : defaultVatRate;
+
+        if (it.isGrossInvoicePrice || itemsMatchGrossTotal) {
+          const grossU = uPrice;
+          const grossT = tPrice;
+          const netU = vatPct > 0 ? Number((grossU / (1 + vatPct / 100)).toFixed(2)) : grossU;
+          const netT = vatPct > 0 ? Number((grossT / (1 + vatPct / 100)).toFixed(2)) : grossT;
+          return {
+            ...it,
+            materialName: norm.materialName,
+            category: canonCat,
+            unitPrice: grossU,
+            grossUnitPrice: grossU,
+            unitPriceNet: netU,
+            totalPrice: grossT,
+            grossTotalPrice: grossT,
+            netTotalPrice: netT,
+            vatPercentage: vatPct,
+            isNetNormalized: true,
+            isGrossInvoicePrice: true
+          };
+        }
         return { ...it, materialName: norm.materialName, category: canonCat };
       });
     }
@@ -7436,9 +7477,14 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
 
         // Kıyaslama tabanı: KDV DAHİL fiyat, tek oran %22 (Berkant kararı, 2026-10-18).
         // %20/%22 KDV'li satırlar net × 1,22; KDV'siz (%0, muaf) satırlar ödenen fiyatla; %10 indirimli oran kendi brütüyle.
+        // Faturası zaten %22 KDV'li olan satırlarda doğrudan ödenen KDV dahil birim fiyat kullanılarak 1 kuruşluk yuvarlama kayması önlenir.
         const basisMultiplier = comparisonMultiplierForVat(vatPct);
-        const comparisonUnitPrice = Number((effectiveNetUnitPrice * basisMultiplier).toFixed(2));
-        const comparisonOriginalUnitPrice = Number((originalNetUnitPrice * basisMultiplier).toFixed(2));
+        const comparisonUnitPrice = (vatPct === 22 && effectiveGrossUnitPrice > 0)
+          ? effectiveGrossUnitPrice
+          : Number((effectiveNetUnitPrice * basisMultiplier).toFixed(2));
+        const comparisonOriginalUnitPrice = (vatPct === 22 && originalGrossUnitPrice > 0)
+          ? originalGrossUnitPrice
+          : Number((originalNetUnitPrice * basisMultiplier).toFixed(2));
 
         const lineTotalNetSpend = originalNetUnitPrice * originalQuantity;
         const lineTotalComparisonSpend = comparisonOriginalUnitPrice * originalQuantity;

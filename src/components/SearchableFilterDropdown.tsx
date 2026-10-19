@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Search, ChevronDown, Check, X, Filter } from 'lucide-react';
+import { useLanguage } from '../context/LanguageContext';
 
 export interface FilterOption {
   key: string;
@@ -25,12 +26,15 @@ export const SearchableFilterDropdown: React.FC<Props> = ({
   selectedKey,
   options,
   onSelect,
-  placeholder = 'Filtrede ara...',
+  placeholder,
   icon: Icon = Filter,
   className = '',
   align = 'left',
   dark = false
 }) => {
+  const { language } = useLanguage();
+  const isRu = language === 'RU';
+  const effectivePlaceholder = placeholder || (isRu ? 'Поиск в фильтре...' : 'Filtrede ara...');
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -91,6 +95,7 @@ export const SearchableFilterDropdown: React.FC<Props> = ({
   }, [isOpen]);
 
   const isFiltered = selectedKey && selectedKey !== 'all';
+  const allText = isRu ? 'Все' : 'Tümü';
 
   return (
     <div className={`relative inline-block text-left ${className}`} ref={popoverRef}>
@@ -107,13 +112,13 @@ export const SearchableFilterDropdown: React.FC<Props> = ({
               ? 'bg-slate-800/90 hover:bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
               : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-700 hover:text-slate-900 shadow-2xs'
         }`}
-        title={`${label}: ${isFiltered ? (selectedOption?.label || selectedKey) : 'Tümü'}`}
+        title={`${label}: ${isFiltered ? (selectedOption?.label || selectedKey) : allText}`}
       >
         <span className="flex items-center space-x-1 min-w-0 truncate">
           <Icon className={`w-3 h-3 shrink-0 ${isFiltered ? 'text-indigo-500' : 'text-slate-400'}`} />
           <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 mr-0.5">{label}:</span>
           <span className="truncate max-w-[130px] font-bold">
-            {isFiltered ? (selectedOption?.label || selectedKey) : 'Tümü'}
+            {isFiltered ? (selectedOption?.label || selectedKey) : allText}
           </span>
         </span>
         <ChevronDown className={`w-3 h-3 shrink-0 transition-transform ${isOpen ? 'rotate-180 text-indigo-500' : 'text-slate-400'}`} />
@@ -134,7 +139,7 @@ export const SearchableFilterDropdown: React.FC<Props> = ({
           <div className={`p-2.5 border-b ${dark ? 'border-slate-800 bg-slate-900/90' : 'border-slate-100 bg-slate-50'} rounded-t-xl`}>
             <div className="flex items-center justify-between mb-1.5 px-0.5">
               <span className={`text-[11px] font-bold uppercase tracking-wider ${dark ? 'text-slate-400' : 'text-slate-500'}`}>
-                {label} Filtrele
+                {isRu ? `Фильтр: ${label}` : `${label} Filtrele`}
               </span>
               {isFiltered && (
                 <button
@@ -146,7 +151,7 @@ export const SearchableFilterDropdown: React.FC<Props> = ({
                   className="text-[10px] font-bold text-indigo-500 hover:text-indigo-400 hover:underline cursor-pointer flex items-center space-x-0.5"
                 >
                   <X className="w-2.5 h-2.5" />
-                  <span>Sıfırla (Tümü)</span>
+                  <span>{isRu ? 'Сбросить (Все)' : 'Sıfırla (Tümü)'}</span>
                 </button>
               )}
             </div>
@@ -158,7 +163,7 @@ export const SearchableFilterDropdown: React.FC<Props> = ({
                 type="text"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                placeholder={placeholder}
+                placeholder={effectivePlaceholder}
                 className={`w-full pl-8 pr-7 py-1.5 text-xs rounded-lg border outline-none font-sans ${
                   dark
                     ? 'bg-slate-950 border-slate-700 focus:border-indigo-500 text-white placeholder-slate-500'
@@ -196,7 +201,7 @@ export const SearchableFilterDropdown: React.FC<Props> = ({
                     : 'hover:bg-slate-50 text-slate-700'
               }`}
             >
-              <span>Tümü ({totalAllCount})</span>
+              <span>{allText} ({totalAllCount})</span>
               {!isFiltered && <Check className="w-3.5 h-3.5 text-indigo-500" />}
             </button>
 
@@ -252,7 +257,9 @@ export const SearchableFilterDropdown: React.FC<Props> = ({
               })
             ) : (
               <div className="px-3 py-4 text-center text-slate-400 italic text-xs">
-                "{search}" ile eşleşen {label.toLowerCase()} bulunamadı.
+                {isRu
+                  ? `По запросу "${search}" ничего не найдено.`
+                  : `"${search}" ile eşleşen ${label.toLowerCase()} bulunamadı.`}
               </div>
             )}
           </div>

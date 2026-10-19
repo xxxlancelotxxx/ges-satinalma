@@ -497,7 +497,13 @@ export const InvoiceScannerAI: React.FC<Props> = ({
               unit: it.unit || 'Adet',
               quantity: Number(it.quantity) || 1,
               unitPrice: Number(it.unitPrice) || 0,
+              grossUnitPrice: Number(it.grossUnitPrice ?? it.unitPrice) || 0,
+              unitPriceNet: Number(it.unitPriceNet) || 0,
               totalPrice: Number(it.totalPrice) || (Number(it.quantity) * Number(it.unitPrice)),
+              grossTotalPrice: Number(it.grossTotalPrice ?? it.totalPrice) || (Number(it.quantity) * Number(it.unitPrice)),
+              vatPercentage: it.vatPercentage !== undefined ? Number(it.vatPercentage) : 22,
+              isGrossInvoicePrice: true,
+              lineSource: it.lineSource || undefined,
               discountAmount: Number(it.discountAmount) || 0,
               brand: it.brand || '',
               model: it.model || '',
@@ -573,7 +579,13 @@ export const InvoiceScannerAI: React.FC<Props> = ({
               unit: it.unit || 'Adet',
               quantity: Number(it.quantity) || 1,
               unitPrice: Number(it.unitPrice) || 0,
+              grossUnitPrice: Number(it.grossUnitPrice ?? it.unitPrice) || 0,
+              unitPriceNet: Number(it.unitPriceNet) || 0,
               totalPrice: Number(it.totalPrice) || (Number(it.quantity) * Number(it.unitPrice)),
+              grossTotalPrice: Number(it.grossTotalPrice ?? it.totalPrice) || (Number(it.quantity) * Number(it.unitPrice)),
+              vatPercentage: it.vatPercentage !== undefined ? Number(it.vatPercentage) : 22,
+              isGrossInvoicePrice: true,
+              lineSource: it.lineSource || undefined,
               discountAmount: Number(it.discountAmount) || 0,
               brand: it.brand || '',
               model: it.model || '',
@@ -1306,11 +1318,17 @@ export const InvoiceScannerAI: React.FC<Props> = ({
                             value={item.quantity}
                             onChange={(e) => {
                               const newItems = [...extractedInvoice.items];
-                              newItems[index].quantity = Number(e.target.value);
-                              newItems[index].totalPrice = newItems[index].quantity * newItems[index].unitPrice;
+                              const q = Number(e.target.value);
+                              const tot = Number((q * newItems[index].unitPrice).toFixed(2));
+                              newItems[index] = {
+                                ...newItems[index],
+                                quantity: q,
+                                totalPrice: tot,
+                                grossTotalPrice: tot
+                              } as any;
                               setExtractedInvoice({ ...extractedInvoice, items: newItems });
                             }}
-                            className="w-20 font-bold text-slate-900 bg-white border border-slate-200 rounded px-2 py-1"
+                            className="w-20 font-bold text-slate-900 bg-white border border-slate-200 rounded px-2 py-1 font-mono tabular-nums"
                           />
                         </td>
                         <td className="py-2 px-3">
@@ -1319,14 +1337,22 @@ export const InvoiceScannerAI: React.FC<Props> = ({
                             value={item.unitPrice}
                             onChange={(e) => {
                               const newItems = [...extractedInvoice.items];
-                              newItems[index].unitPrice = Number(e.target.value);
-                              newItems[index].totalPrice = newItems[index].quantity * newItems[index].unitPrice;
+                              const u = Number(e.target.value);
+                              const tot = Number((newItems[index].quantity * u).toFixed(2));
+                              newItems[index] = {
+                                ...newItems[index],
+                                unitPrice: u,
+                                grossUnitPrice: u,
+                                totalPrice: tot,
+                                grossTotalPrice: tot,
+                                isGrossInvoicePrice: true
+                              } as any;
                               setExtractedInvoice({ ...extractedInvoice, items: newItems });
                             }}
-                            className="w-28 font-extrabold text-indigo-700 bg-white border border-slate-200 rounded px-2 py-1 font-mono"
+                            className="w-28 font-extrabold text-indigo-700 bg-white border border-slate-200 rounded px-2 py-1 font-mono tabular-nums"
                           />
                         </td>
-                        <td className="py-2 px-3 font-mono font-bold text-emerald-700">
+                        <td className="py-2 px-3 font-mono tabular-nums font-bold text-emerald-700">
                           {formatTL(item.totalPrice)}
                         </td>
                       </tr>
@@ -1334,6 +1360,78 @@ export const InvoiceScannerAI: React.FC<Props> = ({
                   </tbody>
                 </table>
               </div>
+
+              {/* Live Mathematical Reconciliation & PDF Table Verification Bar */}
+              {(() => {
+                const liveItemsSum = Number(
+                  extractedInvoice.items.reduce((acc, it) => acc + (Number(it.totalPrice) || 0), 0).toFixed(2)
+                );
+                const invTotal = Number(extractedInvoice.totalAmount) || 0;
+                const diff = Number((invTotal - liveItemsSum).toFixed(2));
+                const isReconciled = Math.abs(diff) <= 1.5;
+                const recNotes: string[] = Array.isArray((validationResult as any)?.reconciliationNotes)
+                  ? (validationResult as any).reconciliationNotes
+                  : [];
+
+                return (
+                  <div className={`mt-2.5 p-3 rounded-xl border flex flex-col gap-1.5 text-xs ${
+                    isReconciled
+                      ? 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
+                      : 'bg-amber-50 border-amber-300 text-amber-950'
+                  }`}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 font-bold">
+                        {isReconciled ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                        )}
+                        <span>
+                          {isReconciled
+                            ? `Matematiksel Sağlama Doğrulandı: ${extractedInvoice.items.length} Kalem Toplamı (${formatTL(liveItemsSum)}) = Fatura Genel Toplamı (${formatTL(invTotal)})`
+                            : `Tutar Farkı Uyarısı: Kalemler Toplamı (${formatTL(liveItemsSum)}) ile Fatura Genel Toplamı (${formatTL(invTotal)}) arasında ${formatTL(Math.abs(diff))} fark var!`}
+                        </span>
+                      </div>
+
+                      {!isReconciled && liveItemsSum > 0 && invTotal > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const ratio = invTotal / liveItemsSum;
+                            const updatedItems = extractedInvoice.items.map((it) => {
+                              const qty = Number(it.quantity) || 1;
+                              let newU = Number((Number(it.unitPrice) * ratio).toFixed(2));
+                              const nearInt = Math.round(newU);
+                              if (Math.abs(newU - nearInt) <= 0.02) newU = nearInt;
+                              const newT = Number((qty * newU).toFixed(2));
+                              return {
+                                ...it,
+                                unitPrice: newU,
+                                grossUnitPrice: newU,
+                                totalPrice: newT,
+                                grossTotalPrice: newT,
+                                isGrossInvoicePrice: true
+                              } as any;
+                            });
+                            setExtractedInvoice({ ...extractedInvoice, items: updatedItems });
+                          }}
+                          className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-[11px] transition-colors cursor-pointer shrink-0"
+                        >
+                          Fatura Toplamına Eşitle
+                        </button>
+                      )}
+                    </div>
+
+                    {recNotes.length > 0 && (
+                      <div className="pl-6 space-y-0.5 text-[11px] text-emerald-800 font-medium">
+                        {recNotes.map((note, nIdx) => (
+                          <div key={nIdx}>• {note}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Inline Error & Duplicate Confirmation right above the Save button */}

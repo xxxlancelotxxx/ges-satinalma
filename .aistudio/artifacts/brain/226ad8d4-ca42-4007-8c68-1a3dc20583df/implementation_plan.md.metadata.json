@@ -1,6 +1,6 @@
 {
-  "summary": "Prizma fatura PDF okuma motorunun kalıcı olarak düzeltilmesi, taranmış PDF belgelerinin Gemini AI ile okunması, doğrulanamayan STF kayıtlarının fiyat ve anomali analizlerinden hariç tutulması ve taşyünü/yalıtım ürünlerinin kalınlık bazlı doğru ayrıştırılması planı.",
-  "updatedAt": "2026-10-18T18:44:04.037881589Z",
+  "summary": "Fatura okuma (OCR) motorunda kalem birim fiyatlarının ve satır toplamlarının faturadaki birebir KDV dahil (В том числе НДС) değerlerle okunması, PDF dijital tablo ayrıştırıcısı ile matematiksel sağlama/otomatik düzeltme yapılması ve kota/hata durumlarına karşı çok katmanlı model + deterministik tablo okuyucu yedekleme mimarisi planı.",
+  "updatedAt": "2026-10-19T09:03:22.539193899Z",
   "requestFeedback": true,
   "userFacing": true
 }

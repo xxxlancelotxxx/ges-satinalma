@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState } from 'react';
+import { translateTextToRu, useAutoRuDomTranslation } from '../utils/ruTranslations';
 
 export type Language = 'TR' | 'RU';
 
@@ -482,6 +483,8 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return 'TR';
   });
 
+  useAutoRuDomTranslation(language);
+
   const setLanguage = (lang: Language) => {
     setLanguageState(lang);
     try {
@@ -492,7 +495,10 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const t = (key: string): string => {
-    return translations[language]?.[key] || translations['TR']?.[key] || key;
+    const direct = translations[language]?.[key];
+    if (direct) return direct;
+    const trFallback = translations['TR']?.[key] || key;
+    return language === 'RU' ? translateTextToRu(trFallback) : trFallback;
   };
 
   return (

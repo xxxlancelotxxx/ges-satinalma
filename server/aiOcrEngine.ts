@@ -433,6 +433,10 @@ export function validateInvoiceData(data: any): {
     requiredFields: 'pass' | 'warning' | 'fail';
     duplicateCheck: 'pass' | 'warning' | 'fail';
   };
+  calculatedItemsSum?: number;
+  totalDifference?: number;
+  reconciliationStatus?: 'verified' | 'auto_corrected' | 'mismatch';
+  reconciliationNotes?: string[];
 } {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -481,11 +485,11 @@ export function validateInvoiceData(data: any): {
     }
 
     if (qty > 0 && unitP > 0) {
-      const lineMath = qty * unitP;
+      const disc = Number(item.discountAmount || 0);
+      const lineMath = Number((qty * unitP - disc).toFixed(2));
       calculatedItemsSum += (totalP > 0 ? totalP : lineMath);
-      if (totalP > 0 && Math.abs(lineMath - totalP) > 1.0) {
-        // Tolerans 1 TL/Ruble (kuruş/yuvarlama)
-        warnings.push(`Kalem #${idx + 1}: ${qty} x ${unitP} = ${lineMath.toFixed(2)}, faturadaki satır tutarı ${totalP.toFixed(2)} ile uyuşmuyor.`);
+      if (totalP > 0 && Math.abs(lineMath - totalP) > 1.0 && Math.abs(qty * unitP - totalP) > 1.0) {
+        warnings.push(`Kalem #${idx + 1}: ${qty} × ${unitP.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} = ${lineMath.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}, faturadaki satır tutarı (${totalP.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) ile uyuşmuyor.`);
         itemTotalsCheck = 'warning';
       }
     } else if (totalP > 0) {
@@ -493,29 +497,31 @@ export function validateInvoiceData(data: any): {
     }
   });
 
-  // 3. Invoice Total Match Check
-  const subtotal = Number(data.subtotal?.value ?? data.subtotal ?? 0);
-  const tax = Number(data.tax?.value ?? data.tax ?? 0);
-  const discount = Number(data.discount?.value ?? data.discount ?? 0);
+  // 3. Invoice Total Match Check (KDV Dahil Kalemler Toplamı === Fatura Genel Toplamı)
+  const excludedFreightGross = Number(data.excludedFreightGrossAmount || 0);
+  const effectiveItemsPlusFreight = Number((calculatedItemsSum + excludedFreightGross).toFixed(2));
+  const totalDifference = totalAmount > 0 && items.length > 0
+    ? Number((totalAmount - effectiveItemsPlusFreight).toFixed(2))
+    : 0;
 
   if (totalAmount <= 0 && calculatedItemsSum <= 0) {
     errors.push('Faturanın genel toplam tutarı 0 veya negatif!');
     invoiceTotalCheck = 'fail';
-  } else if (totalAmount > 0 && calculatedItemsSum > 0) {
-    const diff = Math.abs(calculatedItemsSum - totalAmount);
-    // Vergi ve iskonto hesaba katılınca uyumlu mu?
-    if (subtotal > 0 && tax > 0) {
-      const calculatedGrandTotal = subtotal + tax - discount;
-      if (Math.abs(calculatedGrandTotal - totalAmount) > 2.0) {
-        warnings.push(`Ara toplam (${subtotal}) + KDV (${tax}) - İskonto (${discount}) = ${calculatedGrandTotal.toFixed(2)}, genel toplam (${totalAmount}) ile tam örtüşmüyor.`);
-        invoiceTotalCheck = 'warning';
-      }
-    } else if (diff > 5.0 && Math.abs(diff - tax) > 5.0) {
-      // Kalem toplamı ile genel toplam arasındaki fark KDV'den kaynaklanmıyorsa uyar
-      warnings.push(`Kalemler toplamı (${calculatedItemsSum.toFixed(2)}), genel toplam (${totalAmount.toFixed(2)}) ile ${diff.toFixed(2)} fark gösteriyor.`);
+  } else if (totalAmount > 0 && items.length > 0) {
+    const absDiff = Math.abs(totalDifference);
+    if (absDiff > 1.50) {
+      warnings.push(
+        `Kalemler toplamı (${calculatedItemsSum.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) ile fatura genel toplamı (${totalAmount.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) arasında ${absDiff.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} fark tespit edildi. Lütfen birim fiyatları kontrol edin.`
+      );
       invoiceTotalCheck = 'warning';
     }
   }
+
+  const reconciliationNotes: string[] = Array.isArray(data.reconciliationNotes) ? data.reconciliationNotes : [];
+  const reconciliationStatus: 'verified' | 'auto_corrected' | 'mismatch' =
+    invoiceTotalCheck !== 'pass' || itemTotalsCheck !== 'pass'
+      ? 'mismatch'
+      : (reconciliationNotes.length > 0 ? 'auto_corrected' : 'verified');
 
   const valid = errors.length === 0;
 
@@ -528,7 +534,11 @@ export function validateInvoiceData(data: any): {
       invoiceTotal: invoiceTotalCheck,
       requiredFields: requiredFieldsCheck,
       duplicateCheck: 'pass'
-    }
+    },
+    calculatedItemsSum: Number(calculatedItemsSum.toFixed(2)),
+    totalDifference,
+    reconciliationStatus,
+    reconciliationNotes
   };
 }
 

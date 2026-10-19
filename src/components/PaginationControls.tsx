@@ -1,5 +1,6 @@
 import React from 'react';
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import { useLanguage } from '../context/LanguageContext';
 
 interface PaginationControlsProps {
   currentPage: number;
@@ -14,6 +15,17 @@ interface PaginationControlsProps {
   dark?: boolean;
 }
 
+const RU_ITEM_LABELS: Record<string, string> = {
+  fatura: 'счетов',
+  indirim: 'скидок',
+  kalem: 'позиций',
+  kayıt: 'записей',
+  malzeme: 'материалов',
+  belge: 'документов',
+  teklif: 'предложений',
+  anomali: 'аномалий'
+};
+
 export const PaginationControls: React.FC<PaginationControlsProps> = ({
   currentPage,
   totalPages,
@@ -26,7 +38,11 @@ export const PaginationControls: React.FC<PaginationControlsProps> = ({
   className = '',
   dark = false
 }) => {
+  const { language } = useLanguage();
   if (totalItems === 0) return null;
+
+  const isRu = language === 'RU';
+  const ruItemLabel = RU_ITEM_LABELS[itemLabel.toLowerCase()] || 'записей';
 
   const startItem = (currentPage - 1) * pageSize + 1;
   const endItem = Math.min(currentPage * pageSize, totalItems);
@@ -70,15 +86,26 @@ export const PaginationControls: React.FC<PaginationControlsProps> = ({
     <div className={`flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 border-t text-xs select-none ${dark ? 'border-slate-800 text-slate-300' : 'border-slate-200 text-slate-600'} ${className}`}>
       {/* Information & Page Size Selector */}
       <div className="flex flex-wrap items-center gap-2">
-        <span>Toplam <strong className={dark ? 'text-white' : 'text-slate-900'}>{totalItems}</strong> {itemLabel} arasından</span>
-        <span className={`font-mono font-bold px-2 py-0.5 rounded-lg ${dark ? 'text-indigo-300 bg-slate-900 border border-slate-700' : 'text-slate-900 bg-slate-100 border border-slate-200'}`}>
-          {startItem} - {endItem}
-        </span>
-        <span>gösteriliyor</span>
+        {isRu ? (
+          <>
+            <span>Всего <strong className={dark ? 'text-white' : 'text-slate-900'}>{totalItems}</strong> {ruItemLabel}, показано</span>
+            <span className={`font-mono font-bold px-2 py-0.5 rounded-lg ${dark ? 'text-indigo-300 bg-slate-900 border border-slate-700' : 'text-slate-900 bg-slate-100 border border-slate-200'}`}>
+              {startItem} - {endItem}
+            </span>
+          </>
+        ) : (
+          <>
+            <span>Toplam <strong className={dark ? 'text-white' : 'text-slate-900'}>{totalItems}</strong> {itemLabel} arasından</span>
+            <span className={`font-mono font-bold px-2 py-0.5 rounded-lg ${dark ? 'text-indigo-300 bg-slate-900 border border-slate-700' : 'text-slate-900 bg-slate-100 border border-slate-200'}`}>
+              {startItem} - {endItem}
+            </span>
+            <span>gösteriliyor</span>
+          </>
+        )}
 
         {onPageSizeChange && (
           <div className={`flex items-center space-x-1.5 ml-2 border-l pl-3 ${dark ? 'border-slate-800' : 'border-slate-200'}`}>
-            <span className={dark ? 'text-slate-400' : 'text-slate-500'}>Sayfa Başına:</span>
+            <span className={dark ? 'text-slate-400' : 'text-slate-500'}>{isRu ? 'На странице:' : 'Sayfa Başına:'}</span>
             <select
               value={pageSize}
               onChange={(e) => {
@@ -113,7 +140,7 @@ export const PaginationControls: React.FC<PaginationControlsProps> = ({
               ? 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800'
               : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
           }`}
-          title="İlk Sayfaya Git (Sayfa 1)"
+          title={isRu ? 'Первая страница (Стр. 1)' : 'İlk Sayfaya Git (Sayfa 1)'}
         >
           <ChevronsLeft className="w-3.5 h-3.5" />
         </button>
@@ -128,10 +155,10 @@ export const PaginationControls: React.FC<PaginationControlsProps> = ({
               ? 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800'
               : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
           }`}
-          title="Önceki Sayfa"
+          title={isRu ? 'Предыдущая страница' : 'Önceki Sayfa'}
         >
           <ChevronLeft className="w-3.5 h-3.5" />
-          <span className="hidden md:inline">Önceki</span>
+          <span className="hidden md:inline">{isRu ? 'Назад' : 'Önceki'}</span>
         </button>
 
         {/* Page Numbers */}
@@ -158,7 +185,7 @@ export const PaginationControls: React.FC<PaginationControlsProps> = ({
                     ? 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700'
                     : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-200'
                 }`}
-                title={`Sayfa ${p}`}
+                title={isRu ? `Страница ${p}` : `Sayfa ${p}`}
               >
                 {p}
               </button>
@@ -176,9 +203,9 @@ export const PaginationControls: React.FC<PaginationControlsProps> = ({
               ? 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800'
               : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
           }`}
-          title="Sonraki Sayfa"
+          title={isRu ? 'Следующая страница' : 'Sonraki Sayfa'}
         >
-          <span className="hidden md:inline">Sonraki</span>
+          <span className="hidden md:inline">{isRu ? 'Далее' : 'Sonraki'}</span>
           <ChevronRight className="w-3.5 h-3.5" />
         </button>
 
@@ -192,7 +219,7 @@ export const PaginationControls: React.FC<PaginationControlsProps> = ({
               ? 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800'
               : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
           }`}
-          title={`Son Sayfaya Git (Sayfa ${totalPages})`}
+          title={isRu ? `Последняя страница (Стр. ${totalPages})` : `Son Sayfaya Git (Sayfa ${totalPages})`}
         >
           <ChevronsRight className="w-3.5 h-3.5" />
         </button>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, Suspense } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { LanguageProvider } from './context/LanguageContext';
+import { LanguageProvider, useLanguage } from './context/LanguageContext';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { LoginModal } from './components/LoginModal';
 import { Navbar } from './components/Navbar';
@@ -44,6 +44,8 @@ type CompareNavRequest = {
 
 function AppContent() {
   const { user } = useAuth();
+  const { language } = useLanguage();
+  const isRu = language === 'RU';
   const [activeTab, setActiveTab] = useState<string>('dashboard');
 
   // Helper for auth headers
@@ -645,8 +647,14 @@ function AppContent() {
       {isQuotaExceeded && (
         <div className="bg-amber-500 text-slate-900 px-4 py-2 text-xs font-semibold flex items-center justify-between shadow-sm border-b border-amber-600">
           <div className="flex items-center space-x-2 max-w-7xl mx-auto w-full">
-            <span className="bg-amber-700 text-white font-bold px-2 py-0.5 rounded text-[10px] uppercase tracking-wider">Veri erişimi bekliyor</span>
-            <span>Canlı veri kaynağı geçici olarak yanıt vermiyor. Eski tarayıcı veya yerel yedek verisi gösterilmez; bağlantı düzeldiğinde sayfayı yenileyin.</span>
+            <span className="bg-amber-700 text-white font-bold px-2 py-0.5 rounded text-[10px] uppercase tracking-wider">
+              {isRu ? 'Ожидание доступа к данным' : 'Veri erişimi bekliyor'}
+            </span>
+            <span>
+              {isRu
+                ? 'Источник данных временно не отвечает. Устаревшие локальные данные не отображаются; обновите страницу при восстановлении соединения.'
+                : 'Canlı veri kaynağı geçici olarak yanıt vermiyor. Eski tarayıcı veya yerel yedek verisi gösterilmez; bağlantı düzeldiğinde sayfayı yenileyin.'}
+            </span>
           </div>
         </div>
       )}
@@ -657,10 +665,10 @@ function AppContent() {
           <div className="max-w-[1700px] mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
             <div className="flex items-center space-x-2.5">
               <span className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-black uppercase text-[10px]">
-                Kaydedilmeyi Bekleyen Fatura
+                {isRu ? 'Счет ожидает сохранения' : 'Kaydedilmeyi Bekleyen Fatura'}
               </span>
               <span className="font-bold text-indigo-100">
-                {pendingInvoiceScan.supplier} (Fatura No: {pendingInvoiceScan.invoiceNumber}) — {pendingInvoiceScan.totalAmount.toLocaleString('tr-TR')} ₽
+                {pendingInvoiceScan.supplier} ({isRu ? 'Счет №' : 'Fatura No'}: {pendingInvoiceScan.invoiceNumber}) — {pendingInvoiceScan.totalAmount.toLocaleString('tr-TR')} ₽
               </span>
             </div>
             <button
@@ -671,7 +679,7 @@ function AppContent() {
               }}
               className="px-3.5 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs shadow-sm cursor-pointer shrink-0"
             >
-              📄 Fatura Onay Ekranına Dön ve Kaydet
+              {isRu ? '📄 Вернуться к подтверждению счета и сохранить' : '📄 Fatura Onay Ekranına Dön ve Kaydet'}
             </button>
           </div>
         </div>
@@ -682,10 +690,10 @@ function AppContent() {
           <div className="max-w-[1700px] mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
             <div className="flex items-center space-x-2.5">
               <span className="px-2 py-0.5 rounded bg-emerald-500 text-slate-950 font-black uppercase text-[10px]">
-                Kaydedilmeyi Bekleyen İndirim / Teklif
+                {isRu ? 'Скидка / КП ожидает сохранения' : 'Kaydedilmeyi Bekleyen İndirim / Teklif'}
               </span>
               <span className="font-bold text-slate-100">
-                {pendingDiscountScan.supplier} (No: {pendingDiscountScan.invoiceNumber}) — {pendingDiscountScan.totalAmount.toLocaleString('tr-TR')} ₽
+                {pendingDiscountScan.supplier} (№: {pendingDiscountScan.invoiceNumber}) — {pendingDiscountScan.totalAmount.toLocaleString('tr-TR')} ₽
               </span>
             </div>
             <button
@@ -696,7 +704,7 @@ function AppContent() {
               }}
               className="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-extrabold text-xs shadow-sm cursor-pointer shrink-0"
             >
-              💰 İndirim Kontrol Ekranına Dön ve Kaydet
+              {isRu ? '💰 Вернуться к проверке скидки и сохранить' : '💰 İndirim Kontrol Ekranına Dön ve Kaydet'}
             </button>
           </div>
         </div>
@@ -707,13 +715,17 @@ function AppContent() {
         {isLoading ? (
           <div className="flex flex-col items-center justify-center h-64 space-y-3">
             <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-            <p className="text-sm font-bold text-slate-600">Satınalma Sistem Verileri Yükleniyor...</p>
+            <p className="text-sm font-bold text-slate-600">
+              {isRu ? 'Загрузка данных системы закупок...' : 'Satınalma Sistem Verileri Yükleniyor...'}
+            </p>
           </div>
         ) : (
           <Suspense fallback={
             <div className="flex flex-col items-center justify-center min-h-[60vh] space-y-4">
               <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-              <p className="text-sm font-bold text-slate-600">Modül Yükleniyor...</p>
+              <p className="text-sm font-bold text-slate-600">
+                {isRu ? 'Загрузка модуля...' : 'Modül Yükleniyor...'}
+              </p>
             </div>
           }>
             {activeTab === 'dashboard' && (
@@ -903,8 +915,12 @@ function AppContent() {
                   <Coins className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-sm text-slate-100">Yeni Şef İndirim & Teklif Kaydı Aktar</h3>
-                  <p className="text-[11px] text-slate-400">Teklif karşılaştırma ve otomatik sistem bulut arşivleme</p>
+                  <h3 className="font-bold text-sm text-slate-100">
+                    {isRu ? 'Добавить новую скидку и КП шефа' : 'Yeni Şef İndirim & Teklif Kaydı Aktar'}
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    {isRu ? 'Сравнение КП и автоматическая облачная архивация' : 'Teklif karşılaştırma ve otomatik sistem bulut arşivleme'}
+                  </p>
                 </div>
               </div>
 
@@ -912,7 +928,7 @@ function AppContent() {
                 type="button"
                 onClick={() => setShowQuickDiscountModal(false)}
                 className="text-slate-400 hover:text-white hover:bg-slate-800 w-8 h-8 rounded-lg text-base font-bold flex items-center justify-center cursor-pointer transition-colors"
-                title="Kapat (ESC)"
+                title={isRu ? 'Закрыть (ESC)' : 'Kapat (ESC)'}
               >
                 ✕
               </button>
@@ -972,8 +988,16 @@ function AppContent() {
       {/* Footer */}
       <footer className="bg-slate-900 border-t border-slate-800 text-slate-400 py-6 text-xs text-center">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>© 2026 GES Construction — GES Satınalma Platformu tarafından geliştirilmiş ve işletilmektedir.</span>
-          <span className="text-slate-500">OCR ve belge analiz altyapısı Google Gemini API ile desteklenmektedir.</span>
+          <span>
+            {isRu
+              ? '© 2026 GES Construction — Разработано и управляется Платформой закупок GES.'
+              : '© 2026 GES Construction — GES Satınalma Platformu tarafından geliştirilmiş ve işletilmektedir.'}
+          </span>
+          <span className="text-slate-500">
+            {isRu
+              ? 'Инфраструктура OCR и анализа документов работает на базе Google Gemini API.'
+              : 'OCR ve belge analiz altyapısı Google Gemini API ile desteklenmektedir.'}
+          </span>
         </div>
       </footer>
     </div>
