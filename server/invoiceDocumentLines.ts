@@ -104,6 +104,7 @@ export function buildItemsFromParsedInvoice(
     const grossUnitPrice = round2(grossAmt / qty);
     const unitPriceNet = round2(netAmt / qty);
     const lineName = cleanDocumentLineName(line.name);
+    const lineArticle = line.article || splitLeadingArticle(stripHeaderColumnRun(String(line.name || ''))).article;
     const translated = translateRussianMaterialToTurkish(lineName) || lineName;
     const stf = bestStfMatch(lineName, ctx.stfItems || []);
     items.push({
@@ -111,7 +112,7 @@ export function buildItemsFromParsedInvoice(
       materialName: translated,
       originalName: lineName,
       ...(stf?.materialCode ? { materialCode: stf.materialCode } : {}),
-      ...(line.article ? { article: line.article } : {}),
+      ...(lineArticle ? { article: lineArticle } : {}),
       quantity: qty,
       unit: documentLineUnit(line.name, line.unitRaw),
       unitPrice: unitPriceNet,
@@ -388,15 +389,49 @@ function sharedDocumentCodes(items: any[]): Set<string> {
   return new Set([...names].filter(([, n]) => n.size > 1).map(([code]) => code));
 }
 
-// Tablo başlığının sütun numaraları ("1 2 3 4 5 6 7") ilk satırın adına yapışabiliyor: "2 3 4 5 6 7 1 Вентилятор BL 8800"
-export function cleanDocumentLineName(name: string): string {
+// Baştaki tedarikçi artikel kodu ürün adı değildir. ПЕТРОВИЧ faturalarında 11 haneli kod PDF metninde ikiye
+// bölünüyor ("0000063113 8 Профиль ..." = 00000631138); ad bu kodla kalınca aynı malzemenin önceki alımlarıyla
+// eşleşmiyordu (her satır "İlk Referans" görünüyordu).
+const LEADING_ARTICLE_RE = /^(\d{8,12})(?:\s+(\d{1,3}))?\s+(?=[А-ЯЁA-Zа-яёa-z«"'])/;
+
+export function splitLeadingArticle(name: string): { name: string; article?: string } {
   const text = String(name || '');
+  const m = text.match(LEADING_ARTICLE_RE);
+  if (!m) return { name: text };
+  const article = `${m[1]}${m[2] || ''}`;
+  if (article.length > 13) return { name: text };
+  return { name: text.slice(m[0].length), article };
+}
+
+// Tablo başlığının sütun numaraları ("1 2 3 4 5 6 7") ilk satırın adına yapışabiliyor: "2 3 4 5 6 7 1 Вентилятор BL 8800"
+function stripHeaderColumnRun(text: string): string {
   const m = text.match(/^((?:\d{1,2}\s+){4,})(?=\S)/);
   if (!m) return text;
   const nums = m[1].trim().split(/\s+/).map(Number);
   const head = nums.slice(0, -1);
   const isColumnRun = head[0] === 2 && head.every((n, i) => n === 2 + i) && nums[nums.length - 1] === 1;
   return isColumnRun ? text.slice(m[1].length) : text;
+}
+
+export function cleanDocumentLineName(name: string): string {
+  return splitLeadingArticle(stripHeaderColumnRun(String(name || ''))).name;
+}
+
+/** Belge satırı adındaki başlık sütun numaralarını ve baştaki artikel kodunu temizler (değişiklik yoksa aynı nesne döner). */
+export function repairDocumentItemName<T extends { originalName?: string; materialName?: string; article?: string }>(it: T): T {
+  if (!it) return it;
+  const original = String(it.originalName || '');
+  const cleanName = cleanDocumentLineName(original);
+  if (cleanName === original) return it;
+  const material = String(it.materialName || '');
+  const cleanMaterial = cleanDocumentLineName(material);
+  const article = it.article || splitLeadingArticle(stripHeaderColumnRun(original)).article;
+  return {
+    ...it,
+    originalName: cleanName,
+    materialName: material && cleanMaterial !== material ? cleanMaterial : (translateRussianMaterialToTurkish(cleanName) || cleanName),
+    ...(article ? { article } : {})
+  };
 }
 
 /**
@@ -418,11 +453,7 @@ export function repairDocumentItems(items: any[]): { items: any[]; fixed: number
     if (String(it.unit || '').toUpperCase() === 'ADET' && TRAILING_TON_RE.test(String(it.originalName || '').trim())) {
       next = { ...next, unit: 'TON' };
     }
-    const cleanName = cleanDocumentLineName(it.originalName);
-    if (cleanName !== it.originalName) {
-      const cleanMaterial = cleanDocumentLineName(it.materialName);
-      next = { ...next, originalName: cleanName, materialName: cleanMaterial !== it.materialName ? cleanMaterial : (translateRussianMaterialToTurkish(cleanName) || cleanName) };
-    }
+    next = repairDocumentItemName(next);
     if (next !== it) fixed++;
     return next;
   });
