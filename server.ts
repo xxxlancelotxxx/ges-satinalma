@@ -92,6 +92,7 @@ import {
 } from './server/aiOcrEngine';
 import { processInvoiceTwoStages, fallbackExtractInvoiceFromTextOrCsv } from './server/aiTwoStageOcr';
 import { generateArchivePdf } from './server/documentGenerator';
+import { registerTdfRoutes } from './server/tdfService';
 
 // ============================================================================
 // 1. FIREBASE & STORAGE ENTEGRASYONU
@@ -11051,6 +11052,15 @@ app.delete('/api/comparative-analyses/:id', async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ============================================================================
+// TDF · Teklif Değerlendirme Formu (ayrı modül, kendi koleksiyonu: tdf_forms)
+// ============================================================================
+registerTdfRoutes(app, {
+  getDb: () => db,
+  getInvoices: async () => (await getInvoicesCached()).data || [],
+  backupFile: path.join(process.cwd(), 'data_backup', 'tdf_forms.json')
 });
 
 // 6. Config endpoints

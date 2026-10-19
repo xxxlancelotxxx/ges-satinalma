@@ -19,6 +19,7 @@ import { InvoiceDriveVault } from './components/InvoiceDriveVault';
 import { TrashCanModal } from './components/TrashCanModal';
 import { DataBackupCenterModal } from './components/DataBackupCenterModal';
 import { ComparativeOffersView } from './components/ComparativeOffersView';
+import { TdfView } from './components/TdfView';
 
 import { Coins } from 'lucide-react';
 import { evaluateDiscountAudit } from './utils/auditRiskEngine';
@@ -848,6 +849,10 @@ function AppContent() {
                 onOpenTrashModal={() => setShowTrashModal(true)}
                 trashCount={totalTrashCount}
               />
+            )}
+
+            {activeTab === 'tdf' && (
+              <TdfView jobsites={jobsites} />
             )}
 
             {activeTab === 'prizma-invoices' && (
