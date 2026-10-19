@@ -186,8 +186,12 @@ export const SpecialMaterialAnalytics: React.FC<Props> = ({
         const subType = it.subType || 'Genel Kalem';
         const jobsiteName = it.jobsiteName || jobsites.find(j => j.id === it.jobsiteId)?.name || 'Merkez';
 
+        const uniqueId = it.id
+          ? (it.id.includes(it.invoiceId) ? it.id : `${it.invoiceId}_${it.id}`)
+          : `${it.invoiceId}_item`;
+
         return {
-          id: it.id,
+          id: uniqueId,
           invoiceId: it.invoiceId,
           invoiceNumber: it.invoiceNumber,
           date: it.date,
@@ -874,7 +878,7 @@ export const SpecialMaterialAnalytics: React.FC<Props> = ({
           <div className="mt-4 pt-3 border-t border-slate-100 space-y-1.5 max-h-36 overflow-y-auto pr-1">
             {jobsiteChartData.map((item, idx) => (
               <div
-                key={item.jobsiteName}
+                key={`${item.jobsiteName}_${idx}`}
                 onClick={() => setSelectedJobsite(selectedJobsite === item.jobsiteName ? 'ALL' : item.jobsiteName)}
                 className="flex items-center justify-between text-xs p-1.5 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer"
               >
@@ -1073,7 +1077,7 @@ export const SpecialMaterialAnalytics: React.FC<Props> = ({
               {filteredItems.length > 0 ? (
                 filteredItems.map((item, idx) => (
                   <tr
-                    key={item.id}
+                    key={`${item.id || item.invoiceId || 'mat'}_${idx}`}
                     onClick={() => {
                       if (onOpenInvoiceDetail) {
                         onOpenInvoiceDetail(item.rawInvoice);

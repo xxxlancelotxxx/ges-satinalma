@@ -976,7 +976,7 @@ export const DiscountDetailModal: React.FC<DiscountDetailModalProps> = ({
                       const compInfo = getComparativeInfoForItem(item, (safeCurrentPage - 1) * detailItemsPageSize + idx);
                       return (
                         <tr
-                          key={item.id || idx}
+                          key={`${item.id || 'disc_item'}_${globalIdx}`}
                           className="even:bg-slate-50/80 odd:bg-white hover:bg-indigo-50/60 transition-colors"
                         >
                           <td className="py-2 px-2 text-slate-500 font-bold text-center bg-slate-100/60 border-r border-b border-slate-300">

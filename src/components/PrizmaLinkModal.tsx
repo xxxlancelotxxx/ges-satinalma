@@ -333,9 +333,9 @@ export const PrizmaLinkModal: React.FC<PrizmaLinkModalProps> = ({
               </div>
             ) : matches.length > 0 ? (
               <div className="space-y-2.5">
-                {matches.map((item) => (
+                {matches.map((item, mIdx) => (
                   <div
-                    key={item.id}
+                    key={`${item.id || 'match'}_${mIdx}`}
                     className="p-3.5 bg-white rounded-xl border border-slate-200 hover:border-indigo-300 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs"
                   >
                     <div className="space-y-1">
@@ -428,9 +428,9 @@ export const PrizmaLinkModal: React.FC<PrizmaLinkModalProps> = ({
 
             {searchResults.length > 0 && (
               <div className="space-y-2 pt-2 border-t border-slate-100 max-h-60 overflow-y-auto">
-                {searchResults.map((item) => (
+                {searchResults.map((item, sIdx) => (
                   <div
-                    key={item.id}
+                    key={`${item.id || 'search'}_${sIdx}`}
                     className="p-2.5 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-between gap-3 text-xs"
                   >
                     <div>

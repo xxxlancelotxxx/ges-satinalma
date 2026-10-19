@@ -304,8 +304,12 @@ export function getNormalizedProcurementItems(invoices: InvoiceRecord[] = []): N
 
         const subType = specKey ? extractSpecialMaterialSubType(specKey, rawName, rawOrig, `${canonCat} ${supplier}`) : undefined;
 
+        const uniqueItemId = it.id
+          ? (it.id.includes(invId) ? it.id : `${invId}_${it.id}_${itIndex}`)
+          : `${invId}_item_${itIndex}`;
+
         result.push({
-          id: it.id || `${invId}_item_${itIndex}`,
+          id: uniqueItemId,
           invoiceId: invId,
           invoiceNumber: invNumber,
           date: invDate,

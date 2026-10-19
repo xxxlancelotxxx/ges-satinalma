@@ -816,7 +816,7 @@ export const InvoiceDetailModal: React.FC<Props> = ({
                       const globalIdx = (safeCurrentPage - 1) * itemsPageSize + idx + 1;
                       return (
                         <tr
-                          key={item.id || idx}
+                          key={`${item.id || 'inv_line'}_${globalIdx}`}
                           className="even:bg-slate-50/80 odd:bg-white hover:bg-indigo-50/60 transition-colors"
                         >
                           <td className="py-2 px-2 text-slate-500 font-bold text-center bg-slate-100/60 border-r border-b border-slate-300">{globalIdx}</td>

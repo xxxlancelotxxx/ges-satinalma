@@ -993,7 +993,7 @@ export const PrizmaInvoicesView: React.FC<Props> = ({ onNavigateToCompare }) => 
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {selectedInvoice.items.map((it, idx) => (
-                      <tr key={it.id || idx} className="hover:bg-slate-50/80">
+                      <tr key={`${it.id || 'it'}_${idx}`} className="hover:bg-slate-50/80">
                         <td className="py-2.5 px-3 text-slate-400 font-mono">{idx + 1}</td>
                         <td className="py-2.5 px-3">
                           <div className="font-bold text-slate-900 flex items-center gap-1.5 flex-wrap">

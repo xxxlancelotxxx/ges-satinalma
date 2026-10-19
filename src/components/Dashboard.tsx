@@ -2805,7 +2805,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             {topPriceGapMaterials.length > 0 ? (
               topPriceGapMaterials.map((mat, idx) => (
                 <div
-                  key={mat.id || idx}
+                  key={`${mat.id || 'mat'}_${idx}`}
                   onClick={() =>
                     onNavigateToMaterial
                       ? onNavigateToMaterial(mat.materialName, mat.category, comparisonSourceMode, mat.id)

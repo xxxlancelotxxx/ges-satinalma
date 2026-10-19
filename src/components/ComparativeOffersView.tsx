@@ -621,7 +621,7 @@ export const ComparativeOffersView: React.FC<Props> = ({
 
                                     return (
                                       <div
-                                        key={docItem.id || dIdx}
+                                        key={`${docItem.id || 'doc'}_${dIdx}`}
                                         className={`p-3.5 rounded-xl border flex flex-col justify-between gap-2 ${
                                           isFinal
                                             ? 'bg-emerald-50/70 border-emerald-300'

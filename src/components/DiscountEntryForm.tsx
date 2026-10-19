@@ -3341,7 +3341,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
 
                     return (
                       <div
-                        key={docItem.id}
+                        key={`${docItem.id || 'doc'}_${idx}`}
                         className={`p-3.5 rounded-xl border transition-all flex flex-col lg:flex-row lg:items-center justify-between gap-3 ${
                           docItem.role === 'initial_offer'
                             ? 'bg-slate-50 border-slate-300'
