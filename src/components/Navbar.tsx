@@ -129,15 +129,6 @@ export const Navbar: React.FC<NavbarProps> = ({
           iconColor: 'text-amber-400'
         },
         {
-          id: 'tdf',
-          label: language === 'RU' ? 'Оценка КП (ТДФ)' : 'Teklif Değerlendirme (TDF)',
-          desc: language === 'RU' ? 'Загрузите КП, система сравнит их и подготовит ТДФ (Excel, HTML, PDF)' : 'Teklifleri yükle, sistem karşılaştırsın, TDF formunu hazırlasın (Excel, HTML, PDF)',
-          icon: Scale,
-          badge: language === 'RU' ? 'Новое' : 'Yeni',
-          iconBg: 'bg-indigo-500/15 border border-indigo-500/30',
-          iconColor: 'text-indigo-400'
-        },
-        {
           id: 'pre-approval-audit',
           label: t('navPreApprovalAudit'),
           desc: t('subDescPreAudit'),
@@ -536,6 +527,19 @@ export const Navbar: React.FC<NavbarProps> = ({
               </div>
             );
           })}
+
+          {/* 5. TDF (ayrı sekme, en sonda) */}
+          <button
+            onClick={() => handleTabClick('tdf')}
+            className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+              activeTab === 'tdf'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-900/40 ring-1 ring-indigo-400/50'
+                : 'text-slate-300 hover:bg-slate-800/90 hover:text-white'
+            }`}
+          >
+            <Scale className={`w-4 h-4 ${activeTab === 'tdf' ? 'text-amber-300' : 'text-slate-400'}`} />
+            <span>{language === 'RU' ? 'ТДФ · Оценка КП' : 'TDF · Teklif Değerlendirme'}</span>
+          </button>
         </div>
       </div>
 
