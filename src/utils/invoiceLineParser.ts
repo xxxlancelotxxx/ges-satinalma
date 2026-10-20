@@ -532,3 +532,61 @@ export function mapDocumentUnit(unitRaw: string): string {
   if (/^(меш|мешок)$/.test(u)) return 'TORBA';
   return unitRaw.toUpperCase();
 }
+
+const RU_MONTH_STEMS: Array<[string, string]> = [
+  ['январ', '01'], ['феврал', '02'], ['март', '03'], ['апрел', '04'], ['ма', '05'], ['июн', '06'],
+  ['июл', '07'], ['август', '08'], ['сентябр', '09'], ['октябр', '10'], ['ноябр', '11'], ['декабр', '12']
+];
+
+function ruMonthCode(word: string): string | null {
+  const w = word.toLowerCase();
+  // "ма" (мая/май) en sona bırakılır; "март" ondan önce denenir.
+  const hit = RU_MONTH_STEMS.find(([stem]) => stem !== 'ма' && w.startsWith(stem)) || (/^ма[йя]$/.test(w) ? ['ма', '05'] : null);
+  return hit ? hit[1] : null;
+}
+
+function toIsoDate(day: string, month: string, year: string): string | null {
+  let y = Number(year);
+  if (year.length === 2) y += 2000;
+  const d = Number(day);
+  const m = Number(month);
+  if (!(y >= 2000 && y <= 2100) || !(m >= 1 && m <= 12) || !(d >= 1 && d <= 31)) return null;
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+const DATE_AFTER_OT = String.raw`от\s*[«"]?\s*(\d{1,2})\s*[»"]?\s*(?:([А-Яа-яЁё]+)\s+(\d{4})|[./](\d{1,2})[./](\d{2,4}))`;
+
+/**
+ * Belgenin kendi tarihini başlıktan okur: "Счет на оплату № 25400 от 19 октября 2026 г.",
+ * "Счет-фактура № 12 от 05.10.2026", "УПД № ...", "Коммерческое предложение № ... от ...".
+ * "Договор поставки № ... от 02.02.2023" gibi sözleşme/temel belge tarihleri ASLA belge tarihi sayılmaz:
+ * eski sürümler ilk bulunan tarihi aldığı için faturalar 2023 tarihli kaydediliyordu.
+ */
+export function extractDocumentHeaderDate(rawText: string): string | null {
+  const text = String(rawText || '').replace(/ /g, ' ');
+  const headerRe = new RegExp(
+    String.raw`(?:^|[^А-Яа-яЁёA-Za-z])(Сч[её]т(?:\s+на\s+оплату|\s*-\s*фактура|\s*-\s*оферта)?|Универсальный\s+передаточный\s+документ|УПД|Товарная\s+накладная|Расходная\s+накладная|Накладная|Коммерческое\s+предложение|Спецификация|Счет-договор)\s*(?:№|N|#)\s*[^\s\n]{1,30}\s+` + DATE_AFTER_OT,
+    'gi'
+  );
+  let m: RegExpExecArray | null;
+  while ((m = headerRe.exec(text)) !== null) {
+    const [, , day, monthWord, yearWord, monthNum, yearNum] = m;
+    const iso = monthWord ? (ruMonthCode(monthWord) ? toIsoDate(day, ruMonthCode(monthWord)!, yearWord) : null) : toIsoDate(day, monthNum, yearNum);
+    if (iso) return iso;
+  }
+  return null;
+}
+
+/** Metinde sözleşme / temel belge bağlamında geçen tarihler (Договор ... от 02.02.2023). */
+export function extractContractDates(rawText: string): string[] {
+  const text = String(rawText || '').replace(/ /g, ' ');
+  const re = new RegExp(String.raw`(?:Договор[а-яё]*|Основание|Контракт[а-яё]*)[^\n]{0,80}?` + DATE_AFTER_OT, 'gi');
+  const out = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const [, day, monthWord, yearWord, monthNum, yearNum] = m;
+    const iso = monthWord ? (ruMonthCode(monthWord) ? toIsoDate(day, ruMonthCode(monthWord)!, yearWord) : null) : toIsoDate(day, monthNum, yearNum);
+    if (iso) out.add(iso);
+  }
+  return Array.from(out);
+}

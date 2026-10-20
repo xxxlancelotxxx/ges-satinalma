@@ -13,11 +13,11 @@ import {
   convertMaterialUnit,
   extractTechnicalSpecs,
   detectMaterialType,
-  calculateMatchScore,
   normalizeVatPrice,
   generateAnalysisCode
 } from '../utils/comparativeCalculation';
 
+import { matchLines } from '../utils/invoiceLineMatcher';
 import { GesLogo } from './GesLogo';
 import {
   Coins,
@@ -2249,6 +2249,15 @@ export const DiscountEntryForm: React.FC<Props> = ({
 
     const canonicalMaterials: CanonicalMaterial[] = [];
 
+    // Kalemler belgeler arasında ad/artikel ile BİRE BİR eşleştirilir (bkz. invoiceLineMatcher). Eşleşmeyen satıra
+    // başka bir malzemenin ilk teklif fiyatı yazılmaz; satır sırasına körü körüne düşülmez.
+    const linesForMatch = Array.from({ length: maxItemsLen }, (_, i) => finalItems[i] || baseItems[i]).filter(Boolean);
+    const candidateInitialDocs = initialDocs.length > 0 ? initialDocs : (baselineDoc ? [baselineDoc] : []);
+    const initialMatchMaps = new Map<string, number[]>();
+    candidateInitialDocs.forEach(d => initialMatchMaps.set(d.id, matchLines(linesForMatch, d.items || [])));
+    const roundMatchMaps = new Map<string, number[]>();
+    activeRounds.forEach(rd => roundMatchMaps.set(rd.id, matchLines(linesForMatch, rd.items || [])));
+
     for (let i = 0; i < maxItemsLen; i++) {
       const bIt = baseItems[i];
       const fIt = finalItems[i] || bIt;
@@ -2274,28 +2283,10 @@ export const DiscountEntryForm: React.FC<Props> = ({
       let appliedConversionFormula: string | undefined = undefined;
       let anyVatAdjusted = finalVatRes.vatAdjusted;
 
-      const candidateInitialDocs = initialDocs.length > 0 ? initialDocs : (baselineDoc ? [baselineDoc] : []);
       candidateInitialDocs.forEach((initD) => {
         const initItems = initD.items || [];
-        let matchedItem = initItems[i];
-        // Hybrid semantic matching if multiple items exist
-        if (initItems.length > 0) {
-          let bestScore = -1;
-          let bestCandidate = initItems[i] || initItems[0];
-          initItems.forEach((cand) => {
-            const scoreObj = calculateMatchScore(
-              { description: rawMatName, specs, unit: targetUnit },
-              { description: cand.materialName || '', unit: cand.unit }
-            );
-            if (scoreObj.score > bestScore) {
-              bestScore = scoreObj.score;
-              bestCandidate = cand;
-            }
-          });
-          if (bestScore >= 0.55) {
-            matchedItem = bestCandidate;
-          }
-        }
+        const mIdx = initialMatchMaps.get(initD.id)?.[i] ?? -1;
+        const matchedItem = mIdx >= 0 ? initItems[mIdx] : undefined;
 
         if (matchedItem) {
           const rawCandidateUp = Number(matchedItem.unitPrice) || 0;
@@ -2317,6 +2308,9 @@ export const DiscountEntryForm: React.FC<Props> = ({
               if (conv.conversionApplied && conv.convertedUnitPrice > 0) {
                 normUp = conv.convertedUnitPrice;
                 appliedConversionFormula = conv.formula;
+              } else {
+                // Birimler farklı ve güvenilir dönüşüm yok: farklı birimlerin fiyatı kıyaslanmaz.
+                return;
               }
             }
 
@@ -2328,6 +2322,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
         }
       });
 
+      const referenceFound = bestInitUp > 0;
       if (bestInitUp <= 0) {
         bestInitUp = finUp;
       }
@@ -2337,7 +2332,8 @@ export const DiscountEntryForm: React.FC<Props> = ({
 
       // Round unit prices with VAT & unit normalization
       const roundUps = activeRounds.map((rd, rIdx) => {
-        const rItem = rd.items?.[i];
+        const rLineIdx = roundMatchMaps.get(rd.id)?.[i] ?? -1;
+        const rItem = rLineIdx >= 0 ? rd.items?.[rLineIdx] : undefined;
         let rUp = Number(rItem?.unitPrice) || 0;
         let rConvNote: string | undefined = undefined;
         if (rUp > 0) {
@@ -2396,6 +2392,10 @@ export const DiscountEntryForm: React.FC<Props> = ({
       canonicalMaterials.push({
         id: `can_mat_${i + 1}_${Date.now()}`,
         commonName: rawMatName,
+        originalName: (fIt || bIt).originalName || rawMatName,
+        sourceLineIndex: i,
+        referenceFound,
+        lineMatchVersion: 2,
         canonicalName: specsSummary ? `${matType} (${specsSummary})` : rawMatName,
         materialType: matType,
         standardUnit: targetUnit,

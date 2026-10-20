@@ -91,6 +91,8 @@ import {
   generateContentWithResilience
 } from './server/aiOcrEngine';
 import { processInvoiceTwoStages, fallbackExtractInvoiceFromTextOrCsv } from './server/aiTwoStageOcr';
+import { readVerifiedDocument, planDiscountRepair, DISCOUNT_LINE_REPAIR_VERSION, VerifiedDocument } from './server/discountLineRepair';
+import { extractPdfText } from './server/invoiceDocumentLines';
 import { generateArchivePdf } from './server/documentGenerator';
 import { registerTdfRoutes } from './server/tdfService';
 
@@ -12037,6 +12039,179 @@ async function reconcilePrizmaInvoiceLines(options: { apply: boolean; limit?: nu
   }
 }
 
+// Kayıtlı bir belgenin (/api/files/<ad> veya data: URL) baytlarını okur. Akıllı tahmin YOK: yalnızca birebir dosya adı.
+async function loadStoredFileBuffer(fileUrl?: string | null): Promise<Buffer | null> {
+  if (!fileUrl) return null;
+  const raw = String(fileUrl);
+  if (raw.startsWith('data:')) {
+    const b64 = raw.split(',')[1];
+    return b64 ? Buffer.from(b64, 'base64') : null;
+  }
+  const m = raw.match(/\/api\/files\/(?:drive\/)?([^?#]+)/);
+  if (!m) return null;
+  let safeName = '';
+  try { safeName = path.basename(decodeURIComponent(m[1]).replace(/^(?:faturalar\/|drive\/)+/, '')); } catch { return null; }
+  if (!safeName) return null;
+  const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+  try {
+    const targetBucket = getStorage().bucket(PRIMARY_GCS_BUCKET);
+    for (const objectPath of [`faturalar/${safeName}`, safeName]) {
+      const fileRef = targetBucket.file(objectPath);
+      const [exists] = await withTimeout(fileRef.exists(), 20000);
+      if (exists) {
+        const [buf] = await withTimeout(fileRef.download(), 60000);
+        if (buf?.length) return buf;
+      }
+    }
+  } catch (_) {}
+  if (db) {
+    try {
+      const metaSnap = await getDoc(doc(db, 'storage_files', safeName));
+      if (metaSnap.exists()) {
+        const count = Number(metaSnap.data().chunks || 0);
+        if (Number.isInteger(count) && count >= 1 && count <= 100) {
+          const parts: string[] = [];
+          for (let i = 0; i < count; i++) {
+            const chunk = await getDoc(doc(db, 'storage_chunks', `${safeName}_${i}`));
+            if (!chunk.exists() || typeof chunk.data().data !== 'string') return null;
+            parts.push(chunk.data().data);
+          }
+          const buf = Buffer.from(parts.join(''), 'base64');
+          if (buf.length) return buf;
+        }
+      }
+    } catch (_) {}
+  }
+  for (const dir of [LOCAL_FILES_DIR, uploadDir]) {
+    const candidate = path.join(dir, safeName);
+    if (fs.existsSync(candidate)) return fs.readFileSync(candidate);
+  }
+  return null;
+}
+
+async function readVerifiedDocumentFromUrl(fileUrl?: string | null): Promise<{ status: 'verified' | 'unverified' | 'missing'; doc: VerifiedDocument | null }> {
+  const buf = await loadStoredFileBuffer(fileUrl);
+  if (!buf) return { status: 'missing', doc: null };
+  if (buf.subarray(0, 5).toString('latin1') !== '%PDF-') return { status: 'unverified', doc: null };
+  const text = await extractPdfText(buf).catch(() => '');
+  const docRead = readVerifiedDocument(text);
+  return { status: docRead ? 'verified' : 'unverified', doc: docRead };
+}
+
+// İndirim (şef pazarlık / TDF teklif merkezi) kayıtlarının kalemlerini, tarihini ve kalem bazlı ilk teklif
+// referanslarını kendi PDF belgelerinden onarır. apply=true iken değişen her kayıt önce `invoice_line_backups`
+// koleksiyonuna yedeklenir. Yalnızca katı ayrıştırıcıyla kuruşu kuruşuna doğrulanan belgeler veri kaynağıdır.
+let discountLineRepairRunning = false;
+async function repairDiscountLines(options: { apply: boolean; ids?: string[]; force?: boolean }) {
+  if (discountLineRepairRunning) throw new Error('İndirim kalemi onarımı zaten çalışıyor.');
+  discountLineRepairRunning = true;
+  const report = {
+    scanned: 0, skippedAlreadyChecked: 0, finalVerified: 0, finalUnverified: 0, finalMissing: 0,
+    changed: 0, backups: 0, invoiceUpdates: 0,
+    changes: [] as Array<{ id: string; invoiceNo?: string; vendorName?: string; notes: string[] }>
+  };
+  try {
+    memoryStore.discounts = undefined;
+    const { data: discs } = await getDiscountsCached();
+    const markerRef = db ? doc(db, 'system_stats', 'discount_line_repair') : null;
+    let checked: Record<string, number> = {};
+    if (markerRef && !options.force) {
+      const snap = await getDoc(markerRef).catch(() => null);
+      checked = (snap && snap.exists() && snap.data()?.checked) || {};
+    }
+    const targets = (discs || []).filter((d: any) => d && !d.isDeleted && (!options.ids || options.ids.includes(d.id)));
+    const newlyChecked: Record<string, number> = {};
+    const stamp = new Date().toISOString();
+
+    for (const d of targets) {
+      if (!options.force && (checked[d.id] || 0) >= DISCOUNT_LINE_REPAIR_VERSION) { report.skippedAlreadyChecked++; continue; }
+      report.scanned++;
+      const finalUrl = d.finalOfferFileUrl || d.fileUrl || null;
+      const finalRead = await readVerifiedDocumentFromUrl(finalUrl);
+      if (finalRead.status === 'verified') report.finalVerified++;
+      else if (finalRead.status === 'unverified') report.finalUnverified++;
+      else report.finalMissing++;
+
+      const initialUrls = new Set<string>();
+      if (d.firstOfferFileUrl) initialUrls.add(d.firstOfferFileUrl);
+      for (const sd of (Array.isArray(d.stageDocuments) ? d.stageDocuments : [])) {
+        if (Number(sd?.stageNumber) === 1 && sd?.fileUrl) initialUrls.add(sd.fileUrl);
+      }
+      if (finalUrl) initialUrls.delete(finalUrl);
+      const initialDocs: Array<{ doc: VerifiedDocument; supplier?: string }> = [];
+      for (const u of initialUrls) {
+        const r = await readVerifiedDocumentFromUrl(u);
+        if (r.doc) initialDocs.push({ doc: r.doc, supplier: d.vendorName });
+      }
+
+      const plan = planDiscountRepair(d, finalRead.doc, initialDocs);
+      // Belge okunamadıysa (dosya yok) bir sonraki açılışta yeniden denenir.
+      if (finalRead.status !== 'missing' || plan.changed) newlyChecked[d.id] = DISCOUNT_LINE_REPAIR_VERSION;
+      if (!plan.changed) continue;
+      report.changed++;
+      report.changes.push({ id: d.id, invoiceNo: d.invoiceNo, vendorName: d.vendorName, notes: plan.notes });
+
+      if (options.apply && db) {
+        const discRef = doc(db, 'discounts', d.id);
+        const discSnap = await getDoc(discRef);
+        if (!discSnap.exists()) continue;
+        const invId = `inv_sync_${d.id}`;
+        const invRef = doc(db, 'invoices', invId);
+        const invSnap = Object.keys(plan.invoiceUpdate).length > 0 ? await getDoc(invRef) : null;
+        const batch = writeBatch(db);
+        const safeStamp = stamp.replace(/[:.]/g, '-');
+        batch.set(doc(db, 'invoice_line_backups', `${d.id}__${safeStamp}`), cleanComparativeData({
+          collection: 'discounts', docId: d.id, backedUpAt: stamp, reason: 'discount_line_repair', data: discSnap.data()
+        }));
+        report.backups++;
+        batch.set(discRef, cleanComparativeData({ ...plan.discountUpdate, lineRepairedAt: stamp, lineRepairNotes: plan.notes }), { merge: true });
+        if (invSnap && invSnap.exists()) {
+          batch.set(doc(db, 'invoice_line_backups', `${invId}__${safeStamp}`), cleanComparativeData({
+            collection: 'invoices', docId: invId, backedUpAt: stamp, reason: 'discount_line_repair', data: invSnap.data()
+          }));
+          report.backups++;
+          const invUpdate: any = { ...plan.invoiceUpdate };
+          if (Array.isArray(invUpdate.items)) {
+            invUpdate.items = invUpdate.items.map((it: any) => {
+              const norm = smartNormalizeItem(it);
+              return { ...it, materialName: norm.materialName, category: norm.category || it.category };
+            });
+          }
+          batch.set(invRef, cleanComparativeData(invUpdate), { merge: true });
+          report.invoiceUpdates++;
+        }
+        await batch.commit();
+      }
+    }
+
+    if (options.apply && markerRef && Object.keys(newlyChecked).length > 0) {
+      await setDoc(markerRef, { checked: { ...checked, ...newlyChecked }, lastRunAt: stamp, version: DISCOUNT_LINE_REPAIR_VERSION }, { merge: true });
+    }
+    if (options.apply && report.changed > 0) {
+      memoryStore.discounts = undefined;
+      memoryStore.invoices = undefined;
+      memoryStore.materialComparisons = undefined;
+    }
+    return report;
+  } finally {
+    discountLineRepairRunning = false;
+  }
+}
+
+app.post('/api/discounts/repair-lines', async (req, res) => {
+  const role = decodeURIComponent(String(req.headers['x-user-role'] || ''));
+  const apply = req.body?.apply === true || req.query.apply === '1';
+  if (apply && role !== 'admin') return res.status(403).json({ error: 'Kayıtları onarmak için yönetici oturumu gerekir.' });
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : undefined;
+    const result = await repairDiscountLines({ apply, ids, force: req.body?.force === true || !apply });
+    res.json({ success: true, apply, ...result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post('/api/prizma/reconcile-invoice-lines', async (req, res) => {
   const role = decodeURIComponent(String(req.headers['x-user-role'] || ''));
   const apply = req.body?.apply === true || req.query.apply === '1';
@@ -12319,6 +12494,16 @@ async function startServer() {
           .then(r => console.log(`[INVOICE LINE RECONCILE] ${r.scanned} fatura tarandı: ${r.verifiedFromDocument} belgeden doğrulandı, ${r.stfMatchesTotal} STF toplamı tutuyor, ${r.mismatch} doğrulanamadı, ${r.errors} erişim hatası; ${r.backups + r.invoiceBackups} kayıt yedeklendi.`))
           .catch(err => console.warn('[INVOICE LINE RECONCILE] Hata:', err.message));
       }, 90 * 1000);
+    }
+
+    // İndirim kayıtlarını (kalemler, tarih, kalem bazlı ilk teklif referansları) kendi PDF'lerinden bir kez onar.
+    if (process.env.DISABLE_DISCOUNT_LINE_REPAIR !== '1') {
+      setTimeout(() => {
+        if (!db) return;
+        repairDiscountLines({ apply: true })
+          .then(r => console.log(`[DISCOUNT LINE REPAIR] ${r.scanned} kayıt tarandı (${r.skippedAlreadyChecked} daha önce kontrol edilmiş): ${r.finalVerified} belge doğrulandı, ${r.finalUnverified} doğrulanamadı, ${r.finalMissing} dosya yok; ${r.changed} kayıt onarıldı, ${r.backups} yedek alındı.`))
+          .catch(err => console.warn('[DISCOUNT LINE REPAIR] Hata:', err.message));
+      }, 120 * 1000);
     }
 
     // Sunucu başlangıcında bugünün bulut yedeği yoksa arka planda otomatik yedek al ve doğrula

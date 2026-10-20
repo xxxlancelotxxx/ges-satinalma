@@ -236,6 +236,9 @@ export const PreApprovalAudit: React.FC<Props> = ({
             quantity: Number(it.quantity) || 1,
             unitPrice: Number(it.unitPrice) || 0,
             totalPrice: Number(it.totalPrice) || (Number(it.quantity) * Number(it.unitPrice)),
+            unitPriceNet: Number(it.unitPriceNet) || undefined,
+            vatPercentage: it.vatPercentage !== undefined ? Number(it.vatPercentage) : undefined,
+            lineVerified: typeof it.lineVerified === 'boolean' ? it.lineVerified : undefined,
             currency: it.currency || ext.currency || 'RUB',
             diameter: it.diameter || '',
             grade: it.grade || '',
@@ -598,6 +601,11 @@ export const PreApprovalAudit: React.FC<Props> = ({
               <p className="text-xs sm:text-sm font-medium leading-relaxed">
                 {auditSummary.overallReasoning}
               </p>
+              {rawOcrData?.lineCheck === 'mismatch' && (
+                <p className="mt-2 text-xs font-semibold text-orange-800 bg-orange-50 border border-orange-200 rounded-lg px-2.5 py-1.5">
+                  Okuma uyarısı: {rawOcrData.lineCheckReason || 'Kalemler fatura toplamıyla doğrulanamadı'}. Doğrulanamayan satırlar için fiyat farkı iddia edilmez; rakamları faturadan kontrol edin.
+                </p>
+              )}
             </div>
 
             <div className="text-left md:text-right shrink-0">

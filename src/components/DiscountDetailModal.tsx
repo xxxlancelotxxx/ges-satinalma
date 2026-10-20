@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { DiscountRecord, InvoiceItem } from '../types';
 import { formatRuble, formatUploadDate, openOriginalFileViewer, getSafeFileUrl } from '../utils/format';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { buildDiscountLineComparisons, DiscountLineComparison } from '../utils/discountLineReference';
 import {
   X,
   ArrowLeft,
@@ -311,101 +312,13 @@ export const DiscountDetailModal: React.FC<DiscountDetailModalProps> = ({
     return [];
   })();
 
-  const getComparativeInfoForItem = (item: InvoiceItem, idx: number) => {
-    const canonicalList = comparativeAnalysisData?.canonicalMaterials || discount.canonicalMaterials || [];
-    let match: any = null;
-
-    if (canonicalList && canonicalList.length > 0) {
-      if (item.id) {
-        match = canonicalList.find((c: any) => c.id === item.id || (c.lines && c.lines.some((l: any) => l.documentId === item.id)));
-      }
-      if (!match && (item.diameter || item.quality)) {
-        match = canonicalList.find((c: any) => {
-          const specDia = c.specs?.diameter || '';
-          const itemDia = item.diameter || '';
-          if (specDia && itemDia) {
-            const cleanSpec = specDia.replace(/[^\d]/g, '');
-            const cleanItem = itemDia.replace(/[^\d]/g, '');
-            if (cleanSpec && cleanItem && cleanSpec === cleanItem) return true;
-          }
-          return false;
-        });
-      }
-      if (!match && item.quantity && item.unitPrice) {
-        match = canonicalList.find((c: any) =>
-          Number(c.purchasedQuantity || c.quantity) === Number(item.quantity) &&
-          Math.abs(Number(c.purchasedUnitPrice || c.unitPrice) - Number(item.unitPrice)) < 1
-        );
-      }
-      if (!match && item.materialName) {
-        const cleanMat = item.materialName.toLowerCase().replace(/[^a-z0-9]/gi, '');
-        match = canonicalList.find((c: any) => {
-          const cName = (c.commonName || c.canonicalName || '').toLowerCase().replace(/[^a-z0-9]/gi, '');
-          return cName.includes(cleanMat) || cleanMat.includes(cName);
-        });
-      }
-      if (!match && canonicalList.length === allItems.length) {
-        match = canonicalList[idx];
-      }
-    }
-
-    if (match) {
-      const refPrice = Number(match.marketReferenceUnitPrice || match.lowestInitialOffer?.normalizedUnitPrice || 0);
-      const refSupplier = match.marketReferenceSupplier || match.lowestInitialOffer?.vendorName || (match.lines?.find((l: any) => l.isCompetitor || l.isInitialOffer)?.supplierName) || 'Piyasa En Düşük Teklif';
-      const finalPrice = Number(match.purchasedUnitPrice || item.unitPrice || 0);
-      const finalSupplier = match.purchasedSupplier || discount.vendorName;
-      const qty = Number(item.quantity) || 1;
-      const totalSavings = Number(match.realTotalSavings !== undefined ? match.realTotalSavings : ((refPrice > 0 && finalPrice > 0) ? (refPrice - finalPrice) * qty : 0));
-      const unitSavings = Number(match.realUnitSavings !== undefined ? match.realUnitSavings : (refPrice > 0 && finalPrice > 0 ? refPrice - finalPrice : 0));
-      const savingsRate = (refPrice > 0 && finalPrice > 0) ? Number((((refPrice - finalPrice) / refPrice) * 100).toFixed(2)) : 0;
-
-      return {
-        refPrice,
-        refSupplier,
-        finalPrice,
-        finalSupplier,
-        unitSavings,
-        totalSavings,
-        savingsRate,
-        isComparative: true,
-        matchConfidence: match.matchConfidence
-      };
-    }
-
-    // Fallback for regular discounts
-    const offerP = Number(discount.offerPrice) || 0;
-    const agreedP = Number(discount.agreedPrice) || 0;
-    const finalPrice = Number(item.unitPrice) || 0;
-    const qty = Number(item.quantity) || 1;
-
-    if (offerP > agreedP && agreedP > 0) {
-      const ratio = offerP / agreedP;
-      const refPrice = Math.round(finalPrice * ratio);
-      const totalSavings = Math.round((refPrice - finalPrice) * qty);
-      const unitSavings = refPrice - finalPrice;
-      const savingsRate = refPrice > 0 ? Number((((refPrice - finalPrice) / refPrice) * 100).toFixed(2)) : 0;
-
-      return {
-        refPrice,
-        refSupplier: discount.firstOfferFileName ? 'İlk Teklif (Liste)' : 'Piyasa Referansı',
-        finalPrice,
-        finalSupplier: discount.vendorName,
-        unitSavings,
-        totalSavings,
-        savingsRate,
-        isComparative: false
-      };
-    }
-
-    return {
-      refPrice: finalPrice,
-      refSupplier: discount.vendorName,
-      finalPrice: finalPrice,
-      finalSupplier: discount.vendorName,
-      unitSavings: 0,
-      totalSavings: 0,
-      savingsRate: 0,
-      isComparative: false
+  // Kalem bazlı ilk teklif referansı yalnızca bu kaydın kendi belgelerinden gelir (bkz. discountLineReference).
+  const lineComparisons = buildDiscountLineComparisons(discount as any, comparativeAnalysisData);
+  const getComparativeInfoForItem = (item: InvoiceItem): DiscountLineComparison => {
+    const pos = allItems.indexOf(item);
+    return lineComparisons[pos >= 0 ? pos : 0] || {
+      hasReference: false, refPrice: 0, refSupplier: '', finalPrice: Number(item.unitPrice) || 0,
+      finalSupplier: discount.vendorName || '', unitSavings: 0, totalSavings: 0, savingsRate: 0
     };
   };
 
@@ -945,8 +858,8 @@ export const DiscountDetailModal: React.FC<DiscountDetailModalProps> = ({
                     <th className="py-2.5 px-2 w-24 text-right border-r border-slate-700">Miktar & Birim</th>
                     <th className="py-2.5 px-2 w-28 text-right border-r border-slate-700">
                       <div className="flex flex-col items-end">
-                        <span className="text-slate-100">Piyasa Baz Birim</span>
-                        <span className="text-[10px] text-amber-300 font-normal">İlk En Düşük</span>
+                        <span className="text-slate-100">İlk Teklif Birim</span>
+                        <span className="text-[10px] text-amber-300 font-normal">Bu kaydın belgeleri</span>
                       </div>
                     </th>
                     <th className="py-2.5 px-2 w-28 text-right border-r border-slate-700">
@@ -973,7 +886,7 @@ export const DiscountDetailModal: React.FC<DiscountDetailModalProps> = ({
                   {paginatedItems.length > 0 ? (
                     paginatedItems.map((item, idx) => {
                       const globalIdx = (safeCurrentPage - 1) * detailItemsPageSize + idx + 1;
-                      const compInfo = getComparativeInfoForItem(item, (safeCurrentPage - 1) * detailItemsPageSize + idx);
+                      const compInfo = getComparativeInfoForItem(item);
                       return (
                         <tr
                           key={`${item.id || 'disc_item'}_${globalIdx}`}
@@ -1011,12 +924,23 @@ export const DiscountDetailModal: React.FC<DiscountDetailModalProps> = ({
                             {Number(item.quantity || 1).toLocaleString('tr-TR')} {item.unit || 'Adet'}
                           </td>
                           <td className="py-2 px-2 text-right whitespace-nowrap bg-amber-50/20 border-r border-b border-slate-300">
-                            <div className="font-mono font-bold text-slate-800">
-                              {formatRuble(compInfo.refPrice)}
-                            </div>
-                            <div className="text-[10px] text-slate-500 truncate max-w-[130px] ml-auto font-sans font-medium" title={compInfo.refSupplier}>
-                              {compInfo.refSupplier}
-                            </div>
+                            {compInfo.hasReference ? (
+                              <>
+                                <div className="font-mono font-bold text-slate-800">
+                                  {formatRuble(compInfo.refPrice)}
+                                </div>
+                                <div className="text-[10px] text-slate-500 truncate max-w-[130px] ml-auto font-sans font-medium" title={compInfo.refSupplier}>
+                                  {compInfo.refSupplier}
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="font-mono font-bold text-slate-400">—</div>
+                                <div className="text-[10px] text-slate-500 max-w-[130px] ml-auto font-sans font-medium whitespace-normal">
+                                  {compInfo.note || 'Referans yok'}
+                                </div>
+                              </>
+                            )}
                           </td>
                           <td className="py-2 px-2 text-right whitespace-nowrap bg-indigo-50/30 border-r border-b border-slate-300">
                             <div className="font-mono font-black text-indigo-900">
@@ -1027,7 +951,9 @@ export const DiscountDetailModal: React.FC<DiscountDetailModalProps> = ({
                             </div>
                           </td>
                           <td className="py-2 px-2 text-right whitespace-nowrap bg-emerald-50/40 border-r border-b border-slate-300">
-                            {compInfo.refPrice > compInfo.finalPrice ? (
+                            {!compInfo.hasReference ? (
+                              <div className="text-slate-400 font-mono text-xs">—</div>
+                            ) : compInfo.refPrice > compInfo.finalPrice ? (
                               <>
                                 <div className="font-mono font-black text-emerald-800">
                                   +{formatRuble(compInfo.totalSavings)}
