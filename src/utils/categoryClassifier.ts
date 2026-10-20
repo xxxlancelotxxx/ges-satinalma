@@ -1083,7 +1083,28 @@ const WORD_TRANSLATIONS: Array<[RegExp, string]> = [
   cyrWord('шпилька\\s+резьбовая|шпилька', 'Saplama (Gijon)'),
   cyrWord('арматура', 'İnşaat Demiri'),
   cyrWord('уровень', 'Su Terazisi'),
-  cyrWord('полоса', 'Çelik Lama / Şerit')
+  cyrWord('полоса', 'Çelik Lama / Şerit'),
+  cyrWord('коврик-травка|коврик\\s+травка', 'Çim Halı Paspas'),
+  cyrWord('канализационный\\s+насос', 'Kanalizasyon Pompası'),
+  cyrWord('кофе\\s+растворимый', 'Granül Kahve'),
+  [/раств\.?\s*субл\.?/gi, 'Çözünür'],
+  [/шир\./gi, 'En:'],
+  [/ст\.?\s*1\b/gi, '1. Sınıf'],
+  cyrWord('пакет', 'Paket'),
+  cyrWord('контейнер-бак\\s+мусорный', 'Tekerlekli Çöp Konteyneri'),
+  cyrWord('мешки\\s+для\\s+мусора', 'Çöp Poşeti'),
+  cyrWord('брелоки\\s+для\\s+ключей', 'Anahtarlık Etiketi'),
+  cyrWord('помпа\\s+для\\s+воды', 'Damacana Su Pompası'),
+  cyrWord('половник', 'Çorba Kepçesi'),
+  cyrWord('доска\\s+разделочная', 'Kesme Tahtası'),
+  cyrWord('шумовка', 'Kevgir Kepçe'),
+  cyrWord('средство\\s+для\\s+мытья\\s+пола', 'Yüzey / Zemin Temizleyici'),
+  cyrWord('отбеливатель\\s+белизна|отбеливатель', 'Çamaşır Suyu / Ağartıcı'),
+  cyrWord('ершик\\s+для\\s+унитаза', 'Klozet Fırçası'),
+  cyrWord('полотно\\s+вафельное\\s+отбеленное|полотно\\s+вафельное', 'Temizlik Bezi Rulo (Petek Dokulu)'),
+  cyrWord('весы\\s+торговые\\s+напольные', 'Elektronik Yer Baskülü / Terazi'),
+  cyrWord('ботинки', 'İş Botu'),
+  cyrWord('на\\s+натуральном\\s+меху', 'Doğal Kürklü Kışlık')
 ];
 
 const translateMemoCache = new Map<string, string>();

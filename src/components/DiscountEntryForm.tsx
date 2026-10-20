@@ -70,7 +70,7 @@ import { ComparativeAnalysisDetailModal } from './ComparativeAnalysisDetailModal
 import { SearchableFilterDropdown } from './SearchableFilterDropdown';
 import { DateRangeFilterDropdown } from './DateRangeFilterDropdown';
 import { DateFilterState, matchesDateFilter } from '../utils/filterHelpers';
-import { normalizeVendorName, getVendorKey, areVendorsEqual, extractCanonicalVendors } from '../utils/vendorNormalizer';
+import { normalizeVendorName, getVendorKey, areVendorsEqual, extractCanonicalVendors, isValidInvoiceNumber } from '../utils/vendorNormalizer';
 
 interface Props {
   supervisors: PurchasingSupervisor[];
@@ -2448,7 +2448,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
   const [firstOfferFileName, setFirstOfferFileName] = useState<string>('');
   const [finalOfferFileName, setFinalOfferFileName] = useState<string>('');
 
-  // Real-time duplicate check across both existing discounts and invoices
+  // Real-time duplicate check across both existing discounts and invoices (Strictly isolated per Supplier)
   const effectiveDuplicateWarning = useMemo(() => {
     const activeNoRaw = String(aiReviewModal?.invoiceNo || invoiceNo || '').trim();
     const activeVendorRaw = String(aiReviewModal?.vendorName || vendorName || '').trim();
@@ -2456,7 +2456,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
     const activeDate = String(aiReviewModal?.orderDate || orderDate || '').trim();
 
     const cleanNo = activeNoRaw.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
-    const isGenericNo = !activeNoRaw || activeNoRaw.startsWith('FT-') || activeNoRaw.startsWith('TKF-') || activeNoRaw.startsWith('ARCH-') || activeNoRaw.startsWith('BLG-');
+    const isActiveNoValid = isValidInvoiceNumber(activeNoRaw);
     const cleanSup = normalizeVendorName(activeVendorRaw);
 
     if (cleanNo || cleanSup) {
@@ -2464,41 +2464,40 @@ export const DiscountEntryForm: React.FC<Props> = ({
         if ((d as any).isDeleted) continue;
         const dNoRaw = String(d.invoiceNo || '').trim();
         const dNo = dNoRaw.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
-        const dSup = normalizeVendorName(d.vendorName || '');
-        const isDGeneric = !dNoRaw || dNoRaw.startsWith('FT-') || dNoRaw.startsWith('TKF-') || dNoRaw.startsWith('ARCH-');
-        if (!isGenericNo && !isDGeneric && cleanNo && dNo && cleanNo === dNo) {
-          const sameSup = areVendorsEqual(cleanSup, dSup) || (cleanSup && dSup && (cleanSup.includes(dSup) || dSup.includes(cleanSup)));
-          const sameAmt = activeAgreed > 0 && Math.abs(activeAgreed - (Number(d.agreedPrice) || 0)) < 5;
-          if (sameSup || (cleanNo.length >= 3 && sameAmt)) {
-            return {
-              isDuplicate: true,
-              message: `Bu fatura sistemde kayıtlı! "${dNoRaw}" numaralı ve "${d.vendorName}" tedarikçili fatura daha önce (${d.orderDate || '-'} / ${d.jobsiteName || 'Şantiye'} - ${formatRuble(d.agreedPrice)}) İndirim Kayıtlarına yüklenmiş.`,
-              existingRecord: d
-            };
-          }
+        const isDNoValid = isValidInvoiceNumber(dNoRaw);
+        const dSupClean = normalizeVendorName(d.vendorName || '') || d.vendorName || '';
+        const sameSup = areVendorsEqual(activeVendorRaw, d.vendorName || '');
+        if (!sameSup) continue;
+
+        if (isActiveNoValid && isDNoValid && cleanNo && dNo && cleanNo === dNo) {
+          return {
+            isDuplicate: true,
+            message: `Bu fatura sistemde kayıtlı! "${dNoRaw}" numaralı ve "${dSupClean}" tedarikçili fatura daha önce (${d.orderDate || '-'} / ${d.jobsiteName || 'Şantiye'} - ${formatRuble(d.agreedPrice)}) İndirim Kayıtlarına yüklenmiş.`,
+            existingRecord: d
+          };
         }
       }
       for (const inv of (invoices || [])) {
         if ((inv as any).isDeleted) continue;
         const iNoRaw = String(inv.invoiceNumber || '').trim();
         const iNo = iNoRaw.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
-        const iSup = normalizeVendorName(inv.supplier || '');
-        const isIGeneric = !iNoRaw || iNoRaw.startsWith('FT-') || iNoRaw.startsWith('TKF-') || iNoRaw.startsWith('ARCH-');
-        if (!isGenericNo && !isIGeneric && cleanNo && iNo && cleanNo === iNo) {
-          const sameSup = areVendorsEqual(cleanSup, iSup) || (cleanSup && iSup && (cleanSup.includes(iSup) || iSup.includes(cleanSup)));
-          const sameAmt = activeAgreed > 0 && Math.abs(activeAgreed - (Number(inv.totalAmount) || 0)) < 5;
-          if (sameSup || (cleanNo.length >= 3 && sameAmt)) {
-            return {
-              isDuplicate: true,
-              message: `Bu fatura sistemde kayıtlı! "${iNoRaw}" numaralı ve "${inv.supplier}" tedarikçili fatura daha önce (${inv.date || '-'} / ${inv.jobsiteName || 'Şantiye'} - ${formatRuble(inv.totalAmount)}) sisteme yüklenmiş.`,
-              existingRecord: inv
-            };
-          }
-        }
-        if (activeAgreed > 0 && Math.abs(activeAgreed - (Number(inv.totalAmount) || 0)) < 1 && activeDate && inv.date === activeDate && areVendorsEqual(cleanSup, iSup)) {
+        const isINoValid = isValidInvoiceNumber(iNoRaw);
+        const iSupClean = normalizeVendorName(inv.supplier || '') || inv.supplier || '';
+        const sameSup = areVendorsEqual(activeVendorRaw, inv.supplier || '');
+        if (!sameSup) continue;
+
+        if (isActiveNoValid && isINoValid && cleanNo && iNo && cleanNo === iNo) {
           return {
             isDuplicate: true,
-            message: `Bu fatura sistemde kayıtlı! "${inv.supplier}" tedarikçisine ait aynı tarih (${inv.date}) ve aynı tutarda (${formatRuble(inv.totalAmount)}) bir fatura zaten sistemde mevcut.`,
+            message: `Bu fatura sistemde kayıtlı! "${iNoRaw}" numaralı ve "${iSupClean}" tedarikçili fatura daha önce (${inv.date || '-'} / ${inv.jobsiteName || 'Şantiye'} - ${formatRuble(inv.totalAmount)}) sisteme yüklenmiş.`,
+            existingRecord: inv
+          };
+        }
+        const hasDistinctValidNumbers = isActiveNoValid && isINoValid && cleanNo !== iNo;
+        if (!hasDistinctValidNumbers && activeAgreed > 0 && Math.abs(activeAgreed - (Number(inv.totalAmount) || 0)) < 1 && activeDate && inv.date === activeDate) {
+          return {
+            isDuplicate: true,
+            message: `Bu fatura sistemde kayıtlı! "${iSupClean}" tedarikçisine ait aynı tarih (${inv.date}) ve aynı tutarda (${formatRuble(inv.totalAmount)}) bir fatura zaten sistemde mevcut.`,
             existingRecord: inv
           };
         }

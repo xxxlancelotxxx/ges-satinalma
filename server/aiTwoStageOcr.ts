@@ -11,6 +11,13 @@ import {
   inspectAndNormalizeDocumentInput
 } from './aiOcrEngine';
 import { normalizeCategoryName, translateRussianMaterialToTurkish } from '../src/utils/categoryClassifier';
+import {
+  normalizeVendorName,
+  isBuyerOrganization,
+  isValidInvoiceNumber,
+  extractVendorInn,
+  isInvoiceHeaderOrAddressGarbage
+} from '../src/utils/vendorNormalizer';
 
 const parseNumberSafe = (val: any): number => {
   if (val === undefined || val === null) return 0;
@@ -259,8 +266,15 @@ export function extractSupplierName(obj: any): string {
   if (typeof obj === 'string') {
     let trimmed = obj.trim();
     trimmed = trimmed.replace(/^[:\s"'«»“”]+|[:\s"'«»“”]+$/g, '').trim();
-    if (trimmed && !INVALID_SUPPLIER_NAMES.has(trimmed.toLowerCase())) {
-      return trimmed;
+    if (!trimmed || INVALID_SUPPLIER_NAMES.has(trimmed.toLowerCase())) {
+      return '';
+    }
+    if (isBuyerOrganization(trimmed)) {
+      return '';
+    }
+    const normalized = normalizeVendorName(trimmed);
+    if (normalized && !INVALID_SUPPLIER_NAMES.has(normalized.toLowerCase()) && !isBuyerOrganization(normalized)) {
+      return normalized;
     }
     return '';
   }
@@ -275,6 +289,8 @@ export function extractSupplierName(obj: any): string {
   return '';
 }
 
+const BANK_NAME_PATTERN = /(?:сбербанк|тбанк|т-банк|тинькофф|альфа-банк|втб|газпромбанк|райффайзен|совкомбанк|россельхозбанк|открытие|промсвязьбанк|зираат\s*банк|банк\s*["«]?санкт-петербург|уралсиб|ак\s*барс|мкб)/i;
+
 // Regex and heuristic text extraction from raw document text / CSV / filename
 export function fallbackExtractSupplierFromText(textContext?: string, fileName?: string): string {
   if (!textContext && !fileName) return '';
@@ -282,11 +298,13 @@ export function fallbackExtractSupplierFromText(textContext?: string, fileName?:
   const fullText = (textContext || '') + '\n' + (fileName || '');
   if (!fullText.trim()) return '';
 
-  // 1. Regex for Russian invoice seller labels
-  const postMatch = fullText.match(/(?:Поставщик\s*(?:\(исполнитель\))?|Продавец|Исполнитель|Грузоотправитель|Организация)\s*[:：\t,-]\s*([^\r\n;]+)/i);
-  if (postMatch && postMatch[1]) {
-    const rawSup = postMatch[1].split(/[,\s]+(?:ИНН|КПП|ОГРН|Адрес|р\/с|тел\.?)\b/i)[0].trim();
-    const candidate = extractSupplierName(rawSup);
+  // 1. Regex for Russian invoice seller labels (Check all occurrences in case one is buyer due to PDF layout order)
+  const postRegex = /(?:Поставщик\s*(?:\(исполнитель\))?|Продавец\s*(?:\(исполнитель\))?|Грузоотправитель|Организация)\s*[:：\t,-]\s*([^\r\n;]+)/gi;
+  let pm: RegExpExecArray | null;
+  while ((pm = postRegex.exec(fullText)) !== null) {
+    const seg = pm[1].trim();
+    if (isBuyerOrganization(seg) || BANK_NAME_PATTERN.test(seg)) continue;
+    const candidate = extractSupplierName(seg);
     if (candidate && candidate.length > 2) return candidate;
   }
 
@@ -297,11 +315,13 @@ export function fallbackExtractSupplierFromText(textContext?: string, fileName?:
     if (candidate && candidate.length > 2) return candidate;
   }
 
-  // 3. Regex for common corporate entities with quotes (e.g. ООО "ВсеИнструменты.ру", ООО "Строй-Комплект", АО «Северсталь», ИП Иванов)
-  const corpMatch = fullText.match(/(?:ООО|АО|ПАО|ЗАО|НАО)\s*["«“]([^"»”\r\n]{2,60})["»”]|(?:ООО|АО|ПАО|ЗАО|НАО)\s+([А-Яа-яЁёA-Za-z0-9.\-_ ]{3,45})|ИП\s+([А-Яа-яЁёA-Za-z\-_]+(?:\s+[А-Яа-яЁёA-Za-z.\-_]+){1,2})/);
-  if (corpMatch) {
-    const found = corpMatch[0].split(/[,\s]+(?:ИНН|КПП|Адрес|Покупатель)\b/i)[0].trim();
-    const candidate = extractSupplierName(found);
+  // 3. Scan all corporate entities with quotes or full legal forms in document, skipping Buyer (ГЭС КОНСТРАКШН) and Banks
+  const corpRegex = /(?:Общество\s+с\s+ограниченной\s+ответственностью|Акционерное\s+общество|Закрытое\s+акционерное\s+общество|Публичное\s+акционерное\s+общество|ООО|OОО|АО|AO|ПАО|ЗАО|НАО)\s*(?:ТД\s+|ТК\s+|ГК\s+)?["«“]([^"»”\r\n]{2,70})["»”]|(?:ООО|OОО|АО|ПАО|ЗАО|НАО)\s+([А-Яа-яЁёA-Za-z0-9.\-_ ]{3,45})|ИП\s+([А-Яа-яЁёA-Za-z\-_]+(?:\s+[А-Яа-яЁёA-Za-z.\-_]+){1,2})/gi;
+  let cm: RegExpExecArray | null;
+  while ((cm = corpRegex.exec(fullText)) !== null) {
+    const rawMatch = cm[0];
+    if (isBuyerOrganization(rawMatch) || BANK_NAME_PATTERN.test(rawMatch)) continue;
+    const candidate = extractSupplierName(rawMatch);
     if (candidate && candidate.length > 2) return candidate;
   }
 
@@ -340,7 +360,7 @@ const RU_MONTHS: Record<string, string> = {
 
 export function normalizeExtractedUnit(rawUnit?: string): string {
   const u = (rawUnit || '').trim().toLowerCase().replace(/\.$/, '');
-  if (!u || u === 'шт' || u === 'штук' || u === 'штука' || u === 'adet' || u === 'ad' || u === 'pcs') return 'Adet';
+  if (!u || u === 'шт' || u === 'штук' || u === 'штука' || u === 'ед' || u === 'ед.изм' || u === 'ед. изм' || u === 'adet' || u === 'ad' || u === 'pcs') return 'Adet';
   if (u === 'компл' || u === 'комплект' || u === 'set' || u === 'takım') return 'Set';
   if (u === 'упак' || u === 'уп' || u === 'пачк' || u === 'пачка' || u === 'paket' || u === 'pk') return 'Paket';
   if (u === 'т' || u === 'тн' || u.startsWith('тонн') || u === 'ton') return 'Ton';
@@ -351,6 +371,8 @@ export function normalizeExtractedUnit(rawUnit?: string): string {
   if (u === 'л' || u.startsWith('литр') || u === 'lt' || u === 'litre') return 'Litre';
   if (u === 'рул' || u === 'рулон' || u === 'rulo') return 'Rulo';
   if (u === 'меш' || u === 'мешок' || u === 'torba') return 'Torba';
+  if (u === 'пар' || u === 'пара' || u === 'пары' || u === 'çift') return 'Çift';
+  if (u === 'маш' || u === 'машина' || u.startsWith('рейс')) return 'Sefer';
   return rawUnit || 'Adet';
 }
 
@@ -365,143 +387,243 @@ function isReadableDigitalText(text: string): boolean {
 }
 
 /**
- * Deterministically parses Russian & Turkish PDF digital invoice table rows (Счет на оплату, ВсеИнструменты.ру, 1С, УПД).
+ * Deterministically parses Russian & Turkish PDF digital invoice table rows (Счет на оплату, ВсеИнструменты.ру, 1С, УПД, КОМУС, Строительный двор, ПСК).
  * Extracts exact quantities, units, VAT-inclusive unit prices, and row totals.
  */
 export function extractDeterministicPdfTableRows(fullText: string, explicitTotal: number = 0): any[] {
   if (!fullText || !fullText.trim()) return [];
 
-  // Narrow down to the table region if header/footer markers exist
+  const UNIT_PAT = `(?:шт\\.?|штук[аи]?|компл\\.?|комплект|упак\\.?|уп\\.?|п\\.?\\s*м\\.?|пог\\.?\\s*м\\.?|м2|м²|кв\\.?\\s*м\\.?|м3|м³|куб\\.?\\s*м\\.?|м\\.?|тн|тонн[аы]?|т\\.?|кг\\.?|гр\\.?|л\\.?|литр[а-я]*|рул\\.?|рулон|меш\\.?|лист[а-я]*|пачк[а-я]*|пар[аы]?|бухт[а-я]*|бочк[а-я]*|канистр[а-я]*|ед\\.?|маш\\.?|рейс[а-я]*|adet|ad\\.?|ton|kg|m3|m2|mtül|mt|m|lt|paket|pk|torba|koli|rulo|takım|set|çift)`;
+  const QTY_PAT = `(?:\\d+(?:[\\s\\u00A0]\\d{3})*(?:[.,]\\d+)?)`;
+  const PRICES_BLOCK_PAT = `((?:(?:\\d{1,3}(?:[\\s\\u00A0.]\\d{3})*[.,]\\d{2}|\\d+[.,]\\d{2}|\\d{1,2}\\s*%|Без\\s*НДС|без\\s*ндс|-)[\\s\\t]*){2,8})`;
+
+  // Order A/B: <prefix> <qty> <unit> [optional integer weight like 0] <prices + optional % НДС>
+  const rowTailQtyFirstRx = new RegExp(
+    `^(.*?)[\\s\\t]+(${QTY_PAT})[\\s\\t]+(${UNIT_PAT})(?:[\\s\\t]+\\d{1,5})?[\\s\\t]+${PRICES_BLOCK_PAT}$`,
+    'i'
+  );
+  // Order C (КОМУС, ПРОМСТРОЙКОНТРАКТ): <prefix> <unit> <qty> <prices + optional % НДС>
+  const rowTailUnitFirstRx = new RegExp(
+    `^(.*?)[\\s\\t]+(${UNIT_PAT})[\\s\\t]+(${QTY_PAT})[\\s\\t]+${PRICES_BLOCK_PAT}$`,
+    'i'
+  );
+  // Standalone price-tail line (e.g. "3 рул 5 274,59 6 435,00...", "1 шт. 76 998,00 76 998,00", "2 пар 4 615,00 9 230,00")
+  const standalonePriceTailRx = new RegExp(
+    `^(?:${QTY_PAT}[\\s\\t]+${UNIT_PAT}|${UNIT_PAT}[\\s\\t]+${QTY_PAT})(?:[\\s\\t]+\\d{1,5})?[\\s\\t]+${PRICES_BLOCK_PAT}$`,
+    'i'
+  );
+
+  const matchRowTail = (str: string): { prefix: string; qty: number; rawUnit: string; pricesBlock: string } | null => {
+    const m1 = str.match(rowTailQtyFirstRx);
+    if (m1) {
+      const q = parseNumberSafe(m1[2]);
+      if (q > 0 && q < 1000000) {
+        return { prefix: m1[1].trim(), qty: q, rawUnit: m1[3].trim(), pricesBlock: m1[4].trim() };
+      }
+    }
+    const m2 = str.match(rowTailUnitFirstRx);
+    if (m2) {
+      const q = parseNumberSafe(m2[3]);
+      if (q > 0 && q < 1000000) {
+        return { prefix: m2[1].trim(), qty: q, rawUnit: m2[2].trim(), pricesBlock: m2[4].trim() };
+      }
+    }
+    return null;
+  };
+
+  const parseRegion = (regionText: string): any[] => {
+    const rawLines = regionText.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const headerSkipRx = /^(?:№|Код|Артикул|Товары\s*\((?:работы|услуги)|Предмет\s+счета|Наименование|Кол-во|Количество|Ед\.|Цена|Сумма|Итоговая|Ставка\s*НДС|Страна\s+происхождения|поставки|Sıra\s*No|Malzeme\s*Adı|Доставка\s+до\s*:|--\s*\d+\s+of\s+\d+\s*--|Страница\s+\d+\s+из\s+\d+)(?:\s|$)/i;
+    const summarySkipRx = /^(?:итого|всего|в\s*т\.?\s*ч\.?\s*ндс|в\s+том\s+числе\s+ндс|сумма\s+ндс|ндс|без\s*ндс|общий\s+вес|счет\s+содержит|к\s+оплате|toplam|genel\s*toplam|ara\s*toplam|kdv)/i;
+    const legalClauseRx = /^\d{1,2}\.\s*(?:Настоящий|Данный|Оплата|Условия|Срок|Датой|Цены|В\s+случае|Для\s+получения|Факт|Поставщик|Покупатель|Товар|Передача|К\s+отношениям|При\s+безналичной|При\s+получении)/i;
+
+    const logicalRows: string[] = [];
+    let currentBuffer = '';
+    let hasStartedTableRows = false;
+
+    for (const line of rawLines) {
+      if (line.startsWith('---') || /^--\s*\d+\s+of\s+\d+\s*--$/i.test(line)) continue;
+      if (headerSkipRx.test(line) && !matchRowTail(line)) continue;
+      if (legalClauseRx.test(line)) continue;
+      if (summarySkipRx.test(line)) {
+        if (currentBuffer && matchRowTail(currentBuffer)) {
+          logicalRows.push(currentBuffer);
+          currentBuffer = '';
+        }
+        continue;
+      }
+
+      const isPriceTailOnly = standalonePriceTailRx.test(line);
+      const isRowStartLine =
+        !isPriceTailOnly &&
+        !legalClauseRx.test(line) &&
+        (/^\d{1,3}(?:[\s\t.]+\d{4,16})?$/.test(line) ||
+         /^\d{1,3}(?:[\s\t.]+[A-Za-zА-Яа-я0-9\-_/]{4,20})?[\s\t]*[A-Za-zА-Яа-яЁёÇĞİÖŞÜçğıöşü]/.test(line) ||
+         /^\d{4,10}[\s\t]+[A-Za-zА-Яа-яЁё]/.test(line));
+
+      // Reset buffer only before the first row has started, or if pre-table garbage accumulated (>250 chars) before a row start
+      if (isRowStartLine && (!hasStartedTableRows || currentBuffer.length > 250)) {
+        hasStartedTableRows = true;
+        currentBuffer = line;
+      } else {
+        if (isRowStartLine) hasStartedTableRows = true;
+        currentBuffer = currentBuffer ? `${currentBuffer} ${line}` : line;
+      }
+
+      if (matchRowTail(currentBuffer)) {
+        logicalRows.push(currentBuffer);
+        currentBuffer = '';
+      }
+    }
+    if (currentBuffer && matchRowTail(currentBuffer)) {
+      logicalRows.push(currentBuffer);
+    }
+
+    const parsedItems: any[] = [];
+    for (const rowStr of logicalRows) {
+      const m = matchRowTail(rowStr);
+      if (!m) continue;
+
+      let prefix = m.prefix;
+      const qty = m.qty;
+      const rawUnit = m.rawUnit;
+      const pricesBlock = m.pricesBlock;
+
+      if (qty <= 0) continue;
+
+      // Extract leading row index and optional product code / article / barcode
+      let rowNo: number | undefined = undefined;
+      let productCode = '';
+      const idxMatch = prefix.match(/^(\d{1,3})(?:[.\s\t]+|(?=[А-Яа-яЁёA-Za-z]))(.*)$/);
+      if (idxMatch) {
+        rowNo = Number(idxMatch[1]);
+        prefix = idxMatch[2].trim();
+      }
+      const codeMatch = prefix.match(/^([A-Za-z0-9\-_.]{4,18})[\s\t]+(.*)$/);
+      if (codeMatch && /\d/.test(codeMatch[1]) && /[A-Za-zА-Яа-яЁёÇĞİÖŞÜçğıöşü]/.test(codeMatch[2])) {
+        productCode = codeMatch[1].trim();
+        prefix = codeMatch[2].trim();
+      }
+
+      // Clean ВсеИнструменты.ру availability/delivery-time columns from the end of item name
+      prefix = prefix
+        .replace(/[\s\t]*(?:в\s+наличии|под\s+заказ)(?:[\s\t]+(?:от\s+\d+\s+до\s+\d+|\d+)[\s\t]*раб\.?\s*дн\.?)?$/i, '')
+        .trim();
+
+      if (!prefix || prefix.length < 2 || summarySkipRx.test(prefix)) continue;
+
+      // Remove percentage tokens (e.g. "22%", "20%") before extracting currency amounts
+      const cleanPricesBlock = pricesBlock.replace(/\b\d{1,2}\s*%/g, ' ');
+      const priceTokens = cleanPricesBlock.match(/\d{1,3}(?:[\s\u00A0]\d{3})*[.,]\d{2}|\d+[.,]\d{2}/g) || [];
+      const prices = priceTokens.map(p => parseNumberSafe(p)).filter(n => n > 0 && n < 1e11);
+      if (prices.length === 0) continue;
+
+      // The last currency column on Russian/Turkish invoices is always the row's final payable total with VAT (Сумма / Сумма с НДС)
+      const totalPrice = prices[prices.length - 1];
+      let unitPrice = prices[0];
+      let unitPriceNet: number | undefined = undefined;
+      let discountAmount = 0;
+
+      // Priority 1: Find any unit price column (such as Цена с НДС in Поинтер) where qty * col === totalPrice
+      const priorCols = prices.slice(0, -1);
+      const exactGrossUnitCol = priorCols.find(p => Math.abs(qty * p - totalPrice) <= Math.max(0.5, qty * 0.02));
+      if (exactGrossUnitCol !== undefined) {
+        unitPrice = exactGrossUnitCol;
+        if (prices[0] < unitPrice && Math.abs(unitPrice / prices[0] - 1.22) <= 0.03) {
+          unitPriceNet = prices[0];
+        } else if (prices[0] < unitPrice && Math.abs(unitPrice / prices[0] - 1.20) <= 0.03) {
+          unitPriceNet = prices[0];
+        }
+      } else if (prices.length >= 3 && Math.abs(qty * prices[0] - prices[1]) <= 1.5) {
+        if (prices[1] > totalPrice) {
+          // Discount table: Цена (gross) | Сумма без скидки | Скидка | Итоговая сумма
+          unitPrice = prices[0];
+          discountAmount = Number((prices[1] - totalPrice).toFixed(2));
+        } else {
+          // Net + VAT table (e.g. КОМУС): Цена без НДС | Сумма без НДС | Сумма НДС | Сумма с НДС
+          unitPriceNet = prices[0];
+          unitPrice = Number((totalPrice / qty).toFixed(2));
+        }
+      } else {
+        unitPrice = Number((totalPrice / qty).toFixed(2));
+      }
+
+      if (isInvoiceHeaderOrAddressGarbage(prefix, qty, unitPrice, totalPrice)) {
+        continue;
+      }
+
+      const unit = normalizeExtractedUnit(rawUnit);
+      const trName = translateRussianMaterialToTurkish(prefix) || prefix;
+      const cat = normalizeCategoryName('', `${trName} ${prefix}`);
+
+      parsedItems.push({
+        invoiceLineNo: rowNo,
+        productCode,
+        materialName: trName,
+        originalName: prefix,
+        category: cat,
+        quantity: qty,
+        unit,
+        unitPrice,
+        ...(unitPriceNet !== undefined ? { unitPriceNet } : {}),
+        grossUnitPrice: unitPrice,
+        discountAmount,
+        totalPrice,
+        grossTotalPrice: totalPrice,
+        lineSource: 'invoice_pdf',
+        confidence: 0.99
+      });
+    }
+
+    // If PDF text layer was extracted bottom-to-top (e.g. ТруботоргРус where row 6 appears before row 1), sort ascending by invoiceLineNo
+    if (
+      parsedItems.length >= 2 &&
+      parsedItems.every(it => typeof it.invoiceLineNo === 'number') &&
+      parsedItems[0].invoiceLineNo > parsedItems[parsedItems.length - 1].invoiceLineNo
+    ) {
+      parsedItems.sort((a, b) => (a.invoiceLineNo || 0) - (b.invoiceLineNo || 0));
+    }
+
+    // If the PDF table lists net prices without VAT and VAT (20% or 22%) is added in the summary footer (e.g. ГК АТМОС),
+    // scale unitPrice and totalPrice to VAT-inclusive gross while preserving unitPriceNet.
+    if (parsedItems.length > 0 && explicitTotal > 0) {
+      const rawSum = parsedItems.reduce((acc, it) => acc + (Number(it.totalPrice) || 0), 0);
+      if (rawSum > 0) {
+        const ratio = explicitTotal / rawSum;
+        if (Math.abs(ratio - 1.22) <= 0.015 || Math.abs(ratio - 1.20) <= 0.015) {
+          for (const it of parsedItems) {
+            it.unitPriceNet = it.unitPrice;
+            it.netTotalPrice = it.totalPrice;
+            it.totalPrice = Number((it.totalPrice * ratio).toFixed(2));
+            it.grossTotalPrice = it.totalPrice;
+            it.unitPrice = Number((it.totalPrice / (it.quantity || 1)).toFixed(2));
+            it.grossUnitPrice = it.unitPrice;
+          }
+        }
+      }
+    }
+
+    return parsedItems;
+  };
+
+  // First try narrowed table region between table header and footer
   let tableRegion = fullText;
-  const headerMatch = tableRegion.match(/(?:Товары\s*\(работы,\s*услуги\)|Наименование\s+товара|Сумма\s+без\s+скидки|Итоговая\s+сумма|Malzeme\s+Adı)/i);
+  const headerMatch = tableRegion.match(/(?:Товары\s*\((?:работы,\s*услуги|услуги,\s*работы)\)|Предмет\s+счета|Наименование\s+товара|№\s+Товар\s+Кол|Сумма\s+без\s+скидки|Итоговая\s+сумма|Malzeme\s+Adı)/i);
   if (headerMatch && headerMatch.index !== undefined) {
     tableRegion = tableRegion.slice(headerMatch.index);
   }
-  const footerMatch = tableRegion.match(/\n\s*(?:Итого\s*:|Всего\s+наименований|Всего\s+к\s+оплате|Руководитель\s+организации|Уполномоченный\s+по\s+доверенности)/i);
+  const footerMatch = tableRegion.match(/\n\s*(?:Итого\s*:|Всего\s+наименований|Всего\s+к\s+оплате|Счет\s+содержит\s*:|Руководитель\s+организации|Уполномоченный\s+по\s+доверенности)/i);
   if (footerMatch && footerMatch.index !== undefined && footerMatch.index > 20) {
     tableRegion = tableRegion.slice(0, footerMatch.index);
   }
 
-  const rawLines = tableRegion.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const headerSkipRx = /^(?:№|Код|Товары\s*\(работы|Наименование|Кол-во|Ед\.|Цена|Сумма|Итоговая|Ставка\s+НДС|Страна\s+происхождения|Sıra\s*No|Malzeme\s*Adı)(?:\s|$)/i;
-  const summarySkipRx = /^(?:итого|всего|в\s*т\.?\s*ч\.?\s*ндс|в\s+том\s+числе\s+ндс|ндс|без\s*ндс|toplam|genel\s*toplam|ara\s*toplam|kdv)/i;
-
-  // Tail pattern at the end of a table row:
-  // <qty> <unit> <price1> <price2> [<price3>...]
-  const rowTailRx = /^(.*?)[\s\t]+(\d+(?:[\s\u00A0]\d{3})*(?:[.,]\d+)?)[\s\t]+(шт\.?|штук|компл\.?|комплект|упак\.?|уп\.?|п\.?\s*м\.?|пог\.?\s*м\.?|м2|м²|кв\.?\s*м\.?|м3|м³|куб\.?\s*м\.?|тн|тонн[аы]?|т\.?|кг\.?|гр\.?|л\.?|литр[а-я]*|рул\.?|меш\.?|лист[а-я]*|пачк[а-я]*|пар[аы]?|бухт[а-я]*|бочк[а-я]*|канистр[а-я]*|adet|ad\.?|ton|kg|m3|m2|mtül|mt|m|lt|paket|pk|torba|koli|rulo|takım|set)[\s\t]+((?:\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}[\s\t]*){1,6})$/i;
-
-  // Merge wrapped lines so each numbered table item is reconstructed into a single logical row
-  const logicalRows: string[] = [];
-  let currentBuffer = '';
-
-  for (const line of rawLines) {
-    if (line.startsWith('---')) continue;
-    if (headerSkipRx.test(line) && !rowTailRx.test(line)) continue;
-    if (summarySkipRx.test(line)) break;
-
-    const startsWithRowIdx = /^\d{1,3}(?:[\s\t.]+\d{5,16})?[\s\t]+[A-Za-zА-Яа-яЁёÇĞİÖŞÜçğıöşü]/.test(line);
-    if (startsWithRowIdx) {
-      if (currentBuffer && rowTailRx.test(currentBuffer)) {
-        logicalRows.push(currentBuffer);
-      }
-      // Always start a fresh row buffer when a new numbered item line starts (discards any pre-table header text)
-      currentBuffer = line;
-    } else {
-      currentBuffer = currentBuffer ? `${currentBuffer} ${line}` : line;
-    }
-
-    if (rowTailRx.test(currentBuffer)) {
-      logicalRows.push(currentBuffer);
-      currentBuffer = '';
-    }
-  }
-  if (currentBuffer && rowTailRx.test(currentBuffer)) {
-    logicalRows.push(currentBuffer);
+  const regionItems = parseRegion(tableRegion);
+  if (regionItems.length > 0) {
+    return regionItems;
   }
 
-  const parsedItems: any[] = [];
-  for (const rowStr of logicalRows) {
-    const m = rowStr.match(rowTailRx);
-    if (!m) continue;
-
-    let prefix = m[1].trim();
-    const qty = parseNumberSafe(m[2]);
-    const rawUnit = m[3].trim();
-    const pricesBlock = m[4].trim();
-
-    if (qty <= 0) continue;
-
-    // Extract leading row index and optional product code / EAN-13 barcode (e.g. "1 4606059020599 Машина углошлифовальная...")
-    let rowNo: number | undefined = undefined;
-    let productCode = '';
-    const idxMatch = prefix.match(/^(\d{1,3})[.\s\t]+(.*)$/);
-    if (idxMatch) {
-      rowNo = Number(idxMatch[1]);
-      prefix = idxMatch[2].trim();
-    }
-    const codeMatch = prefix.match(/^(\d{5,16})[\s\t]+(.*)$/);
-    if (codeMatch && /[A-Za-zА-Яа-яЁёÇĞİÖŞÜçğıöşü]/.test(codeMatch[2])) {
-      productCode = codeMatch[1].trim();
-      prefix = codeMatch[2].trim();
-    }
-
-    if (!prefix || prefix.length < 2 || summarySkipRx.test(prefix)) continue;
-
-    // Extract all decimal currency amounts from the prices block
-    const priceTokens = pricesBlock.match(/\d{1,3}(?:[\s\u00A0]\d{3})*[.,]\d{2}|\d+[.,]\d{2}/g) || [];
-    const prices = priceTokens.map(p => parseNumberSafe(p)).filter(n => n > 0 && n < 1e11);
-    if (prices.length === 0) continue;
-
-    // The last currency column on Russian/Turkish invoices is always the row's final payable total (Сумма / Итоговая сумма / Всего с НДС)
-    const totalPrice = prices[prices.length - 1];
-    let unitPrice = prices[0];
-    let discountAmount = 0;
-
-    // Case 1: Standard row without discount where qty * prices[0] === totalPrice
-    if (Math.abs(qty * unitPrice - totalPrice) <= 1.0) {
-      unitPrice = prices[0];
-    } else if (prices.length >= 3 && Math.abs(qty * prices[0] - prices[1]) <= 1.0) {
-      // Case 2: Row with "Цена | Сумма без скидки | Скидка | Сумма" (e.g. 4 * 13921 = 55684, discount = 15, final total = 55669)
-      // Preserve exact invoice Цена (13921, 19959, 308) as unitPrice and record the row discount!
-      unitPrice = prices[0];
-      if (prices.length >= 4 && Math.abs(prices[1] - prices[2] - totalPrice) <= 1.5) {
-        discountAmount = prices[2];
-      } else if (prices[1] > totalPrice) {
-        discountAmount = Number((prices[1] - totalPrice).toFixed(2));
-      }
-    } else {
-      // Case 3: УПД where prices[0] is Цена без НДС and last column is Стоимость с НДС
-      const matchingCol = prices.find(p => Math.abs(qty * p - totalPrice) <= 0.5);
-      if (matchingCol !== undefined) {
-        unitPrice = matchingCol;
-      } else {
-        unitPrice = Number((totalPrice / qty).toFixed(2));
-      }
-    }
-
-    const unit = normalizeExtractedUnit(rawUnit);
-    const trName = translateRussianMaterialToTurkish(prefix) || prefix;
-    const cat = normalizeCategoryName('', `${trName} ${prefix}`);
-
-    parsedItems.push({
-      invoiceLineNo: rowNo,
-      productCode,
-      materialName: trName,
-      originalName: prefix,
-      category: cat,
-      quantity: qty,
-      unit,
-      unitPrice,
-      grossUnitPrice: unitPrice,
-      discountAmount,
-      totalPrice,
-      grossTotalPrice: totalPrice,
-      lineSource: 'invoice_pdf',
-      confidence: 0.99
-    });
-  }
-
-  return parsedItems;
+  // Fallback for bottom-to-top PDF layouts (e.g. ТруботоргРус) where table header is printed below the rows
+  return parseRegion(fullText);
 }
 
 /**
@@ -516,16 +638,40 @@ export function fallbackExtractInvoiceFromTextOrCsv(
   const fullText = (textOrCsv || '').trim();
   const supplier = fallbackExtractSupplierFromText(fullText, fileName) || 'Tedarikçi Firma';
 
-  // 1. Extract Invoice / Offer Number
+  // 1. Extract Invoice / Offer Number (Strictly validated: must contain a digit and not be a bank account or header word)
   let invoiceNumber = '';
-  const invMatch =
-    fullText.match(/(?:Счет(?:\s+на\s+оплату)?|Счёт(?:\s+на\s+оплату)?|УПД|Fatura\s*No|Teklif\s*No|Belge\s*No|Invoice\s*(?:No|#)?)\s*(?:№|#|:)?\s*([A-Za-zА-Яа-я0-9\-_/]{2,30})/i) ||
-    fullText.match(/№\s*([A-Za-zА-Яа-я0-9\-_/]{2,25})\s+от/i);
-  if (invMatch && invMatch[1]) {
-    invoiceNumber = invMatch[1].trim();
-  } else if (fileName) {
-    const fnNum = fileName.match(/(\d{4}-\d{5,8}-\d{4,8})|(?:№|No|FT|TKF|INV)[_\-\s]*([A-Za-z0-9\-]{2,20})/i);
-    if (fnNum) invoiceNumber = (fnNum[1] || fnNum[2] || '').trim();
+  const invPatterns = [
+    /(?:^|[^А-Яа-яЁёA-Za-z])(?:Счет(?:\s+на\s+оплату|\s*-\s*договор|\s*-\s*оферта)?|Счёт(?:\s+на\s+оплату|\s*-\s*договор|\s*-\s*оферта)?|счету|сч\.|УПД|Спецификация|Соглашение(?:\s+на\s+поставку[^\r\n№N#]{0,40})?)\s*(?:№|N|#)\s*([A-Za-zА-Яа-яЁё0-9.\-_/]+(?:\s*-\s*[A-Za-zА-Яа-яЁё0-9.\-_/]+)?)\s+от(?=[\s\d«"]|$)/gi,
+    /(?:^|[^А-Яа-яЁёA-Za-z])(?:Счет(?:\s+на\s+оплату|\s*-\s*договор|\s*-\s*оферта)?|Счёт(?:\s+на\s+оплату|\s*-\s*договор|\s*-\s*оферта)?|УПД|Fatura\s*No|Teklif\s*No|Belge\s*No|Invoice\s*(?:No|#)?)\s*(?:№|N|#|:)\s*([A-Za-zА-Яа-яЁё0-9.\-_/]{1,30})/gi,
+    /(?:заказу\s+клиента|по\s+сч\.|по\s+счету)\s*(?:№|N|#)?\s*([A-Za-zА-Яа-яЁё0-9.\-_/]{2,25})/gi,
+    /(?:№|N)\s*([A-Za-zА-Яа-яЁё0-9.\-_/]{1,25})\s+от\s+[\d«"]/gi
+  ];
+
+  for (const pat of invPatterns) {
+    let m: RegExpExecArray | null;
+    while ((m = pat.exec(fullText)) !== null) {
+      const candidate = (m[1] || '').replace(/\s+/g, '').trim();
+      if (isValidInvoiceNumber(candidate)) {
+        invoiceNumber = candidate;
+        break;
+      }
+    }
+    if (invoiceNumber) break;
+  }
+
+  if (!invoiceNumber && fileName) {
+    const fnMatches = [
+      fileName.match(/(\d{4}-\d{5,8}-\d{4,8})/),
+      fileName.match(/(?:Счет|Счёт|№|No|FT|TKF|INV)[_\-\s]*([A-Za-zА-Яа-я0-9\-]{2,20})/i),
+      fileName.match(/^(STF\.\d{4,8}(?:-\d+)?)/i)
+    ];
+    for (const fm of fnMatches) {
+      const cand = (fm?.[1] || '').trim();
+      if (cand && isValidInvoiceNumber(cand)) {
+        invoiceNumber = cand;
+        break;
+      }
+    }
   }
   if (!invoiceNumber) {
     invoiceNumber = `BLG-${Date.now().toString().slice(-6)}`;
@@ -535,7 +681,7 @@ export function fallbackExtractInvoiceFromTextOrCsv(
   let date = new Date().toISOString().split('T')[0];
   const isoMatch = fullText.match(/\b(202\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b/);
   const dotMatch = fullText.match(/\b(0[1-9]|[12]\d|3[01])[./](0[1-9]|1[0-2])[./](202\d)\b/);
-  const ruDateMatch = fullText.match(/\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+(202\d)\b/i);
+  const ruDateMatch = fullText.match(/[«"]?(\d{1,2})[»"]?\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+(202\d)\b/i);
   if (isoMatch) {
     date = isoMatch[1];
   } else if (dotMatch) {
@@ -562,7 +708,8 @@ export function fallbackExtractInvoiceFromTextOrCsv(
   // 4. Extract Grand Total & Explicit VAT (НДС / KDV) from Labels
   let explicitTotal = 0;
   const totalRegexes = [
-    /(?:Всего\s+к\s+оплате|Итого\s+с\s+НДС|Всего\s+наименований[^\r\n]*?на\s+сумму|Итого|ВСЕГО|Genel\s+Toplam|Ödenecek\s+Tutar|Toplam\s+Tutar)\s*[:：;,\t ]*\s*(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+(?:[.,]\d{2})?)/gi
+    /(?:Всего\s+к\s+оплате|Итого\s+с\s+НДС|Всего\s+наименований[^\r\n]*?на\s+сумму|Итого(?!\s+НДС)|ВСЕГО(?!\s+НДС)|Genel\s+Toplam|Ödenecek\s+Tutar|Toplam\s+Tutar)\s*[:：;,\t ]*\s*(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+(?:[.,]\d{2})?)/gi,
+    /Всего\s+НДС\s+\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}\s+(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+[.,]\d{2})/gi
   ];
   for (const rgx of totalRegexes) {
     let m: RegExpExecArray | null;
@@ -576,7 +723,7 @@ export function fallbackExtractInvoiceFromTextOrCsv(
 
   let explicitTax = 0;
   const taxRegexes = [
-    /(?:В\s+том\s+числе\s+НДС|В\s+т\.?\s*ч\.?\s*НДС|Сумма\s+НДС|Итого\s+НДС|KDV\s*Tutarı|Toplam\s*KDV)(?:\s*\(\d+%?\))?\s*[:：;,\t ]*\s*(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+(?:[.,]\d{2})?)/gi
+    /(?:В\s+том\s+числе\s+НДС|В\s+т\.?\s*ч\.?\s*НДС|Сумма\s+НДС|Итого\s+НДС|Всего\s+НДС|KDV\s*Tutarı|Toplam\s*KDV)(?:\s*\(?[0-9]{1,2}%?\)?)?\s*[:：;,\t ]*\s*(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+(?:[.,]\d{2})?)/gi
   ];
   for (const rgx of taxRegexes) {
     let m: RegExpExecArray | null;
@@ -597,7 +744,7 @@ export function fallbackExtractInvoiceFromTextOrCsv(
     }
   }
 
-  // 6. If no PDF table rows matched (e.g. semicolon/comma CSV from Excel), parse CSV rows safely
+  // 6. If no PDF table rows matched (e.g. semicolon CSV from Excel), parse semicolon-delimited CSV rows safely (NEVER split plain PDF text by commas or layout tabs!)
   let sumLineTotals = fallbackItems.reduce((acc, it) => acc + (Number(it.totalPrice) || 0), 0);
 
   if (!isSummaryOnly && fallbackItems.length === 0) {
@@ -610,14 +757,10 @@ export function fallbackExtractInvoiceFromTextOrCsv(
       if (line.startsWith('---')) continue;
       if (headerKeywordRegex.test(line)) continue;
 
-      // Only split by comma if it's an actual multi-column CSV line (not a Russian text line with decimal comma)
-      const hasSemicolon = line.includes(';');
-      const hasTabs = line.includes('\t');
-      const commaCount = (line.match(/,/g) || []).length;
-      if (!hasSemicolon && !hasTabs && commaCount < 3) continue;
+      // Strictly require semicolon-separated Excel/CSV rows; never split PDF sentences by commas or tabs
+      if (!line.includes(';')) continue;
 
-      const delimiter = hasSemicolon ? ';' : (hasTabs ? '\t' : ',');
-      const parts = line.split(delimiter).map(p => p.replace(/^["']|["']$/g, '').trim()).filter(Boolean);
+      const parts = line.split(';').map(p => p.replace(/^["']|["']$/g, '').trim()).filter(Boolean);
       if (parts.length >= 2) {
         const joinedLower = parts.join(' ').toLowerCase();
         if (summaryKeywordRegex.test(parts[0]) || summaryKeywordRegex.test(joinedLower)) {
@@ -649,7 +792,7 @@ export function fallbackExtractInvoiceFromTextOrCsv(
         const numericValues: number[] = [];
 
         for (const col of afterCols) {
-          if (/^(?:шт\.?|т|тн|тонн[аы]?|м3|м³|м2|м²|п\.?\s*м\.?|м|кг|л|упак\.?|компл\.?|рул\.?|меш\.?|adet|ton|kg|m3|m2|m|lt|paket|torba|koli)$/i.test(col)) {
+          if (/^(?:шт\.?|т|тн|тонн[аы]?|м3|м³|м2|м²|п\.?\s*м\.?|м|кг|л|упак\.?|компл\.?|рул\.?|меш\.?|пар[аы]?|ед\.?|adet|ton|kg|m3|m2|m|lt|paket|torba|koli)$/i.test(col)) {
             unit = normalizeExtractedUnit(col);
           } else {
             const num = parseNumberSafe(col);
@@ -677,7 +820,7 @@ export function fallbackExtractInvoiceFromTextOrCsv(
             unitPrice = qty > 0 ? Number((totalPrice / qty).toFixed(2)) : totalPrice;
           }
 
-          if (totalPrice > 0) {
+          if (totalPrice > 0 && !isInvoiceHeaderOrAddressGarbage(rawOriginalName, qty, unitPrice, totalPrice)) {
             sumLineTotals += totalPrice;
             const trName = translateRussianMaterialToTurkish(rawOriginalName) || rawOriginalName;
             const cat = normalizeCategoryName('', `${trName} ${rawOriginalName}`);
@@ -916,14 +1059,19 @@ export async function processInvoiceTwoStages(params: {
       parseNumberSafe(rawExtracted.totalAmount?.value ?? rawExtracted.totalAmount ?? 0) ||
       parseNumberSafe(localSupplement.totalAmount?.value ?? 0);
 
+    const rawSummaryInvNo = extractStringSafe(rawExtracted.invoiceNumber);
+    const resolvedSummaryInvNo = isValidInvoiceNumber(rawSummaryInvNo)
+      ? rawSummaryInvNo
+      : (extractStringSafe(localSupplement.invoiceNumber) || rawSummaryInvNo);
+
     const finalSummaryExtracted: any = {
       documentType: rawExtracted.documentType || 'offer',
       supplier: resolvedSupplier,
       vendorName: resolvedSupplier,
       company: resolvedSupplier,
       seller: resolvedSupplier,
-      taxId: extractStringSafe(rawExtracted.taxId),
-      invoiceNumber: extractStringSafe(rawExtracted.invoiceNumber) || extractStringSafe(localSupplement.invoiceNumber),
+      taxId: extractStringSafe(rawExtracted.taxId) || extractVendorInn(extractedPdfText),
+      invoiceNumber: resolvedSummaryInvNo,
       date: extractStringSafe(rawExtracted.date) || extractStringSafe(localSupplement.date, new Date().toISOString().split('T')[0]),
       currency: extractStringSafe(rawExtracted.currency, 'RUB'),
       subtotal: parseNumberSafe(rawExtracted.subtotal?.value ?? rawExtracted.subtotal ?? resolvedTotal),
@@ -1220,7 +1368,11 @@ export async function processInvoiceTwoStages(params: {
       };
     })
     .filter((it: any) => {
-      if (isFreightItem(`${it.materialName || ''} ${it.originalName || ''}`)) {
+      const fullItemName = `${it.materialName || ''} ${it.originalName || ''}`;
+      if (isInvoiceHeaderOrAddressGarbage(fullItemName, it.quantity, it.unitPrice, it.totalPrice)) {
+        return false;
+      }
+      if (isFreightItem(fullItemName)) {
         excludedFreightNetSum += Number(it.netTotalPrice || it.unitPriceNet * it.quantity) || 0;
         excludedFreightGrossSum += Number(it.grossTotalPrice || it.totalPrice) || 0;
         return false;
@@ -1231,16 +1383,33 @@ export async function processInvoiceTwoStages(params: {
   // ============================================================================
   // MATHEMATICAL RECONCILIATION & AUTO-REPAIR LAYER (4 STAGES)
   // ============================================================================
-  const pdfTableItems = (localFallback.items || []).filter(
-    (it: any) => !isFreightItem(`${it.materialName || ''} ${it.originalName || ''}`)
-  );
+  let pdfFreightGrossSum = 0;
+  let pdfFreightNetSum = 0;
+  const pdfTableItems = (localFallback.items || []).filter((it: any) => {
+    const fullItemName = `${it.materialName || ''} ${it.originalName || ''}`;
+    if (isInvoiceHeaderOrAddressGarbage(fullItemName, it.quantity, it.unitPrice, it.totalPrice)) {
+      return false;
+    }
+    if (isFreightItem(fullItemName)) {
+      const fGross = Number(it.grossTotalPrice || it.totalPrice) || 0;
+      const fNet = defaultVatPct > 0 ? Number((fGross / (1 + defaultVatPct / 100)).toFixed(2)) : fGross;
+      pdfFreightGrossSum += fGross;
+      pdfFreightNetSum += fNet;
+      return false;
+    }
+    return true;
+  });
+  if (excludedFreightGrossSum === 0 && pdfFreightGrossSum > 0) {
+    excludedFreightGrossSum = pdfFreightGrossSum;
+    excludedFreightNetSum = pdfFreightNetSum;
+  }
   const pdfTableSum = pdfTableItems.reduce((s: number, it: any) => s + (Number(it.totalPrice) || 0), 0);
   const targetGoodsTotal = rawTotalAmount > excludedFreightGrossSum
     ? Number((rawTotalAmount - excludedFreightGrossSum).toFixed(2))
     : rawTotalAmount;
 
   // STAGE 1: Deterministic PDF Digital Table Cross-Check & Lock
-  if (pdfTableItems.length > 0 && targetGoodsTotal > 0 && Math.abs(pdfTableSum - targetGoodsTotal) <= 2.0) {
+  if (pdfTableItems.length > 0 && targetGoodsTotal > 0 && Math.abs(pdfTableSum - targetGoodsTotal) <= 2.5) {
     if (mappedItems.length === pdfTableItems.length) {
       mappedItems = mappedItems.map((aiItem: any, idx: number) => {
         const pdfRow = pdfTableItems[idx];
@@ -1444,14 +1613,24 @@ export async function processInvoiceTwoStages(params: {
     ? Number((finalTotalAmount - resolvedTaxAmount).toFixed(2))
     : parseNumberSafe(standardized.subtotal?.value ?? standardized.subtotal ?? rawExtracted.subtotal?.value ?? finalTotalAmount);
 
+  const candidateInvNos = [
+    extractStringSafe(standardized.invoiceNumber),
+    extractStringSafe(rawExtracted.invoiceNumber),
+    extractStringSafe(localFallback.invoiceNumber)
+  ];
+  const resolvedInvoiceNumber =
+    candidateInvNos.find(n => isValidInvoiceNumber(n)) ||
+    candidateInvNos.find(Boolean) ||
+    `BLG-${Date.now().toString().slice(-6)}`;
+
   const finalExtracted: any = {
     documentType: standardized.documentType || rawExtracted.documentType || 'invoice',
     supplier: resolvedSupplier,
     vendorName: resolvedSupplier,
     company: resolvedSupplier,
     seller: resolvedSupplier,
-    taxId: extractStringSafe(standardized.taxId) || extractStringSafe(rawExtracted.taxId),
-    invoiceNumber: extractStringSafe(standardized.invoiceNumber) || extractStringSafe(rawExtracted.invoiceNumber) || extractStringSafe(localFallback.invoiceNumber),
+    taxId: extractStringSafe(standardized.taxId) || extractStringSafe(rawExtracted.taxId) || extractVendorInn(extractedPdfText),
+    invoiceNumber: resolvedInvoiceNumber,
     date: resolvedDateStr,
     currency: resolvedCurrency,
     subtotal: finalSubtotalAmount,

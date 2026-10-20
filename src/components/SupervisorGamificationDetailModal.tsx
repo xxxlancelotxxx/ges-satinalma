@@ -73,9 +73,9 @@ export const SupervisorGamificationDetailModal: React.FC<Props> = ({
                 <span>•</span>
                 <span>Toplam İşlem: <strong className="text-slate-200">{raw.totalTransactions}</strong></span>
                 <span>•</span>
-                <span>Toplam Harcama: <strong className="text-slate-200">{formatRuble(raw.totalSpend || Math.max(0, raw.totalListPrice - raw.totalSavings))}</strong></span>
+                <span>İndirimli Alım Toplamı: <strong className="text-slate-200">{formatRuble(raw.totalSpend || Math.max(0, raw.totalListPrice - raw.totalSavings))}</strong></span>
                 <span>•</span>
-                <span>Kazanılan İndirim: <strong className="text-emerald-400">{formatRuble(raw.totalSavings)}</strong></span>
+                <span>Kazanılan Tasarruf: <strong className="text-emerald-400">+{formatRuble(raw.totalSavings)} (%{raw.savingsRatePct} İskonto)</strong></span>
                 <span>•</span>
                 <span>Genel Sıralama: <strong className="text-amber-400">#{profile.mvpRank} MVP</strong></span>
               </div>
@@ -124,18 +124,18 @@ export const SupervisorGamificationDetailModal: React.FC<Props> = ({
                   <div className="mt-1.5">
                     <span className="text-[10px] text-slate-400 block font-semibold">Kazanılan İndirim</span>
                     <div className="text-base font-black text-emerald-600 font-mono truncate" title={formatRuble(raw.totalSavings)}>
-                      {formatRuble(raw.totalSavings)}
+                      +{formatRuble(raw.totalSavings)}
                     </div>
                   </div>
 
-                  {/* Toplam Harcama (Sipariş Tutarı) */}
+                  {/* Toplam İndirimli Alım (Sipariş Tutarı) */}
                   <div className="mt-1.5 pt-1.5 border-t border-slate-200/60">
-                    <span className="text-[10px] text-slate-400 block font-semibold">Toplam Harcama</span>
+                    <span className="text-[10px] text-slate-400 block font-semibold">İndirimli Faturalar Toplamı</span>
                     <div className="text-xs font-bold text-slate-800 font-mono truncate" title={formatRuble(raw.totalSpend || Math.max(0, raw.totalListPrice - raw.totalSavings))}>
                       {formatRuble(raw.totalSpend || Math.max(0, raw.totalListPrice - raw.totalSavings))}
                     </div>
                     <span className="text-[10px] text-slate-400 block mt-0.5 truncate">
-                      Liste: {formatRuble(raw.totalListPrice)}
+                      İlk Liste: {formatRuble(raw.totalListPrice)} (Net %{raw.savingsRatePct} İndirim)
                     </span>
                   </div>
                 </div>

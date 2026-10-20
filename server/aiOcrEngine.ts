@@ -2,6 +2,12 @@
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import crypto from 'crypto';
 import * as XLSX from 'xlsx';
+import {
+  areVendorsEqual,
+  getCoreVendorKey,
+  normalizeVendorName,
+  isValidInvoiceNumber
+} from '../src/utils/vendorNormalizer';
 
 export const extractStringSafe = (val: any, fallback: string = ''): string => {
   if (val === undefined || val === null) return fallback;
@@ -577,28 +583,25 @@ export function checkDuplicateInvoice(
 
   const rawNum = String(newInvoice.invoiceNumber || '').trim();
   const cleanNum = rawNum.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
-  const isGenericGeneratedNum =
-    !rawNum ||
-    rawNum.startsWith('FT-') ||
-    rawNum.startsWith('TKF-') ||
-    rawNum.startsWith('ARCH-') ||
-    rawNum.startsWith('BLG-');
+  const isNewNumValid = isValidInvoiceNumber(rawNum);
 
-  const cleanSupplier = String(newInvoice.supplier || '').trim().toLowerCase();
+  const coreNewSupplier = getCoreVendorKey(newInvoice.supplier || '');
   const newHash = (newInvoice.fileHash || '').toLowerCase();
 
   for (const existing of existingInvoices) {
     if (existing.isDeleted) continue;
 
     const existSupplierRaw = String(existing.supplier || existing.vendorName || '').trim();
-    const existSupplier = existSupplierRaw.toLowerCase();
+    const existSupplierClean = normalizeVendorName(existSupplierRaw) || existSupplierRaw;
+    const coreExistSupplier = getCoreVendorKey(existSupplierRaw);
     const existNumRaw = String(existing.invoiceNumber || existing.invoiceNo || '').trim();
     const existNum = existNumRaw.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+    const isExistNumValid = isValidInvoiceNumber(existNumRaw);
     const existAmount = Number(existing.totalAmount || existing.agreedPrice || existing.offerPrice || 0);
     const existDate = String(existing.date || existing.orderDate || '').trim();
     const existJobsite = String(existing.jobsiteName || '').trim();
 
-    // 1. Exact File Hash match (Aynı dosya tekrar yüklenmişse - fileHash veya fileUrl içindeki SHA-256)
+    // 1. Exact File Hash match (Birebir aynı PDF/görüntü dosyası tekrar yüklenmişse - SHA-256)
     const existHashes = [
       (existing.fileHash || '').toLowerCase(),
       extractShaFromUrl(existing.fileUrl),
@@ -612,48 +615,44 @@ export function checkDuplicateInvoice(
         matchType: 'hash_size',
         existingInvoice: existing,
         similarityScore: 1.0,
-        message: `Bu fatura sistemde kayıtlı! Yüklediğiniz belge daha önce "${existSupplierRaw || 'Tedarikçi'}" (Fatura No: ${existNumRaw || '-'}, Tarih: ${existDate || '-'}, Tutar: ${existAmount.toLocaleString('tr-TR')} ₽${existJobsite ? `, Şantiye: ${existJobsite}` : ''}) olarak sisteme yüklenmiş.`
+        message: `Bu fatura sistemde kayıtlı! Yüklediğiniz belge daha önce "${existSupplierClean || 'Tedarikçi'}" (Fatura No: ${isExistNumValid ? existNumRaw : '-'}, Tarih: ${existDate || '-'}, Tutar: ${existAmount.toLocaleString('tr-TR')} ₽${existJobsite ? `, Şantiye: ${existJobsite}` : ''}) olarak sisteme yüklenmiş.`
       };
     }
 
-    // 2. Exact Vendor + Invoice Number match (veya özgün fatura numarası + aynı tutar)
-    const isExistGeneric =
-      !existNumRaw ||
-      existNumRaw.startsWith('FT-EXCEL-') ||
-      existNumRaw.startsWith('TKF-') ||
-      existNumRaw.startsWith('ARCH-') ||
-      existNumRaw.startsWith('BLG-');
+    // Check if both records strictly belong to the SAME supplier (by INN or Core Vendor Key)
+    const isSameSupplier =
+      areVendorsEqual(newInvoice.supplier, existSupplierRaw) ||
+      (coreNewSupplier.length >= 3 &&
+        coreExistSupplier.length >= 3 &&
+        calculateStringSimilarity(coreNewSupplier, coreExistSupplier) >= 0.88);
 
-    if (!isGenericGeneratedNum && !isExistGeneric && cleanNum && existNum && cleanNum === existNum) {
-      const vendorSim = calculateStringSimilarity(cleanSupplier, existSupplier);
-      const isSameAmount = newInvoice.totalAmount > 0 && existAmount > 0 && Math.abs(newInvoice.totalAmount - existAmount) < 5;
-      if (
-        vendorSim > 0.5 ||
-        (cleanSupplier && existSupplier && (cleanSupplier.includes(existSupplier) || existSupplier.includes(cleanSupplier))) ||
-        (cleanNum.length >= 3 && isSameAmount)
-      ) {
-        return {
-          isDuplicate: true,
-          matchType: 'exact',
-          existingInvoice: existing,
-          similarityScore: 1.0,
-          message: `Bu fatura sistemde kayıtlı! "${existNumRaw}" numaralı ve "${existSupplierRaw}" tedarikçili fatura daha önce ${existDate || 'sistemde'} tarihinde (${existJobsite || 'Şantiye'} - ${existAmount.toLocaleString('tr-TR')} ₽) kaydedilmiş.`
-        };
-      }
+    if (!isSameSupplier) {
+      // Never flag an invoice from a DIFFERENT supplier as a duplicate just because invoice numbers collide
+      continue;
     }
 
-    // 3. Similar Supplier + Same Date + Same Amount
-    if (newInvoice.totalAmount > 0 && existAmount > 0 && Math.abs(newInvoice.totalAmount - existAmount) < 1.0) {
-      const vendorSim = calculateStringSimilarity(cleanSupplier, existSupplier);
-      const isSameDate = newInvoice.date && existDate && newInvoice.date === existDate;
+    // 2. Same Supplier + Same Valid Invoice Number
+    if (isNewNumValid && isExistNumValid && cleanNum && existNum && cleanNum === existNum) {
+      return {
+        isDuplicate: true,
+        matchType: 'exact',
+        existingInvoice: existing,
+        similarityScore: 1.0,
+        message: `Bu fatura sistemde kayıtlı! "${existNumRaw}" numaralı ve "${existSupplierClean}" tedarikçili fatura daha önce ${existDate || 'sistemde'} tarihinde (${existJobsite || 'Şantiye'} - ${existAmount.toLocaleString('tr-TR')} ₽) kaydedilmiş.`
+      };
+    }
 
-      if (vendorSim > 0.72 && isSameDate) {
+    // 3. Same Supplier + Same Date + Same Amount (only when invoice numbers are not two distinct valid numbers)
+    const hasDistinctValidNumbers = isNewNumValid && isExistNumValid && cleanNum !== existNum;
+    if (!hasDistinctValidNumbers && newInvoice.totalAmount > 0 && existAmount > 0 && Math.abs(newInvoice.totalAmount - existAmount) < 1.0) {
+      const isSameDate = Boolean(newInvoice.date && existDate && newInvoice.date === existDate);
+      if (isSameDate) {
         return {
           isDuplicate: true,
           matchType: 'content_similar',
           existingInvoice: existing,
-          similarityScore: vendorSim,
-          message: `Bu fatura sistemde kayıtlı! "${existSupplierRaw}" tedarikçisine ait aynı tarih (${existDate}) ve birebir aynı tutarda (${existAmount.toLocaleString('tr-TR')} ₽) bir fatura zaten sistemde mevcut (Fatura No: ${existNumRaw || '-'}).`
+          similarityScore: 0.95,
+          message: `Bu fatura sistemde kayıtlı! "${existSupplierClean}" tedarikçisine ait aynı tarih (${existDate}) ve birebir aynı tutarda (${existAmount.toLocaleString('tr-TR')} ₽) bir fatura zaten sistemde mevcut (Fatura No: ${isExistNumValid ? existNumRaw : '-'}).`
         };
       }
     }

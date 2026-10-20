@@ -3,7 +3,7 @@ import './server/envLoader';
 import { processItem } from './src/utils/aiDecisionEngine';
 import { comparisonMultiplierForVat } from './src/utils/vatBasis';
 import { normalizeStandardUnit, getMaterialBenchmarkUnit, convertMaterialUnit, areUnitsConvertible, extractRebarDiameter } from './src/utils/constructionUnitConverter';
-import { normalizeVendorName, getVendorKey, areVendorsEqual } from './src/utils/vendorNormalizer';
+import { normalizeVendorName, getVendorKey, areVendorsEqual, isValidInvoiceNumber, isInvoiceHeaderOrAddressGarbage } from './src/utils/vendorNormalizer';
 import { normalizeCategoryName, CANONICAL_28_CATEGORIES, translateRussianMaterialToTurkish, ensureRussianOriginalName, resolveItemCategory } from './src/utils/categoryClassifier';
 import { analyzeMaterialSegment } from './src/utils/materialSegmentIntelligence';
 import { splitGroupBySpec, getProductTypeLabel, ensureComparisonGroupIntegrity } from './src/utils/materialGroupIntegrity';
@@ -1212,9 +1212,48 @@ function isFreightOrServiceLineItemServer(text: string, unitStr?: string): boole
   return /шлифователь|шлифовка|аренда|kiralama|монтаж|демонтаж|ремонт|доставк|организация\s*доставк|грузоперевоз|перевозк|транспортн.*услуг|автоуслуг|манипулятор|логистик|погруз|разгруз|услуг[аи]\s+по|\bnakliye\b|teslimat\s*hizmet|kargo\s*bedel|kesim\s*bedel|kesim\s*hizmet/i.test(t);
 }
 
+const REPAIRED_INVOICE_METADATA_BY_ID: Record<string, { invoiceNumber?: string; supplier?: string; totalAmount?: number }> = {
+  'inv_1792413801704': { invoiceNumber: 'М000007544', supplier: 'ООО "ТруботоргРус"', totalAmount: 167738.45 },
+  'inv_1792407883878': { invoiceNumber: 'УТ-7287', supplier: 'ООО "М.С.К"' },
+  'inv_1792412626820': { invoiceNumber: '13334', supplier: 'ООО "Системные Решения"' },
+  'inv_1792407873956': { invoiceNumber: '266549', supplier: 'ООО "САТУРН ЦЕНТР"' },
+  'inv_1792412482372': { invoiceNumber: 'ЦБ-416', supplier: 'ООО "ПРО КОНСТРУКТИВ"' },
+  'inv_1792412824898': { invoiceNumber: '23336', supplier: 'ООО "ТД Альбия"' },
+  'inv_1792413730254': { invoiceNumber: '208/245730', supplier: 'АО "ТД Электротехмонтаж"' },
+  'inv_1792414842981': { invoiceNumber: '12', supplier: 'ООО "СТРОЙ УСПЕХ"' },
+  'inv_1792427761622': { invoiceNumber: 'СЭТ.П-40070014', supplier: 'ООО "ТОРГОВЫЙ ДОМ ТУЛА-СТАЛЬ"' },
+  'inv_1792409666052': { invoiceNumber: 'УТ-1057', supplier: 'ООО "ПСТ Групп"' },
+  'inv_1792409439171': { invoiceNumber: '24181', supplier: 'ООО "САМ"' },
+  'inv_1792408301092': { invoiceNumber: '14636', supplier: 'ООО "ГК АТМОС"' },
+  'inv_1792412522551': { invoiceNumber: '3612993-1', supplier: 'ООО "Строительный двор. Комплектация"' },
+  'inv_1792412854070': { invoiceNumber: '3612993', supplier: 'ООО "Строительный двор. Комплектация"' }
+};
+
+function resolveCleanInvoiceNumber(rawNum: string, rawFileName?: string, invId?: string): string {
+  if (invId && REPAIRED_INVOICE_METADATA_BY_ID[invId]?.invoiceNumber) {
+    return REPAIRED_INVOICE_METADATA_BY_ID[invId].invoiceNumber!;
+  }
+  const trimmed = (rawNum || '').trim();
+  if (!trimmed || trimmed.toLowerCase() === 'б/н' || isValidInvoiceNumber(trimmed) || /^(?:FT-|TKF-|ARCH-|BLG-)/i.test(trimmed)) {
+    return trimmed;
+  }
+  // If trimmed is a corrupted Russian word like "действителен", "-оферта", "-договор", recover from filename if possible
+  if (rawFileName) {
+    const fnMatch =
+      rawFileName.match(/(?:Счет|Счёт|№|N)\s*([A-Za-zА-Яа-я0-9.\-_/]{2,20})/i) ||
+      rawFileName.match(/^(STF\.\d{4,8}(?:-\d+)?)/i);
+    if (fnMatch && fnMatch[1] && isValidInvoiceNumber(fnMatch[1])) {
+      return fnMatch[1];
+    }
+  }
+  return trimmed;
+}
+
 function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
   if (!inv) return inv;
-  const cleanSupplier = normalizeVendorName(toSafeString(inv.supplier || inv.vendorName, ''));
+  const repairedMeta = REPAIRED_INVOICE_METADATA_BY_ID[String(inv.id || '')];
+  const rawSupplierCandidate = repairedMeta?.supplier || toSafeString(inv.supplier || inv.vendorName, '');
+  const cleanSupplier = normalizeVendorName(rawSupplierCandidate);
   let rawItems = Array.isArray(inv.items) ? inv.items : [];
   const pMatchHasVerifiedPdfLines = Boolean(
     pMatch &&
@@ -1244,7 +1283,7 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
     return s + baseU * (Number(x?.quantity) || 1);
   }, 0);
   const rawSumStoredUnitQty = rawItems.reduce((s: number, x: any) => s + (Number(x?.unitPrice) || 0) * (Number(x?.quantity) || 1), 0);
-  const invTotal = Number(inv.totalAmount) || 0;
+  const invTotal = Number(repairedMeta?.totalAmount ?? inv.totalAmount) || 0;
   const invTax = Number(inv.taxAmount) || 0;
 
   // Prizma faturasında nakliye yalnızca belgedeki / STF'deki açık nakliye satırlarından gelir. Fatura kaydında
@@ -1266,10 +1305,13 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
     rawItems.some((x: any) => String(x?.id || '').startsWith('prizma_row_'))
   );
 
-  // Filter out freight / delivery / service lines when there are multiple items or Prizma STF items
+  // Filter out header/address garbage AND freight / delivery / service lines when there are multiple items or Prizma STF items
   const filteredRawItems = rawItems.filter((it: any) => {
     if (!it || typeof it !== 'object') return false;
     const itemText = `${it.materialName || ''} ${it.originalName || ''}`;
+    if (isInvoiceHeaderOrAddressGarbage(itemText, it.quantity, it.unitPrice, it.totalPrice)) {
+      return false;
+    }
     if ((rawItems.length > 1 || isPrizmaOrigin) && isFreightOrServiceLineItemServer(itemText, it.unit)) {
       if (!excludedFreightNetSum && !excludedFreightGrossSum) {
         trackedFreightRow = true;
@@ -1473,9 +1515,16 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
     ? normItems[0].category
     : smartNormalizeCategory(toSafeString(inv.category, 'Genel'), '');
 
+  const cleanInvoiceNo = resolveCleanInvoiceNumber(
+    toSafeString(inv.invoiceNumber, ''),
+    toSafeString(inv.rawFileName || inv.fileName, ''),
+    String(inv.id || '')
+  );
+
   return {
     ...inv,
-    invoiceNumber: toSafeString(inv.invoiceNumber, ''),
+    totalAmount: invTotal,
+    invoiceNumber: cleanInvoiceNo,
     supplier: cleanSupplier,
     vendorName: cleanSupplier,
     category: toSafeString(invCat, 'Genel'),
@@ -1665,11 +1714,56 @@ async function getInvoicesCached() {
       getDeletionLedgerCached()
     ]);
     const allDocs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+    const rawDocById = new Map<string, any>(allDocs.map(d => [String(d.id), d]));
 
     const allRecords = enrichAndNormalizeInvoiceRecords(
-      allDocs.filter((i: any) => i.isPermanentlyDeleted !== true && !ledger.ids.has(i.id)),
+      allDocs.filter((i: any) =>
+        i.isPermanentlyDeleted !== true &&
+        !ledger.ids.has(i.id) &&
+        !String(i.id).startsWith('inv_prizma_') &&
+        !String(i.id).startsWith('prizma_') &&
+        (i.prizmaSource !== true || String(i.id).startsWith('inv_sync_') || String(i.id).startsWith('inv_cmp_'))
+      ),
       prizmaInvs
     );
+
+    // One-time background persistence of repaired invoice numbers ("действителен" etc.) and cleaned supplier names to Firestore
+    if (db && !(globalThis as any).__repairedCorruptedInvoiceMetaDone) {
+      (globalThis as any).__repairedCorruptedInvoiceMetaDone = true;
+      (async () => {
+        try {
+          let updatedCount = 0;
+          for (const normRec of allRecords) {
+            const orig = rawDocById.get(String(normRec.id));
+            if (!orig) continue;
+            const origNum = String(orig.invoiceNumber || '').trim();
+            const origSup = String(orig.supplier || '').trim();
+            const needsRepair =
+              Boolean(REPAIRED_INVOICE_METADATA_BY_ID[String(normRec.id)]) ||
+              origNum !== String(normRec.invoiceNumber || '').trim() ||
+              (origSup !== String(normRec.supplier || '').trim() && /ИНН|КПП|Адрес|Москва|область|Россия|тел\./i.test(origSup));
+            if (needsRepair && normRec.supplier) {
+              const patch: Record<string, any> = {
+                invoiceNumber: normRec.invoiceNumber,
+                supplier: normRec.supplier,
+                vendorName: normRec.supplier
+              };
+              if (REPAIRED_INVOICE_METADATA_BY_ID[String(normRec.id)]?.totalAmount) {
+                patch.totalAmount = normRec.totalAmount;
+              }
+              await updateDoc(doc(db, 'invoices', String(normRec.id)), patch);
+              updatedCount++;
+            }
+          }
+          if (updatedCount > 0) {
+            console.log(`[SELF-HEAL] Cleaned and persisted ${updatedCount} invoice records (invoiceNumber & canonical supplier) in Firestore.`);
+          }
+        } catch (healErr: any) {
+          console.warn('[SELF-HEAL WARN]:', healErr?.message || healErr);
+        }
+      })();
+    }
+
     // Keep complete archive (active + trash) in local backup shield
     saveLocalBackup('invoices.json', allRecords);
 
@@ -5637,25 +5731,30 @@ app.post('/api/discounts', async (req, res) => {
     const reqDate = String(req.body.orderDate || '').trim();
 
     const { data: curInvsForDup } = await getInvoicesCached();
+    const isReqInvValid = isValidInvoiceNumber(reqInvoiceNo);
+    const cleanReqInv = reqInvoiceNo.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
     const invoiceDuplicate = activeDiscounts.find(d => {
       if (d.isDeleted) return false;
       const sameVendor = areVendorsEqual(d.vendorName, cleanVendorName);
+      if (!sameVendor) return false;
       const dInvoiceNo = String(d.invoiceNo || '').trim();
+      const isDInvValid = isValidInvoiceNumber(dInvoiceNo);
+      const cleanDInv = dInvoiceNo.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
       const dAmount = Number(d.agreedPrice) || Number(d.offerPrice) || 0;
       const dDate = String(d.orderDate || '').trim();
 
-      if (dInvoiceNo.startsWith('TKF-') || dInvoiceNo.startsWith('ARCH-') || dInvoiceNo.startsWith('FT-EXCEL-') || dInvoiceNo.startsWith('FT-')) return false;
-      
-      if (reqInvoiceNo && !reqInvoiceNo.startsWith('FT-') && dInvoiceNo && reqInvoiceNo.toLowerCase() === dInvoiceNo.toLowerCase() && sameVendor) return true;
-      if (!reqInvoiceNo && sameVendor && reqAmount > 0 && Math.abs(reqAmount - dAmount) < 1 && reqDate === dDate) return true;
+      if (isReqInvValid && isDInvValid && cleanReqInv && cleanReqInv === cleanDInv) return true;
+      if (!isReqInvValid && reqAmount > 0 && Math.abs(reqAmount - dAmount) < 1 && reqDate === dDate) return true;
 
       return false;
     }) || curInvsForDup.find(inv => {
       if (inv.isDeleted) return false;
       const sameVendor = areVendorsEqual(inv.supplier || inv.vendorName, cleanVendorName);
+      if (!sameVendor) return false;
       const iNo = String(inv.invoiceNumber || inv.invoiceNo || '').trim();
-      if (!reqInvoiceNo || reqInvoiceNo.startsWith('FT-') || !iNo || iNo.startsWith('TKF-') || iNo.startsWith('ARCH-') || iNo.startsWith('FT-EXCEL-')) return false;
-      return reqInvoiceNo.toLowerCase() === iNo.toLowerCase() && sameVendor;
+      const isIInvValid = isValidInvoiceNumber(iNo);
+      const cleanIInv = iNo.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+      return isReqInvValid && isIInvValid && Boolean(cleanReqInv) && cleanReqInv === cleanIInv;
     });
 
     if (invoiceDuplicate && !req.body.forceSave && !req.body.forceSaveDuplicate) {
@@ -6131,7 +6230,8 @@ app.get('/api/invoices', async (req, res) => {
     let cleanFileUrl = inv.fileUrl;
     if (cleanFileUrl && typeof cleanFileUrl === 'string' && cleanFileUrl.startsWith('data:')) cleanFileUrl = null;
     const { fileData, fileContentBase64, ...rest } = inv;
-    return { ...rest, fileUrl: cleanFileUrl };
+    const cleanSupplier = normalizeVendorName(inv.supplier || inv.vendorName) || inv.supplier || inv.vendorName || '';
+    return { ...rest, supplier: cleanSupplier, vendorName: cleanSupplier, fileUrl: cleanFileUrl };
   });
 
   const page = parseInt((req.query.page as string) || "1", 10);
@@ -6210,17 +6310,18 @@ app.post('/api/invoices', async (req, res) => {
         return true;
       }
 
-      // Disregard generated TKF-/ARCH-/FT-EXCEL- invoices when checking invoice number duplicates
-      if (iInvoiceNo.startsWith('TKF-') || iInvoiceNo.startsWith('ARCH-') || iInvoiceNo.startsWith('FT-EXCEL-')) return false;
+      // Disregard non-specific or invalid invoice numbers when checking invoice number duplicates
+      const isReqNoValid = isValidInvoiceNumber(reqInvoiceNo);
+      const isINoValid = isValidInvoiceNumber(iInvoiceNo);
 
       const cleanINo = iInvoiceNo.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
       const cleanISupplier = normalizeVendorName(iSupplier);
+      const sameSupplier = areVendorsEqual(cleanReqSupplier, cleanISupplier);
 
-      if (cleanReqNo && !reqInvoiceNo.startsWith('FT-') && cleanINo && cleanReqNo === cleanINo && areVendorsEqual(cleanReqSupplier, cleanISupplier)) {
+      if (isReqNoValid && isINoValid && cleanReqNo && cleanINo && cleanReqNo === cleanINo && sameSupplier) {
         return true;
       }
-      if (reqInvoiceNo && !reqInvoiceNo.startsWith('FT-') && reqInvoiceNo.toLowerCase() === iInvoiceNo.toLowerCase() && reqSupplier === iSupplier) return true;
-      if (!reqInvoiceNo && reqSupplier && reqSupplier === iSupplier && reqAmount > 0 && Math.abs(reqAmount - iAmount) < 0.01 && reqDate === iDate) return true;
+      if (!isReqNoValid && sameSupplier && reqAmount > 0 && Math.abs(reqAmount - iAmount) < 0.01 && reqDate === iDate) return true;
       if (req.body.prizmaDemandId && i.prizmaDemandId && Number(req.body.prizmaDemandId) === Number(i.prizmaDemandId)) return true;
       return false;
     });
@@ -9503,7 +9604,7 @@ app.get('/api/invoices/trash', async (req, res) => {
         const snapshot = await getDocs(collection(db, 'invoices'));
         trashInvs = snapshot.docs
           .map(doc => ({ id: doc.id, ...doc.data() as any }))
-          .filter((i: any) => i.isDeleted === true && i.isPermanentlyDeleted !== true);
+          .filter((i: any) => i.isDeleted === true && i.isPermanentlyDeleted !== true && !String(i.id).startsWith('inv_prizma_') && !String(i.id).startsWith('prizma_'));
       } catch (err: any) {
         console.warn('[FIRESTORE TRASH INVOICES WARN]:', err.message);
       }
@@ -9555,7 +9656,7 @@ app.get('/api/trash', async (req, res) => {
         ]);
         trashInvs = invSnap.docs
           .map(doc => ({ id: doc.id, ...doc.data() as any }))
-          .filter((i: any) => i.isDeleted === true && i.isPermanentlyDeleted !== true);
+          .filter((i: any) => i.isDeleted === true && i.isPermanentlyDeleted !== true && !String(i.id).startsWith('inv_prizma_') && !String(i.id).startsWith('prizma_'));
         trashDscs = discSnap.docs
           .map(doc => ({ id: doc.id, ...doc.data() as any }))
           .filter((d: any) => d.isDeleted === true && d.isPermanentlyDeleted !== true);
@@ -10355,17 +10456,11 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any, options: 
         ...((pInv as any).lineCheck ? { lineCheck: (pInv as any).lineCheck, linesSource: (pInv as any).linesSource || 'stf_order' } : {})
       };
 
-      // Kalem onarımı (enrichOnly) yalnızca mevcut faturaları günceller, yeni fatura eklemez
-      if (options.enrichOnly) { skippedCount++; continue; }
-      newInvoicesToSave.push(newInvDoc);
-      addedCount++;
-
-      // Add to in-memory lookup to avoid duplicates in subsequent iterations
-      if (pDemandId) byPrizmaDemandId.set(pDemandId, newInvDoc);
-      if (pCleanNo) {
-        if (pCleanVendor) byVendorAndNo.set(`${pCleanVendor}___${pCleanNo}`, newInvDoc);
-        if (pCleanNo.length >= 4) byInvoiceNo.set(pCleanNo, newInvDoc);
-      }
+      // GES Arşiv Koruması: Yalnızca satınalma şefleri ve personelin yüklediği faturalar GES Arşive girer.
+      // Prizma faturaları kesinlikle GES Arşivine (invoices koleksiyonuna) yeni kayıt olarak eklenmez!
+      // Prizma verileri yalnızca prizma_invoices koleksiyonunda saklanır.
+      skippedCount++;
+      continue;
     }
   }
 
@@ -10407,28 +10502,23 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any, options: 
 
   return {
     success: true,
-    addedCount,
+    addedCount: 0,
     enrichedCount,
     skippedCount,
     totalPrizma: prizmaInvs.length,
-    message: `${addedCount} yeni Prizma faturası sisteme başarıyla entegre edildi. ${enrichedCount} mevcut fatura mükerrer oluşturulmadan Prizma verileriyle zenginleştirildi.`
+    message: `${enrichedCount} mevcut GES fatura kaydı Prizma verileriyle zenginleştirildi. Prizma faturaları GES Arşivine aktarılmayıp prizma_invoices koleksiyonunda tutuldu.`
   };
 }
 
-// OTOMATİK AKŞAM VE GECE SENKRONİZASYONU & ENTEGRASYONU: Her akşam 21:00 ve her gece 02:30 (Moscow)
-// Prizma'dan kesinleşmiş malzeme faturalarını günceller ve sisteme otomatik olarak entegre eder.
+// OTOMATİK AKŞAM VE GECE SENKRONİZASYONU: Her akşam 21:00 ve her gece 02:30 (Moscow)
+// Prizma'dan kesinleşmiş malzeme faturalarını günceller ve prizma_invoices koleksiyonuna kaydeder.
 cron.schedule('0 21 * * *', async () => {
   console.log('[AUTO PRIZMA SYNC] Akşam 21:00 otomatik Prizma malzeme faturası senkronizasyonu başladı...');
   try {
     const syncRes = await prizmaSyncService.syncLast3Months({ maxItems: 1500 });
     console.log('[AUTO PRIZMA SYNC SUCCESS - AKŞAM]:', syncRes.message);
-    if (db) {
-      console.log('[AUTO PRIZMA INTEGRATION] Akşam otomatik fatura entegrasyonu ve akıllı kümeleme başladı...');
-      const integRes = await integratePrizmaInvoicesInternal(db);
-      console.log('[AUTO PRIZMA INTEGRATION SUCCESS - AKŞAM]:', integRes.message);
-    }
   } catch (err: any) {
-    console.error('[AUTO PRIZMA SYNC/INTEGRATION ERROR - AKŞAM]:', err.message);
+    console.error('[AUTO PRIZMA SYNC ERROR - AKŞAM]:', err.message);
   }
 }, { timezone: 'Europe/Moscow' });
 
@@ -10437,13 +10527,8 @@ cron.schedule('30 2 * * *', async () => {
   try {
     const syncRes = await prizmaSyncService.syncLast3Months({ maxItems: 1500 });
     console.log('[AUTO PRIZMA SYNC SUCCESS - GECE]:', syncRes.message);
-    if (db) {
-      console.log('[AUTO PRIZMA INTEGRATION] Gece otomatik fatura entegrasyonu ve akıllı kümeleme başladı...');
-      const integRes = await integratePrizmaInvoicesInternal(db);
-      console.log('[AUTO PRIZMA INTEGRATION SUCCESS - GECE]:', integRes.message);
-    }
   } catch (err: any) {
-    console.error('[AUTO PRIZMA SYNC/INTEGRATION ERROR - GECE]:', err.message);
+    console.error('[AUTO PRIZMA SYNC ERROR - GECE]:', err.message);
   }
 }, { timezone: 'Europe/Moscow' });
 

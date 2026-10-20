@@ -20,7 +20,7 @@ Model versiyonu ne olursa olsun (Gemini 3.1 Pro, 3.8 Flash veya başkası) aşa�
 - Port `3000` sabittir, kesinlikle değiştirme.
 
 ### 2. VERİ KURALI
-- Tek doğruluk kaynağı Firestore'dur. Referans sayımlar: **invoices: 1059, discounts: 253** (2026-10-18 itibarıyla /api/health). (Silinen faturaların hortlamaması için güncel gerçek sayılar baz alınmıştır.)
+- Tek doğruluk kaynağı Firestore'dur. Referans sayımlar: **invoices: 612, discounts: 255** (GES Arşivinde yalnızca satınalma şefleri ve personelin yüklediği faturalar tutulur; Prizma ERP referans kayıtları `prizma_invoices` içinde izole tutulup GES Arşivine aktarılmaz).
 - Publish sonrası `/api/health` bu sayıları tutmuyorsa yayın HATALI sayılır, düzeltmeden kapatma.
 
 ### 3. YAYIN KURALI

@@ -1,6 +1,6 @@
 {
-  "summary": "Fatura okuma (OCR) motorunda kalem birim fiyatlarının ve satır toplamlarının faturadaki birebir KDV dahil (В том числе НДС) değerlerle okunması, PDF dijital tablo ayrıştırıcısı ile matematiksel sağlama/otomatik düzeltme yapılması ve kota/hata durumlarına karşı çok katmanlı model + deterministik tablo okuyucu yedekleme mimarisi planı.",
-  "updatedAt": "2026-10-19T09:03:22.539193899Z",
+  "summary": "OCR Fatura Kalem Ayrıştırma Hatasının (Firma ve Adres Bilgilerinin Kalem Olarak Eklenmesi) Kalıcı Çözümü, Çok Sütunlu (% НДС / Вес) PDF Tablo Okuyucu Güncellemesi ve Mevcut Hatalı Faturaların Orijinal PDF'lerinden Otomatik Onarım Planı",
+  "updatedAt": "2026-10-20T05:25:00.238925759Z",
   "requestFeedback": true,
   "userFacing": true
 }

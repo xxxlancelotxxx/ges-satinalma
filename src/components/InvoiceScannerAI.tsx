@@ -17,7 +17,7 @@ import { SearchableFilterDropdown } from './SearchableFilterDropdown';
 import { DateRangeFilterDropdown } from './DateRangeFilterDropdown';
 import { ColumnSearchFilter } from './ColumnSearchFilter';
 import { DateFilterState, matchesDateFilter, getDateFilterDisplayLabel } from '../utils/filterHelpers';
-import { normalizeVendorName, getVendorKey, areVendorsEqual, extractCanonicalVendors } from '../utils/vendorNormalizer';
+import { normalizeVendorName, getVendorKey, areVendorsEqual, extractCanonicalVendors, isValidInvoiceNumber } from '../utils/vendorNormalizer';
 import {
   Upload,
   FileText,
@@ -614,47 +614,47 @@ export const InvoiceScannerAI: React.FC<Props> = ({
     }
   };
 
-  // Real-time duplicate detection against loaded recentInvoices + server duplicateResult
+  // Real-time duplicate detection against loaded recentInvoices + server duplicateResult (Strictly isolated per Supplier)
   const effectiveDuplicateResult = useMemo<DuplicateInvoiceMatch | null>(() => {
     if (!extractedInvoice) return duplicateResult;
     const rawNum = String(extractedInvoice.invoiceNumber || '').trim();
     const cleanNum = rawNum.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
-    const isGeneric = !rawNum || rawNum.startsWith('FT-') || rawNum.startsWith('TKF-') || rawNum.startsWith('ARCH-') || rawNum.startsWith('BLG-');
-    const cleanSup = normalizeVendorName(extractedInvoice.supplier || '');
+    const isRawNumValid = isValidInvoiceNumber(rawNum);
+    const activeSupplierRaw = String(extractedInvoice.supplier || '').trim();
 
     for (const inv of recentInvoices) {
       if ((inv as any).isDeleted) continue;
       const iNumRaw = String(inv.invoiceNumber || '').trim();
       const iNum = iNumRaw.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
-      const iSup = normalizeVendorName(inv.supplier || '');
-      const isInvGeneric = !iNumRaw || iNumRaw.startsWith('FT-EXCEL-') || iNumRaw.startsWith('TKF-') || iNumRaw.startsWith('ARCH-');
+      const isINumValid = isValidInvoiceNumber(iNumRaw);
+      const iSupClean = normalizeVendorName(inv.supplier || '') || inv.supplier || '';
+      const sameVendor = areVendorsEqual(activeSupplierRaw, inv.supplier || '');
 
-      if (!isGeneric && !isInvGeneric && cleanNum && iNum && cleanNum === iNum) {
-        const sameVendor = areVendorsEqual(cleanSup, iSup) || (cleanSup && iSup && (cleanSup.includes(iSup) || iSup.includes(cleanSup)));
-        const sameAmt = extractedInvoice.totalAmount > 0 && Math.abs(extractedInvoice.totalAmount - (Number(inv.totalAmount) || 0)) < 5;
-        if (sameVendor || (cleanNum.length >= 3 && sameAmt)) {
-          return {
-            isDuplicate: true,
-            matchType: 'exact',
-            existingInvoice: inv,
-            similarityScore: 1,
-            message: `Bu fatura sistemde kayıtlı! "${iNumRaw}" numaralı ve "${inv.supplier}" tedarikçili fatura daha önce (${inv.date || '-'} / ${inv.jobsiteName || 'Şantiye'}) sisteme yüklenmiş.`
-          };
-        }
+      if (!sameVendor) continue;
+
+      if (isRawNumValid && isINumValid && cleanNum && iNum && cleanNum === iNum) {
+        return {
+          isDuplicate: true,
+          matchType: 'exact',
+          existingInvoice: inv,
+          similarityScore: 1,
+          message: `Bu fatura sistemde kayıtlı! "${iNumRaw}" numaralı ve "${iSupClean}" tedarikçili fatura daha önce (${inv.date || '-'} / ${inv.jobsiteName || 'Şantiye'}) sisteme yüklenmiş.`
+        };
       }
+      const hasDistinctValidNumbers = isRawNumValid && isINumValid && cleanNum !== iNum;
       if (
+        !hasDistinctValidNumbers &&
         extractedInvoice.totalAmount > 0 &&
         Math.abs(extractedInvoice.totalAmount - (Number(inv.totalAmount) || 0)) < 1 &&
         extractedInvoice.date &&
-        inv.date === extractedInvoice.date &&
-        areVendorsEqual(cleanSup, iSup)
+        inv.date === extractedInvoice.date
       ) {
         return {
           isDuplicate: true,
           matchType: 'content_similar',
           existingInvoice: inv,
           similarityScore: 0.95,
-          message: `Bu fatura sistemde kayıtlı! "${inv.supplier}" tedarikçisine ait aynı tarih (${inv.date}) ve aynı tutarda (${formatRuble(inv.totalAmount)}) bir fatura zaten sistemde mevcut (Fatura No: ${iNumRaw || '-'}).`
+          message: `Bu fatura sistemde kayıtlı! "${iSupClean}" tedarikçisine ait aynı tarih (${inv.date}) ve aynı tutarda (${formatRuble(inv.totalAmount)}) bir fatura zaten sistemde mevcut (Fatura No: ${isINumValid ? iNumRaw : '-'}).`
         };
       }
     }

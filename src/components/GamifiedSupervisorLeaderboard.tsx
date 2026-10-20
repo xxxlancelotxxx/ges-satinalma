@@ -346,8 +346,12 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
                       <div className="text-base font-black text-slate-900 font-mono">
                         {leaderboard[0].categoryDisplayValue}
                       </div>
-                      <div className="text-[10px] text-slate-500 font-medium">
-                        Harcama: {formatRuble(leaderboard[0].rawMetrics.totalSpend || Math.max(0, leaderboard[0].rawMetrics.totalListPrice - leaderboard[0].rawMetrics.totalSavings))}
+                      <div className="text-[11px] text-slate-600 font-medium mt-1">
+                        İndirimli Alım: <strong className="text-slate-900 font-mono">{formatRuble(leaderboard[0].rawMetrics.totalSpend || Math.max(0, leaderboard[0].rawMetrics.totalListPrice - leaderboard[0].rawMetrics.totalSavings))}</strong>
+                      </div>
+                      <div className="text-[10px] text-emerald-800 font-bold flex items-center gap-1 mt-0.5">
+                        <span>Tasarruf: +{formatRuble(leaderboard[0].rawMetrics.totalSavings)}</span>
+                        <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-850 rounded font-mono font-bold">%{leaderboard[0].rawMetrics.savingsRatePct} İndirim</span>
                       </div>
                     </div>
                     <div className="text-right">
@@ -387,8 +391,12 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
                       <div className="text-sm font-black text-slate-900 font-mono">
                         {leaderboard[1].categoryDisplayValue}
                       </div>
-                      <div className="text-[10px] text-slate-500 font-medium">
-                        Harcama: {formatRuble(leaderboard[1].rawMetrics.totalSpend || Math.max(0, leaderboard[1].rawMetrics.totalListPrice - leaderboard[1].rawMetrics.totalSavings))}
+                      <div className="text-[11px] text-slate-600 font-medium mt-1">
+                        İndirimli Alım: <strong className="text-slate-900 font-mono">{formatRuble(leaderboard[1].rawMetrics.totalSpend || Math.max(0, leaderboard[1].rawMetrics.totalListPrice - leaderboard[1].rawMetrics.totalSavings))}</strong>
+                      </div>
+                      <div className="text-[10px] text-emerald-800 font-bold flex items-center gap-1 mt-0.5">
+                        <span>Tasarruf: +{formatRuble(leaderboard[1].rawMetrics.totalSavings)}</span>
+                        <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-850 rounded font-mono font-bold">%{leaderboard[1].rawMetrics.savingsRatePct} İndirim</span>
                       </div>
                     </div>
                     <div className="text-right">
@@ -428,8 +436,12 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
                       <div className="text-sm font-black text-slate-900 font-mono">
                         {leaderboard[2].categoryDisplayValue}
                       </div>
-                      <div className="text-[10px] text-slate-500 font-medium">
-                        Harcama: {formatRuble(leaderboard[2].rawMetrics.totalSpend || Math.max(0, leaderboard[2].rawMetrics.totalListPrice - leaderboard[2].rawMetrics.totalSavings))}
+                      <div className="text-[11px] text-slate-600 font-medium mt-1">
+                        İndirimli Alım: <strong className="text-slate-900 font-mono">{formatRuble(leaderboard[2].rawMetrics.totalSpend || Math.max(0, leaderboard[2].rawMetrics.totalListPrice - leaderboard[2].rawMetrics.totalSavings))}</strong>
+                      </div>
+                      <div className="text-[10px] text-emerald-800 font-bold flex items-center gap-1 mt-0.5">
+                        <span>Tasarruf: +{formatRuble(leaderboard[2].rawMetrics.totalSavings)}</span>
+                        <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-850 rounded font-mono font-bold">%{leaderboard[2].rawMetrics.savingsRatePct} İndirim</span>
                       </div>
                     </div>
                     <div className="text-right">
@@ -481,7 +493,12 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
                         <span>MVP</span>
                       </span>
                     </th>
-                    <th className="py-3 px-3 text-right min-w-[140px]">Tasarruf & Harcama (₽)</th>
+                    <th className="py-3 px-3 text-right min-w-[170px]">
+                      <div className="flex flex-col items-end">
+                        <span>İndirimli Alım & Tasarruf (₽)</span>
+                        <span className="text-[10px] font-normal text-slate-400">İndirimli Faturalar & Alınan İskonto</span>
+                      </div>
+                    </th>
                     <th className="py-3 px-3 text-center min-w-[95px]">Bireysel Gol</th>
                     <th className="py-3 px-3 text-center min-w-[90px]">Ekip Asisti</th>
                     <th className="py-3 px-3 text-center min-w-[95px]">Pazarlık Turu</th>
@@ -537,16 +554,18 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
                         </div>
                       </td>
 
-                      {/* Toplam Tasarruf & Harcama */}
+                      {/* Toplam Tasarruf & İndirimli Alım */}
                       <td className="py-3 px-3 text-right">
-                        <div className="font-mono font-black text-slate-900">
-                          {formatRuble(p.rawMetrics.totalSavings)}
+                        <div className="font-mono font-black text-emerald-700">
+                          +{formatRuble(p.rawMetrics.totalSavings)}
                         </div>
                         <div className="text-[10px] text-slate-500 font-medium truncate">
-                          Harcama: {formatRuble(p.rawMetrics.totalSpend || Math.max(0, p.rawMetrics.totalListPrice - p.rawMetrics.totalSavings))}
+                          İndirimli Alım: <span className="font-mono text-slate-800 font-semibold">{formatRuble(p.rawMetrics.totalSpend || Math.max(0, p.rawMetrics.totalListPrice - p.rawMetrics.totalSavings))}</span>
                         </div>
-                        <div className="text-[10px] text-emerald-700 font-bold">
-                          %{p.rawMetrics.savingsRatePct} İskonto
+                        <div className="mt-0.5">
+                          <span className="text-[10px] font-bold inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                            %{p.rawMetrics.savingsRatePct} İskonto
+                          </span>
                         </div>
                       </td>
 
