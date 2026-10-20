@@ -4,7 +4,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import ExcelJS from 'exceljs';
-import { registerTdfRoutes, offerFromExtracted, sanitizeAiReview, buildTdfHistory } from './tdfService';
+import { registerTdfRoutes, offerFromExtracted, sanitizeAiReview, buildTdfHistory, applyAiMatch } from './tdfService';
+import { localTermsFromText } from '../src/utils/tdfTerms';
 import { computeTdf, supplierKeyOf, TdfOffer } from '../src/utils/tdfEngine';
 import { rebarForm } from '../tests/tdfFixture';
 
@@ -29,7 +30,11 @@ assert.strictEqual(o1.lines.length, 2);
 assert.strictEqual(o1.lines[0].unitPrice, 54000, 'KDV dahil birim fiyat kullanılmalı');
 assert.strictEqual(o1.lines[1].deliveryNote, 'по заявке');
 assert.strictEqual(o1.lines[1].brand, 'Тула');
-assert.strictEqual(o1.terms.payment.value, '30 дн. от даты отгрузки');
+assert.strictEqual(o1.terms.payment.value, 'Vadeli 30 gün', 'ödeme yapılandırılmış metne çevrilir');
+assert.strictEqual(o1.terms.payment.mode, 'deferred');
+assert.strictEqual(o1.terms.payment.num, 30);
+assert.strictEqual(o1.terms.payment.raw, '30 дн. от даты отгрузки', 'belgedeki ifade saklanır');
+assert.strictEqual(o1.terms.delivery.value, 'до 31.10.2026', 'tarihli teslim metin olarak kalır');
 assert.strictEqual(o1.terms.payment.source, 'offer');
 assert.strictEqual(o1.terms.payment.conflict, 'Spesifikasyonda 45 gün yazıyor.');
 assert.strictEqual(o1.terms.deliveryPlace.value, '', '"не указано" boş sayılmalı');
@@ -39,7 +44,57 @@ assert.ok(o1.readWarnings!.includes('Ağırlık toleransı ±5%'));
 const o2 = offerFromExtracted({ supplier: 'X', totalAmount: 1000, items: [{ originalName: 'Болт', unit: 'шт', quantity: 10, unitPrice: 50 }] }, null, { nowIso: 'x', termsError: 'zaman aşımı' });
 assert.ok(o2.readWarnings!.some(w => w.includes('tutmuyor')), 'toplam tutmazsa uyarı');
 assert.ok(o2.readWarnings!.some(w => w.includes('Ticari şartlar otomatik okunamadı')));
-console.log('✓ OCR çıktısı → teklif (KDV dahil fiyat, şartlar, çelişki, nakliye, uyarılar)');
+// yapay zekânın yapılandırılmış alanları
+const o3 = offerFromExtracted({ supplier: 'ООО "РОКА"', items: [{ originalName: 'Фанера', unit: 'лист', quantity: 10, unitPrice: 1000 }] }, {
+  payment: '50% предоплата, 50% по факту', paymentMode: 'advance', advancePercent: 50, inStock: true, delivery: 'в наличии',
+  deliveryPlace: 'самовывоз со склада', deliveryPlaceType: 'factory', validity: '5 банковских дней', validityDays: 5
+}, { nowIso: 'x' });
+assert.strictEqual(o3.terms.payment.value, 'Avans %50');
+assert.strictEqual(o3.terms.delivery.value, 'Stokta');
+assert.strictEqual(o3.terms.deliveryPlace.value, 'Fabrika / depo teslim');
+assert.strictEqual(o3.terms.validity.value, '5 iş günü');
+assert.ok(!('installation' in o3.terms), 'montaj şartlardan çıkarıldı');
+// yapay zekâ yokken belge metninden okuma
+const invoiceText = `Счет на оплату № 4744 от 16 октября 2026 г.\nПоставщик: ООО "ТРЕЙДМИ"\nФанера ФСФ 18 мм 1525х1525 сорт 2/2 шт 44 1 200,00\nСчет действителен в течение 3 банковских дней.\nОплата данного счета означает согласие с условиями поставки товара.\nДоставка до объекта включена в стоимость.`;
+const local = localTermsFromText(invoiceText);
+assert.ok(local.validity && /3 банковских/.test(local.validity), JSON.stringify(local));
+assert.ok(local.deliveryPlace && /Доставка до объекта/.test(local.deliveryPlace));
+assert.ok(!local.payment, '"оплата данного счета означает согласие" ödeme şartı sayılmaz');
+const o4 = offerFromExtracted({ supplier: 'ООО "ТРЕЙДМИ"', items: [] }, local, { nowIso: 'x', termsError: 'Gemini aylık harcama limiti dolmuş', termsFromText: true, localItems: true });
+assert.strictEqual(o4.terms.validity.value, '3 iş günü');
+assert.strictEqual(o4.terms.deliveryPlace.value, 'Şantiye teslim');
+assert.strictEqual(o4.readWarnings!.filter(w => /yapay zekâ/i.test(w)).length, 1, 'yapay zekâ kesintisi tek uyarı');
+assert.ok(o4.readWarnings!.some(w => w.includes('Belgeden kalem okunamadı')));
+assert.ok(o4.readWarnings![0].startsWith('Yapay zekâ kullanılamadı: Gemini aylık harcama limiti dolmuş.') && o4.readWarnings![0].includes('Kalemler ve şartlar belge metninden okundu'), o4.readWarnings![0]);
+assert.ok(!o4.readWarnings!.some(w => /\{"error"/.test(w)));
+console.log('✓ OCR çıktısı → teklif (KDV dahil fiyat, yapılandırılmış şartlar, belge metninden okuma, uyarılar)');
+
+// 1b) Yapay zekâ eşleştirmesi: aynı ürün tek satır, güvenlik kuralları
+{
+  const mk = (id: string, supplier: string, lines: Array<[string, string, number]>) => ({ id, supplier, terms: {} as any, lines: lines.map(([lid, name, price]) => ({ id: lid, name, unit: 'шт', quantity: 44, unitPrice: price })) });
+  const f: any = { id: 'f', code: 'T', title: 'Фанера', status: 'draft', createdAt: '', updatedAt: '', offers: [
+    mk('a', 'ООО "ТРЕЙДМИ"', [['a1', 'Фанера ФСФ ламинированная 18мм', 1200], ['a2', 'Брус 50х50', 300]]),
+    mk('b', 'ООО "РОКА"', [['b1', 'Ламфанера березовая Россия 18 мм F/W', 1250], ['b2', 'Фанера ФК 21 мм', 1500]])
+  ] };
+  applyAiMatch(f, { groups: [{ lineIds: ['a1', 'b1'], name: 'Фанера ламинированная ФСФ 18 мм' }, { lineIds: ['a2', 'b2', 'a1'] }] }, '2026-10-20T07:00:00Z');
+  assert.strictEqual(f.aiGroups.a1, f.aiGroups.b1, 'yapay zekânın eşlediği iki satır aynı grup');
+  assert.ok(!f.aiGroups.a2 && !f.aiGroups.b2, 'aynı firmanın iki satırını içeren grup uygulanmaz');
+  const cc = computeTdf(f, '2026-10-20');
+  const row = cc.materials.find(m => m.match === 'ai')!;
+  assert.ok(row, 'yapay zekâ satırı');
+  assert.strictEqual(row.name, 'Фанера ламинированная ФСФ 18 мм');
+  assert.strictEqual(row.offerCount, 2);
+  // teknik farklı satırları yapay zekâ birleştirse bile reddedilir
+  const f2: any = JSON.parse(JSON.stringify(f));
+  applyAiMatch(f2, { groups: [{ lineIds: ['a1', 'b2'] }] }, 'x');
+  assert.ok(!f2.aiGroups.a1, '18 mm ile 21 mm birleştirilmez');
+  // elle ayrılan satıra dokunulmaz
+  const f3: any = JSON.parse(JSON.stringify(f));
+  f3.materialOverrides = { b1: 'ayri:b1' };
+  applyAiMatch(f3, { groups: [{ lineIds: ['a1', 'b1'] }] }, 'x');
+  assert.ok(!f3.aiGroups.b1);
+}
+console.log('✓ yapay zekâ eşleştirmesi (tek satır, aynı firma / teknik fark / elle ayırma korunuyor)');
 
 // 2) Yapay zekâ çıktısı temizliği: kaynaksız firma riski gösterilmez
 const base = rebarForm();
@@ -77,6 +132,7 @@ console.log('✓ son alış fiyatı ve firma geçmişi');
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   let reviewCalls = 0;
+  let matchCalls = 0;
   registerTdfRoutes(app, {
     getDb: () => null,
     backupFile: path.join(tmp, 'tdf_forms.json'),
@@ -90,7 +146,12 @@ console.log('✓ son alış fiyatı ve firma geçmişi');
       const { id: _id, ...rest } = JSON.parse(JSON.stringify(o));
       return rest;
     },
-    aiReview: async () => { reviewCalls++; return { generatedAt: '2026-10-19T10:00:00Z', summary: 'Özet', qualityNotes: {}, extraWarnings: [{ level: 'warning', text: 'Sertifika istenmeli (yapay zekâ)', action: 'ГОСТ 34028 sertifikası' }], vendorChecks: {}, sources: [] }; }
+    aiReview: async () => {
+      reviewCalls++;
+      if (reviewCalls === 1) throw new Error('{"error":{"code":429,"message":"Your project has exceeded its monthly spending cap. Please go to AI Studio at https://ai.studio/spend","status":"RESOURCE_EXHAUSTED"}}');
+      return { generatedAt: '2026-10-19T10:00:00Z', summary: 'Özet', qualityNotes: {}, materialInsights: {}, extraWarnings: [{ level: 'warning', text: 'Sertifika istenmeli (yapay zekâ)', action: 'ГОСТ 34028 sertifikası' }], vendorChecks: {}, sources: [] };
+    },
+    aiMatch: async () => { matchCalls++; return { groups: [] }; }
   });
   const server = app.listen(0);
   const port = (server.address() as any).port;
@@ -119,19 +180,26 @@ console.log('✓ son alış fiyatı ve firma geçmişi');
 
     // kutu düzenleme ve satınalmacı notu
     const evraz = g.data.form.offers.find((o: any) => o.supplier.includes('ЕВРАЗ'));
-    const terms = { ...evraz.terms, payment: { value: '100% предоплата', source: 'user' } };
+    const terms = { ...evraz.terms, payment: { value: 'Avans %100', mode: 'advance', num: 100, source: 'user' } };
     let p = await api('PUT', `/api/tdf/${id}`, { offers: [{ id: evraz.id, terms, note: 'Telefonda ödeme teyit edildi.', supplier: 'HACK', createdAt: 'x' }], recommendationNote: 'BMZ ile devam.' });
     assert.strictEqual(p.status, 200);
     const ev2 = p.data.form.offers.find((o: any) => o.id === evraz.id);
-    assert.strictEqual(ev2.terms.payment.value, '100% предоплата');
+    assert.strictEqual(ev2.terms.payment.value, 'Avans %100');
     assert.strictEqual(ev2.note, 'Telefonda ödeme teyit edildi.');
     assert.strictEqual(ev2.createdAt, evraz.createdAt, 'izin verilmeyen alan değişmemeli');
     assert.ok(!p.data.computed.warnings.some((w: any) => w.text.startsWith('HACK') && w.text.includes('ödeme şartı')));
 
     // yapay zekâ değerlendirmesi
+    assert.ok(matchCalls >= 5, 'iki firmadan sonra her yüklemede eşleştirme çalışır');
+    const aiFail = await api('POST', `/api/tdf/${id}/ai-review`);
+    assert.strictEqual(aiFail.status, 502);
+    assert.ok(/harcama limiti/.test(aiFail.data.error) && !/\{"error"/.test(aiFail.data.error), aiFail.data.error);
     const ai = await api('POST', `/api/tdf/${id}/ai-review`);
     assert.strictEqual(ai.status, 200);
-    assert.strictEqual(reviewCalls, 1);
+    assert.strictEqual(reviewCalls, 2);
+    const am = await api('POST', `/api/tdf/${id}/ai-match`);
+    assert.strictEqual(am.status, 200);
+    assert.ok(am.data.form.aiMatchedAt);
     assert.ok(ai.data.computed.warnings.some((w: any) => w.text.includes('(yapay zekâ)')));
 
     // Excel
@@ -142,11 +210,19 @@ console.log('✓ son alış fiyatı ve firma geçmişi');
     await wb.xlsx.load(x.data as Buffer);
     assert.deepStrictEqual(wb.worksheets.map(w => w.name), ['TDF', 'Miktar · Заказ', 'İndirim takibi', 'Teklif belgeleri']);
     const ws = wb.getWorksheet('TDF')!;
-    let totalRow = 0;
-    ws.eachRow((row, n) => { if (String(row.getCell(1).value || '').startsWith('GENEL TOPLAM')) totalRow = n; });
-    assert.ok(totalRow > 0, 'genel toplam satırı');
+    let totalRow = 0, matRow = 0, freightRow = 0;
+    ws.eachRow((row, n) => {
+      const v = String(row.getCell(1).value || '');
+      if (v.startsWith('GENEL TOPLAM')) totalRow = n;
+      if (v.startsWith('Malzeme toplamı')) matRow = n;
+      if (v.startsWith('Nakliye') && !freightRow) freightRow = n;
+    });
+    assert.ok(totalRow > 0 && matRow > 0 && freightRow > 0, 'malzeme, nakliye ve genel toplam satırları');
     const totals: number[] = [];
-    for (let k = 0; k < 5; k++) { const v: any = ws.getRow(totalRow).getCell(4 + 3 * k).value; totals.push(Math.round(v.result)); assert.ok(String(v.formula).startsWith('SUBTOTAL')); }
+    for (let k = 0; k < 5; k++) {
+      const v: any = ws.getRow(matRow).getCell(4 + 3 * k).value; totals.push(Math.round(v.result)); assert.ok(String(v.formula).startsWith('SUBTOTAL'));
+      const g: any = ws.getRow(totalRow).getCell(4 + 3 * k).value; assert.ok(String(g.formula).includes(`${matRow}+IF(ISNUMBER(`), g.formula);
+    }
     assert.ok(totals.includes(77704677) && totals.includes(78150641), totals.join(','));
     let noteFound = false, recoFound = false, warnFound = false;
     ws.eachRow(row => row.eachCell(c => {

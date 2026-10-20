@@ -4,6 +4,8 @@ import {
   canonicalUnit, nextTdfCode, shortSupplierName, supplierKeyOf
 } from './tdfEngine';
 import { rebarForm } from '../../tests/tdfFixture';
+import { parsePaymentText, parseDeliveryText, parseDeliveryPlaceText, parseValidityText, friendlyAiError, cleanReadWarning } from './tdfTerms';
+import type { TdfForm, TdfOffer as Offer } from './tdfEngine';
 
 console.log('--- TDF motoru ---');
 
@@ -99,5 +101,77 @@ assert.strictEqual(r40.unit, 't');
 assert.strictEqual(Math.round(r40.cells[uvm]!.unitPrice), 56500);
 assert.strictEqual(Math.round(computeTdf(f4, '2026-10-19').suppliers.find(s => s.key === uvm)!.total), 85374569);
 console.log('✓ kg → t dönüşümü');
+
+// Ticari şart ayrıştırma (avans % / vade gün, teslim yeri, süreler)
+assert.deepStrictEqual(parsePaymentText('100% предоплата'), { mode: 'advance', num: 100 });
+assert.deepStrictEqual(parsePaymentText('Предоплата 30%, остаток по факту поставки'), { mode: 'advance', num: 30 });
+assert.deepStrictEqual(parsePaymentText('Отсрочка платежа 45 календарных дней'), { mode: 'deferred', num: 45 });
+assert.deepStrictEqual(parsePaymentText('30 дн. от даты отгрузки'), { mode: 'deferred', num: 30 });
+assert.deepStrictEqual(parsePaymentText('Товар отпускается по факту прихода денег на р/с Поставщика, самовывозом'), { mode: 'advance', num: 100 });
+assert.deepStrictEqual(parsePaymentText('Срок оплаты покупателем по настоящему счету составляет не более 2-х банковских дней'), { mode: 'advance', num: 100 });
+assert.deepStrictEqual(parsePaymentText('оплата по факту поставки в течение 10 дней'), { mode: 'deferred', num: 10 });
+assert.deepStrictEqual(parseDeliveryText('в наличии'), { mode: 'stock', num: 0 });
+assert.deepStrictEqual(parseDeliveryText('10 рабочих дней'), { mode: 'days', num: 10 });
+assert.deepStrictEqual(parseDeliveryText('2 недели'), { mode: 'days', num: 14 });
+assert.deepStrictEqual(parseDeliveryPlaceText('самовывоз со склада'), { mode: 'factory' });
+assert.deepStrictEqual(parseDeliveryPlaceText('доставка до объекта включена'), { mode: 'site' });
+assert.deepStrictEqual(parseValidityText('3 банковских дня'), { mode: 'workdays', num: 3 });
+const capErr = '{"error":{"code":429,"message":"Your project has exceeded its monthly spending cap. Please go to AI Studio at https://ai.studio/spend","status":"RESOURCE_EXHAUSTED"}}';
+assert.ok(/harcama limiti/.test(friendlyAiError(capErr)));
+assert.ok(/istek sınırında/.test(friendlyAiError('429 Too Many Requests')));
+const stored = 'Ticari şartlar otomatik okunamadı ({"error":{"code":429,"message":"Your project has exceeded its monthly spending cap. Please go to AI Studio at https://ai); kutular elle doldurulmalı.';
+assert.ok(!cleanReadWarning(stored).includes('{"error"') && /harcama limiti/.test(cleanReadWarning(stored)), cleanReadWarning(stored));
+console.log('✓ şart ayrıştırma ve anlaşılır hata mesajları');
+
+// Kontrplak: iki firma aynı ürünü farklı yazmış → tek satır; farklı kalınlık ayrı kalır
+const term = (value: string, mode?: string, num?: number) => ({ value, source: 'user' as const, ...(mode ? { mode } : {}), ...(num !== undefined ? { num } : {}) });
+const offer = (id: string, supplier: string, lines: Array<[string, number, number]>, extra: Partial<Offer> = {}): Offer => ({
+  id, supplier, docDate: '2026-10-16', terms: { payment: term('Avans %100', 'advance', 100), delivery: term('3 gün', 'days', 3), deliveryPlace: term('Şantiye teslim', 'site'), validity: term('3 gün', 'days', 3), warranty: term('') } as any,
+  lines: lines.map(([name, quantity, unitPrice], i) => ({ id: `${id}${i}`, name, unit: 'шт', quantity, unitPrice })), ...extra
+});
+const ply: TdfForm = { id: 'p', code: 'TDF-2026-0002', title: 'playwood', status: 'draft', createdAt: '', updatedAt: '', offers: [
+  offer('tr', 'ООО "ТРЕЙДМИ"', [['Фанера ФСФ 18 мм 1525х1525 сорт 2/2', 44, 1200]]),
+  offer('ro', 'ООО "РОКА"', [['Фанера березовая ФСФ 1525*1525*18мм, сорт 2/2 Ш1', 44, 1150], ['Фанера ФСФ 21 мм 1525х1525 сорт 2/2', 10, 1500]])
+] };
+const cp = computeTdf(ply, '2026-10-20');
+assert.strictEqual(cp.materials.length, 2, cp.materials.map(m => m.name).join(' | '));
+const p18 = cp.materials.find(m => m.offerCount === 2)!;
+assert.ok(p18, 'iki firmanın 18 mm kontrplakı tek satırda');
+assert.strictEqual(p18.match, 'similar');
+assert.strictEqual(p18.specs.size, '1525x1525');
+assert.ok(cp.materials.some(m => m.name.includes('21 мм') && m.offerCount === 1), '21 mm ayrı satır');
+console.log('✓ farklı yazılmış aynı ürün tek satır, farklı kalınlık ayrı');
+
+// Nakliye: fabrika teslim + ayrı nakliye bedeli genel toplama eklenir, öneriyi değiştirir
+const fr: TdfForm = { ...ply, offers: [
+  offer('tr', 'ООО "ТРЕЙДМИ"', [['Фанера ФСФ 18 мм 1525х1525', 100, 1200]]),
+  offer('ro', 'ООО "РОКА"', [['Фанера ФСФ 18 мм 1525х1525', 100, 1100]], { freightAmount: 15000, terms: { ...offer('x', 'x', []).terms, deliveryPlace: term('Fabrika / depo teslim', 'factory') } }),
+  offer('ab', 'ООО "АБВ"', [['Фанера ФСФ 18 мм 1525х1525', 100, 1000]], { terms: { ...offer('x', 'x', []).terms, deliveryPlace: term('Fabrika / depo teslim', 'factory') } })
+] };
+const cf = computeTdf(fr, '2026-10-20');
+const sk = (n: string) => key(n);
+const roka = cf.suppliers.find(s => s.key === sk('ООО "РОКА"'))!;
+const trd = cf.suppliers.find(s => s.key === sk('ООО "ТРЕЙДМИ"'))!;
+const abv = cf.suppliers.find(s => s.key === sk('ООО "АБВ"'))!;
+assert.strictEqual(roka.freightMode, 'separate');
+assert.strictEqual(roka.grandTotal, 110000 + 15000);
+assert.strictEqual(trd.freightMode, 'included');
+assert.strictEqual(trd.grandTotal, 120000);
+assert.strictEqual(abv.freightMode, 'missing');
+assert.ok(cf.warnings.some(w => w.text.startsWith('АБВ fabrika/depo teslim')), 'nakliye girilmeyen fabrika teslim uyarısı');
+assert.ok(cf.recommendation!.headline.includes('nakliye') , cf.recommendation!.headline);
+if (cf.recommendation!.plan.some(p => p.supplierKey === sk('ООО "АБВ"'))) assert.ok(cf.recommendation!.headline.includes('АБВ nakliyesi hariç'), 'nakliyesi bilinmeyen firma başlıkta belirtilir');
+const fr2: TdfForm = { ...fr, offers: fr.offers.filter(o => o.id !== 'ab') };
+const cf2 = computeTdf(fr2, '2026-10-20');
+assert.strictEqual(cf2.recommendation!.plan[0].supplierKey, sk('ООО "ТРЕЙДМИ"'), 'malzemede ucuz ama nakliyeyle pahalı РОКА önerilmez');
+assert.strictEqual(cf2.recommendation!.planTotal, 120000);
+assert.ok(cf2.recommendation!.headline.includes('(nakliye dahil)'));
+// eski kayıt: montaj alanı ve yalnız metin şartlar sorun çıkarmaz
+const legacy: TdfForm = JSON.parse(JSON.stringify(fr2));
+(legacy.offers[0].terms as any).installation = { value: 'нет', source: 'offer' };
+legacy.offers[0].terms.payment = { value: '30 дн. от даты отгрузки', source: 'offer' };
+const cl = computeTdf(legacy, '2026-10-20');
+assert.ok(cl.scores.find(s => s.supplierKey === sk('ООО "ТРЕЙДМИ"'))!.payment > cf2.scores.find(s => s.supplierKey === sk('ООО "ТРЕЙДМИ"'))!.payment, 'vadeli ödeme avanstan yüksek puan alır');
+console.log('✓ nakliye dahil genel toplam ve öneri');
 
 console.log('TDF motoru testleri geçti.');

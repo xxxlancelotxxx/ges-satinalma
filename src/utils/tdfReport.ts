@@ -10,10 +10,10 @@ import {
 
 export interface TdfReportSupplier { key: string; short: string; full: string; col: TdfSupplierCol }
 export interface TdfKpi { k: string; v: string; h: string }
-export interface TdfQualityItem { title: string; text: string; source: 'user' | 'ai' }
+export interface TdfQualityItem { title: string; text: string; source: 'user' | 'ai'; product?: string; brand?: string; notes?: string; sources?: string[] }
 export interface TdfVendorRow {
   key: string; name: string; inn: string; doc: string;
-  history: string; aiStatus: string; aiRisk: string; aiNotes: string; sources: string[];
+  history: string; aiStatus: string; aiRisk: string; aiNotes: string; aiReviews: string; sources: string[];
 }
 export interface TdfLastPriceRow { material: string; unit: string; lastPrice: number; date: string; supplier: string; best: number | null; diffPct: number | null }
 
@@ -36,7 +36,7 @@ export const TDF_LEVEL_LABEL: Record<TdfWarningLevel, string> = { critical: 'Kri
 export const TDF_UNIT_LABEL: Record<string, string> = { t: 't', kg: 'kg', 'm³': 'm³', 'm²': 'm²', m: 'm', adet: 'adet', l: 'l' };
 export const TDF_CHECKED_DIFFERENCES = [
   'çelik sınıfı (А240 / А400 / А500С)', 'çap ve et kalınlığı', 'boy (6 m / 11,7 m)', 'RAL renk kodu', 'yoğunluk (kg/m³)',
-  'marka ve muadil', 'ГОСТ / ТУ', 'birim (t, kg, m, m²)', 'miktar yuvarlama', 'ödeme çelişkisi', 'geçerlilik süresi', 'teslim yeri ve nakliye'
+  'ebat (1525×1525 vb.)', 'marka ve muadil', 'ГОСТ / ТУ', 'birim (t, kg, m, m²)', 'miktar yuvarlama', 'ödeme çelişkisi', 'geçerlilik süresi', 'teslim yeri ve nakliye'
 ];
 
 const ddmmyyyy = (iso?: string) => (iso && /^\d{4}-\d{2}-\d{2}/.test(iso) ? iso.slice(0, 10).split('-').reverse().join('.') : '');
@@ -54,6 +54,29 @@ export function termText(col: TdfSupplierCol, key: TdfTermKey): string {
     if (notes.length) return notes.length > 2 ? `${notes.slice(0, 2).join('; ')} …` : notes.join('; ');
   }
   return '';
+}
+
+/** Kalemin teknik özellikleri tek satırda: "A500C · 12 mm · 11.7 m · 1525x1525". */
+export function materialSpecText(m: TdfMaterialRow): string {
+  const sp = m.specs || {};
+  return [sp.grade, sp.size ? sp.size.replace('x', '×') : '', sp.thickness ? `kalınlık ${sp.thickness} mm` : '', sp.diameter ? `${sp.diameter} mm` : '',
+    sp.length ? `${sp.length} m` : '', sp.density ? `${sp.density} kg/m³` : '', sp.ral ? `RAL ${sp.ral}` : '', sp.gost ? `ГОСТ ${sp.gost}` : '']
+    .filter(Boolean).join(' · ');
+}
+
+/** Firma hücresinin alt satırı: marka ve kaleme özel teslim notu. */
+export function cellBrandNote(m: TdfMaterialRow, col: TdfSupplierCol): string {
+  const c = m.cells[col.key];
+  if (!c) return '';
+  const d = (c.delivery || '').trim();
+  return [c.brand ? c.brand : '', /^наличи$/i.test(d) ? 'в наличии' : d].filter(Boolean).join(' · ');
+}
+
+/** Nakliye hücresi: ayrı bedel, fiyata dahil veya fabrika teslimde girilmemiş. */
+export function freightText(col: TdfSupplierCol): string {
+  if (col.freightMode === 'separate') return `${tdfFormat.rub(col.freight)} ₽`;
+  if (col.freightMode === 'missing') return 'Fabrika teslim · nakliye girilmedi';
+  return 'Fiyata dahil';
 }
 
 export function cellDelivery(m: TdfMaterialRow, col: TdfSupplierCol): string {
@@ -89,14 +112,14 @@ export function buildTdfReport(form: TdfForm, computed: TdfComputed, todayIso: s
     const planSup = reco.plan.map(p => nameOf(p.supplierKey)).join(' + ');
     kpis.push({ k: 'Önerilen plan', v: `${rub(reco.planTotal)} ₽`, h: `${planSup} · ${nMat} kalem` });
   }
-  const complete = suppliers.filter(s => computed.materials.every(m => m.cells[s.key])).sort((a, b) => a.col.total - b.col.total);
+  const complete = suppliers.filter(s => computed.materials.every(m => m.cells[s.key])).sort((a, b) => a.col.grandTotal - b.col.grandTotal);
   if (complete[0]) {
-    const diff = reco ? complete[0].col.total - reco.planTotal : 0;
-    kpis.push({ k: 'En ucuz tam teklif (tek firma)', v: `${rub(complete[0].col.total)} ₽`, h: `${complete[0].short}${reco && diff > 0.5 ? ` · plana göre +${rub(diff)} ₽ (+${pct(diff / reco.planTotal)})` : ''}` });
+    const diff = reco ? complete[0].col.grandTotal - reco.planTotal : 0;
+    kpis.push({ k: 'En ucuz tam teklif (tek firma)', v: `${rub(complete[0].col.grandTotal)} ₽`, h: `${complete[0].short} · ${complete[0].col.freightMode === 'missing' ? 'nakliye hariç (girilmedi)' : 'nakliye dahil'}${reco && diff > 0.5 ? ` · plana göre +${rub(diff)} ₽ (+${pct(diff / reco.planTotal)})` : ''}` });
   }
   if (complete.length > 1 && reco) {
     const worst = complete[complete.length - 1];
-    const diff = worst.col.total - reco.planTotal;
+    const diff = worst.col.grandTotal - reco.planTotal;
     kpis.push({ k: 'En yüksek teklif ile fark', v: `${rub(diff)} ₽`, h: `${worst.short} · +${pct(diff / reco.planTotal)}` });
   }
   const discounts = suppliers.filter(s => s.col.firstTotal && s.col.firstTotal - s.col.total > 0.5);
@@ -132,6 +155,13 @@ export function buildTdfReport(form: TdfForm, computed: TdfComputed, todayIso: s
   Object.entries(form.ai?.qualityNotes || {}).forEach(([k, v]) => {
     if (v?.trim() && !(form.qualityNotes || {})[k]?.trim()) qualityItems.push({ title: computed.materials.some(m => m.key === k) ? matName(k) : k, text: v.trim(), source: 'ai' });
   });
+  // Ürün ve marka araştırması aynı kalemin kalite kutusuna eklenir
+  Object.entries(form.ai?.materialInsights || {}).forEach(([k, ins]) => {
+    const title = matName(k);
+    const item = qualityItems.find(q => q.title === title && q.source === 'ai') || qualityItems.find(q => q.title === title);
+    if (item) Object.assign(item, { product: ins.product, brand: ins.brand, notes: ins.notes, sources: ins.sources });
+    else qualityItems.push({ title, text: '', source: 'ai', product: ins.product, brand: ins.brand, notes: ins.notes, sources: ins.sources });
+  });
 
   // Firma güvenilirliği
   const vendorRows: TdfVendorRow[] = suppliers.map(s => {
@@ -149,6 +179,7 @@ export function buildTdfReport(form: TdfForm, computed: TdfComputed, todayIso: s
       aiStatus: [ai?.status, ai?.founded ? `kuruluş ${ai.founded}` : '', ai?.capital ? `sermaye ${ai.capital}` : ''].filter(Boolean).join(' · '),
       aiRisk: ai?.risk || '',
       aiNotes: ai?.notes || '',
+      aiReviews: ai?.reviews || '',
       sources: ai?.sources || []
     };
   });

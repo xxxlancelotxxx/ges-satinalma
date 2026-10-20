@@ -3,7 +3,7 @@
  * Aynı çıktı: ekrandaki "TDF formu" adımı (iframe), "HTML indir" ve "PDF indir" (html2pdf) için kullanılır.
  */
 import { computeTdf, TdfComputed, TdfForm, tdfFormat } from './tdfEngine';
-import { buildTdfReport, cellDelivery, TDF_LEVEL_LABEL, TDF_TERM_ROWS, TDF_UNIT_LABEL, termText } from './tdfReport';
+import { buildTdfReport, cellBrandNote, freightText, materialSpecText, TDF_LEVEL_LABEL, TDF_TERM_ROWS, TDF_UNIT_LABEL, termText } from './tdfReport';
 
 const esc = (v: unknown) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const nl2br = (v: unknown) => esc(v).replace(/\n/g, '<br>');
@@ -67,6 +67,10 @@ tr{break-inside:avoid}
 .qual{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .qual div{border:1px solid var(--line);border-radius:6px;padding:8px 10px;break-inside:avoid}
 .qual b{display:block;margin-bottom:2px}
+.qual .lbl{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:4px;display:block}
+td .spec{display:block;font-size:10px;color:var(--muted);font-weight:400}
+td .mt{font-size:9.5px;color:var(--accent);font-weight:600}
+tr.grand td{font-weight:800;background:var(--sum);font-size:12.5px}
 .sign{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:12px}
 .sign div{border-top:1.5px solid var(--ink);padding-top:6px;font-size:11px;color:var(--muted);min-height:54px}
 .foot{font-size:10.5px;color:var(--muted);display:flex;justify-content:space-between;gap:8px;border-top:1px solid var(--line);padding-top:6px}
@@ -118,12 +122,14 @@ export function renderTdfHtml(form: TdfForm, opts: TdfHtmlOptions = {}): string 
   h += `<th rowspan="2">№</th><th rowspan="2">Açıklama<span class="ru">Описание</span></th><th rowspan="2">Miktar<span class="ru">Кол-во</span></th>`;
   S.forEach(s => { h += `<th class="sup" colspan="3">${esc(s.short)}</th>`; });
   h += `<th class="bestH" colspan="3">En iyi fiyat · Лучшая цена</th></tr><tr>`;
-  S.forEach(() => { h += `<th>Birim fiyat<span class="ru">Цена за ед.</span></th><th>Toplam<span class="ru">Сумма, ₽</span></th><th>Teslim<span class="ru">Срок</span></th>`; });
+  S.forEach(() => { h += `<th>Birim fiyat<span class="ru">Цена за ед.</span></th><th>Toplam<span class="ru">Сумма, ₽</span></th><th>Marka · teslim<span class="ru">Бренд · срок</span></th>`; });
   h += `<th class="bestH">Firma<span class="ru">Поставщик ✓</span></th><th class="bestH">Birim fiyat</th><th class="bestH">1. ile 2. fark<span class="ru">Разница</span></th></tr></thead><tbody>`;
   c.materials.forEach((m, i) => {
     const unit = TDF_UNIT_LABEL[m.unit] || m.unit;
     const comparableCount = S.filter(s => { const x = m.cells[s.key]; return x && !(x.warning && /Teknik fark|Birim farklı/.test(x.warning)); }).length;
-    h += `<tr><td class="num">${i + 1}</td><td>${esc(m.name)}</td><td class="num">${qty(m.orderQty)} ${esc(unit)}</td>`;
+    const spec = materialSpecText(m);
+    const mt = m.match === 'similar' ? ' <span class="mt">benzer adla eşleşti</span>' : m.match === 'ai' ? ' <span class="mt">yapay zekâ eşleştirdi</span>' : '';
+    h += `<tr><td class="num">${i + 1}</td><td><b>${esc(m.name)}</b>${mt}${spec ? `<span class="spec">${esc(spec)}</span>` : ''}</td><td class="num">${qty(m.orderQty)} ${esc(unit)}</td>`;
     S.forEach(s => {
       const x = m.cells[s.key];
       if (!x) { h += `<td class="empty" colspan="3">—</td>`; return; }
@@ -131,7 +137,7 @@ export function renderTdfHtml(form: TdfForm, opts: TdfHtmlOptions = {}): string 
       const cls = x.warning ? 'w' : (m.bestPrice !== null && Math.abs(x.unitPrice - m.bestPrice) < 0.005 ? 'low' : (comparableCount > 2 && m.worstPrice !== null && Math.abs(x.unitPrice - m.worstPrice) < 0.005 && m.worstPrice !== m.bestPrice ? 'high' : ''));
       const why = x.warning ? `<span class="why">${esc(x.warning)}${excluded ? ' · kıyasa katılmadı' : ''}</span>` : '';
       const conv = x.convertedFrom ? ` title="${esc(x.convertedFrom)}"` : '';
-      h += `<td class="num ${cls}"${conv}>${rub(x.unitPrice)}${x.warning ? ' !' : ''}${why}</td><td class="num">${rub(x.total)}</td><td class="del">${esc(cellDelivery(m, s.col))}</td>`;
+      h += `<td class="num ${cls}"${conv}>${rub(x.unitPrice)}${x.warning ? ' !' : ''}${why}</td><td class="num">${rub(x.total)}</td><td class="del">${esc(cellBrandNote(m, s.col))}</td>`;
     });
     const best = m.bestSuppliers.map(k => S.find(s => s.key === k)?.short || k).join(', ');
     h += m.bestPrice === null
@@ -139,21 +145,24 @@ export function renderTdfHtml(form: TdfForm, opts: TdfHtmlOptions = {}): string 
       : `<td class="bestC">✓ ${esc(best)}</td><td class="num bestC">${rub(m.bestPrice)}</td><td class="num bestC">${m.diffBestSecond === null ? '—' : pct(m.diffBestSecond)}</td>`;
     h += `</tr>`;
   });
-  h += `<tr class="sum"><td colspan="3">GENEL TOPLAM · ИТОГО (с НДС 22%)</td>`;
+  h += `<tr class="terms"><td colspan="3"><b>Malzeme toplamı · Материалы</b></td>`;
   S.forEach(s => { h += `<td colspan="3" class="num">${rub(s.col.total)}${s.col.covered < nMat ? `<span class="ru">${s.col.covered}/${nMat} kalem</span>` : ''}</td>`; });
-  h += `<td colspan="3" class="num">${rub(c.mixTotal)}<span class="ru">kalem kalem en iyi</span></td></tr>`;
-  if (S.some(s => s.col.freight > 0)) {
-    h += `<tr class="terms"><td colspan="3"><b>Nakliye (fiyata dahil değil) · Доставка</b></td>`;
-    S.forEach(s => { h += `<td colspan="3" class="num">${s.col.freight > 0 ? `${rub(s.col.freight)} ₽` : '—'}</td>`; });
-    h += `<td colspan="3"></td></tr>`;
-  }
-  h += `<tr class="terms"><td colspan="3"><b>Ödeme · Условия оплаты</b></td>`;
-  S.forEach(s => {
-    const t = s.col.offer.terms?.payment;
-    const v = termText(s.col, 'payment');
-    h += `<td colspan="3" class="${v ? (t?.conflict ? 'bad' : '') : 'miss'}">${v ? esc(v) : 'Teklifte yok'}${t?.conflict ? `<span class="ru">! ${esc(t.conflict)}</span>` : ''}</td>`;
-  });
+  h += `<td colspan="3" class="num">${rub(c.mixTotal)}<span class="ru">kalem kalem en iyi (nakliye hariç)</span></td></tr>`;
+  h += `<tr class="terms"><td colspan="3"><b>Nakliye · Доставка</b></td>`;
+  S.forEach(s => { h += `<td colspan="3" class="${s.col.freightMode === 'missing' ? 'miss' : 'num'}">${esc(freightText(s.col))}</td>`; });
   h += `<td colspan="3"></td></tr>`;
+  h += `<tr class="grand"><td colspan="3">GENEL TOPLAM · ИТОГО (nakliye dahil, с НДС 22%)</td>`;
+  S.forEach(s => { h += `<td colspan="3" class="num">${rub(s.col.grandTotal)}</td>`; });
+  h += `<td colspan="3"></td></tr>`;
+  (['payment', 'delivery', 'deliveryPlace'] as const).forEach(key => {
+    h += `<tr class="terms"><td colspan="3"><b>${esc(TDF_TERM_ROWS.find(x => x.key === key)!.label)}</b></td>`;
+    S.forEach(s => {
+      const t = s.col.offer.terms?.[key];
+      const v = termText(s.col, key);
+      h += `<td colspan="3" class="${v ? (t?.conflict ? 'bad' : '') : 'miss'}">${v ? esc(v) : 'Teklifte yok'}${t?.conflict ? `<span class="ru">! ${esc(t.conflict)}</span>` : ''}</td>`;
+    });
+    h += `<td colspan="3"></td></tr>`;
+  });
   h += `<tr class="terms"><td colspan="3"><b>Satınalmacının notu · Примечание</b></td>`;
   S.forEach(s => { h += `<td colspan="3">${nl2br(s.col.offer.note || '')}</td>`; });
   h += `<td colspan="3"></td></tr></tbody></table>`;
@@ -175,11 +184,12 @@ export function renderTdfHtml(form: TdfForm, opts: TdfHtmlOptions = {}): string 
     S.forEach(s => {
       const t = s.col.offer.terms?.[row.key];
       const v = termText(s.col, row.key);
-      const optional = row.key === 'installation' || row.key === 'warranty';
-      h += `<td class="${!v && !optional ? 'miss' : (t?.conflict ? 'bad' : '')}">${v ? esc(v) : (optional ? '—' : 'Teklifte yok')}${t?.source === 'user' && v ? ' <span class="tag user">elle</span>' : ''}${t?.conflict ? `<span class="ru">! ${esc(t.conflict)}</span>` : ''}</td>`;
+      const optional = row.key === 'warranty';
+      h += `<td class="${!v && !optional ? 'miss' : (t?.conflict ? 'bad' : '')}">${v ? esc(v) : (optional ? '—' : 'Teklifte yok')}${t?.source === 'user' && v ? ' <span class="tag user">elle</span>' : ''}${t?.raw && t.raw !== v ? `<span class="ru">Teklifte: ${esc(t.raw)}</span>` : ''}${t?.conflict ? `<span class="ru">! ${esc(t.conflict)}</span>` : ''}</td>`;
     });
     h += `</tr>`;
   });
+  h += `<tr><td><b>Nakliye · Доставка</b></td>${S.map(s => `<td class="${s.col.freightMode === 'missing' ? 'miss' : ''}">${esc(freightText(s.col))}</td>`).join('')}</tr>`;
   h += `<tr><td><b>Belge · Документ</b></td>${S.map(s => `<td>${esc(r.documents.find(d => d.supplier === s.short)?.current || '')}</td>`).join('')}</tr>`;
   h += `<tr><td><b>INN</b></td>${S.map(s => `<td>${esc(s.col.offer.inn || '—')}</td>`).join('')}</tr>`;
   if (S.some(s => (s.col.offer.note || '').trim())) h += `<tr><td><b>Satınalmacının notu · Примечание</b></td>${S.map(s => `<td>${nl2br(s.col.offer.note || '')}</td>`).join('')}</tr>`;
@@ -220,15 +230,15 @@ export function renderTdfHtml(form: TdfForm, opts: TdfHtmlOptions = {}): string 
   // 5 · Kalite
   h += `<div class="sec"><h3>5 · Malzeme ve kalite değerlendirmesi <span class="ru">Качество</span>${form.ai?.generatedAt ? ' <span class="ai">yapay zekâ araştırması · kontrol edilmeli</span>' : ''}</h3>`;
   h += r.qualityItems.length
-    ? `<div class="qual">${r.qualityItems.map(q => `<div><b>${esc(q.title)}${q.source === 'user' ? ' <span class="tag user">satınalmacı</span>' : ''}</b>${nl2br(q.text)}</div>`).join('')}</div>`
+    ? `<div class="qual">${r.qualityItems.map(q => `<div><b>${esc(q.title)}${q.source === 'user' ? ' <span class="tag user">satınalmacı</span>' : ''}</b>${nl2br(q.text)}${q.product ? `<span class="lbl">Ürün</span>${nl2br(q.product)}` : ''}${q.brand ? `<span class="lbl">Marka / üretici</span>${nl2br(q.brand)}` : ''}${q.notes ? `<span class="lbl">Dikkat</span>${nl2br(q.notes)}` : ''}</div>`).join('')}</div>`
     : `<p class="hint">Kalite değerlendirmesi henüz yapılmadı. Karşılaştırma ekranındaki "Yapay zekâ değerlendirmesi" düğmesi bu bölümü doldurur; satınalmacı da kendi yorumunu yazabilir.</p>`;
   if (form.ai?.sources?.length) h += `<p class="hint">Kaynaklar: ${form.ai.sources.slice(0, 8).map(u => `<a href="${esc(u)}">${esc(u.replace(/^https?:\/\//, '').slice(0, 60))}</a>`).join(' · ')}</p>`;
   h += `</div>`;
 
   // 6 · Firma güvenilirliği
-  h += `<div class="sec"><h3>6 · Firma güvenilirliği <span class="ru">Надёжность поставщика</span></h3><table><thead><tr><th>Firma</th><th>INN</th><th>Bizdeki geçmiş alımlar</th><th>Durum · kuruluş · sermaye</th><th>Risk</th><th>Not ve kaynak</th></tr></thead><tbody>`;
+  h += `<div class="sec"><h3>6 · Firma güvenilirliği <span class="ru">Надёжность поставщика</span></h3><table><thead><tr><th>Firma</th><th>INN</th><th>Bizdeki geçmiş alımlar</th><th>Durum · kuruluş · sermaye</th><th>Risk</th><th>Not, yorumlar ve kaynak</th></tr></thead><tbody>`;
   r.vendorRows.forEach(v => {
-    h += `<tr><td>${esc(v.name)}</td><td>${esc(v.inn || '—')}</td><td>${esc(v.history || '—')}</td><td>${esc(v.aiStatus || '—')}</td><td>${esc(v.aiRisk || '—')}</td><td>${esc(v.aiNotes)}${v.sources.length ? `<span class="ru">${v.sources.slice(0, 3).map(u => `<a href="${esc(u)}">${esc(u.replace(/^https?:\/\//, '').slice(0, 40))}</a>`).join(' · ')}</span>` : ''}</td></tr>`;
+    h += `<tr><td>${esc(v.name)}</td><td>${esc(v.inn || '—')}</td><td>${esc(v.history || '—')}</td><td>${esc(v.aiStatus || '—')}</td><td>${esc(v.aiRisk || '—')}</td><td>${esc(v.aiNotes)}${v.aiReviews ? `<br><i>Yorumlar:</i> ${esc(v.aiReviews)}` : ''}${v.sources.length ? `<span class="ru">${v.sources.slice(0, 3).map(u => `<a href="${esc(u)}">${esc(u.replace(/^https?:\/\//, '').slice(0, 40))}</a>`).join(' · ')}</span>` : ''}</td></tr>`;
   });
   h += `</tbody></table>`;
   if (!form.ai?.vendorChecks || !Object.keys(form.ai.vendorChecks).length) h += `<p class="hint">Durum, sermaye ve risk sütunları yapay zekâ değerlendirmesi çalıştırılınca kaynaklı olarak dolar. Bilgi bulunamazsa boş kalır, tahmin yazılmaz.</p>`;
