@@ -6,7 +6,7 @@
  */
 import ExcelJS from 'exceljs';
 import { computeTdf, TdfComputed, TdfForm, tdfFormat } from '../src/utils/tdfEngine';
-import { buildTdfReport, cellDelivery, TDF_LEVEL_LABEL, TDF_TERM_ROWS, TDF_UNIT_LABEL, termText } from '../src/utils/tdfReport';
+import { buildTdfReport, cellBrandNote, freightText, materialSpecText, TDF_LEVEL_LABEL, TDF_TERM_ROWS, TDF_UNIT_LABEL, termText } from '../src/utils/tdfReport';
 
 const NAVY = 'FF102C54', NAVY2 = 'FF1E3F6E', HEAD = 'FFD6DCE4', SUM = 'FFD9E1F2', BEST = 'FFFFEB9C', GOOD = 'FFE2F5EC', GOODF = 'FF0B7A4B',
   BAD = 'FFFDE8E6', BADF = 'FFB42318', WARN = 'FFFFF3D6', WARNF = 'FFA15C00', GREY = 'FFF5F6F8', INFO = 'FFE9EFFF', INFOF = 'FF2F5BD3',
@@ -119,7 +119,7 @@ export async function buildTdfWorkbook(form: TdfForm, opts: { todayIso?: string;
   S.forEach((s, k) => {
     const [a] = spanOf(k);
     box(h1, h1, a, a + 2, s.short, { bg: NAVY, fc: WHITE, b: true, sz: 11, al: 'center' });
-    ['Birim fiyat KDV\'li\nЦена за ед.', 'Toplam fiyat\nОбщая стоимость', 'Teslim\nСрок поставки'].forEach((t, j) => box(h2, h2, a + j, a + j, t, { bg: HEAD, b: true, sz: 8, al: 'center' }));
+    ['Birim fiyat KDV\'li\nЦена за ед.', 'Toplam fiyat\nОбщая стоимость', 'Marka · teslim\nБренд · срок'].forEach((t, j) => box(h2, h2, a + j, a + j, t, { bg: HEAD, b: true, sz: 8, al: 'center' }));
   });
   box(h1, h1, bc, bc + 2, 'En iyi fiyat · Лучшая цена', { bg: BEST, b: true, sz: 10, al: 'center' });
   ['Firma\nПоставщик ✓', 'Birim fiyat', '1. ile 2. fark\nРазница'].forEach((t, j) => box(h2, h2, bc + j, bc + j, t, { bg: BEST, b: true, sz: 8, al: 'center' }));
@@ -129,10 +129,11 @@ export async function buildTdfWorkbook(form: TdfForm, opts: { todayIso?: string;
   c.materials.forEach((m, i) => {
     const rr = row;
     ws.getCell(rr, 1).value = i + 1;
-    ws.getCell(rr, 2).value = m.name;
+    const specText = materialSpecText(m);
+    ws.getCell(rr, 2).value = specText ? { richText: [{ text: m.name, font: font({ bold: true }) }, { text: `\n${specText}`, font: font({ size: 8, color: { argb: MUTED } }) }] } : m.name;
     const q = ws.getCell(rr, 3); q.value = m.orderQty; q.numFmt = QTY;
     const comparableCols: string[] = [];
-    let maxLen = m.name.length;
+    let maxLen = m.name.length + (specText ? 30 : 0);
     S.forEach((s, k) => {
       const [a] = spanOf(k);
       const x = m.cells[s.key];
@@ -142,7 +143,7 @@ export async function buildTdfWorkbook(form: TdfForm, opts: { todayIso?: string;
       }
       const p = ws.getCell(rr, a); p.value = Math.round(x.unitPrice * 100) / 100; p.numFmt = NUM;
       const t = ws.getCell(rr, a + 1); t.value = { formula: `C${rr}*${colL(a)}${rr}`, result: Math.round(x.total * 100) / 100 }; t.numFmt = NUM;
-      const del = cellDelivery(m, s.col);
+      const del = cellBrandNote(m, s.col);
       ws.getCell(rr, a + 2).value = del;
       maxLen = Math.max(maxLen, del.length * 0.9);
       const excluded = !!(x.warning && /Teknik fark|Birim farklı/.test(x.warning));
@@ -189,12 +190,31 @@ export async function buildTdfWorkbook(form: TdfForm, opts: { todayIso?: string;
     });
   });
   // Toplamlar
-  box(row, row, 1, 3, 'GENEL TOPLAM · ИТОГО (с НДС 22%)', { bg: SUM, b: true });
+  const matRow = row;
+  box(row, row, 1, 3, 'Malzeme toplamı · Материалы (с НДС 22%)', { bg: GREY, b: true, sz: 9 });
   S.forEach((s, k) => {
     const [a, b] = spanOf(k);
-    box(row, row, a, b, { formula: `SUBTOTAL(9,${colL(a + 1)}${d0}:${colL(a + 1)}${d1})`, result: Math.round(s.col.total * 100) / 100 }, { bg: SUM, b: true, al: 'right', fmt: NUM });
+    box(row, row, a, b, { formula: `SUBTOTAL(9,${colL(a + 1)}${d0}:${colL(a + 1)}${d1})`, result: Math.round(s.col.total * 100) / 100 }, { bg: GREY, al: 'right', fmt: NUM });
   });
-  box(row, row, bc, bc + 2, { formula: `SUMPRODUCT(C${d0}:C${d1},${colL(bc + 1)}${d0}:${colL(bc + 1)}${d1})`, result: Math.round(c.mixTotal * 100) / 100 }, { bg: SUM, b: true, al: 'right', fmt: NUM });
+  box(row, row, bc, bc + 2, { formula: `SUMPRODUCT(C${d0}:C${d1},${colL(bc + 1)}${d0}:${colL(bc + 1)}${d1})`, result: Math.round(c.mixTotal * 100) / 100 }, { bg: GREY, al: 'right', fmt: NUM });
+  row++;
+  const frRow = row;
+  box(row, row, 1, 3, 'Nakliye · Доставка', { bg: GREY, b: true, sz: 9 });
+  S.forEach((s, k) => {
+    const [a, b] = spanOf(k);
+    const sep = s.col.freightMode === 'separate';
+    const miss = s.col.freightMode === 'missing';
+    box(row, row, a, b, sep ? s.col.freight : freightText(s.col), { bg: miss ? WARN : GREY, fc: miss ? WARNF : BLACK, b: miss, sz: 9, al: sep ? 'right' : 'center', fmt: sep ? NUM : undefined });
+  });
+  box(row, row, bc, bc + 2, 'kalem kalem en iyi (nakliye hariç)', { bg: GREY, sz: 8, al: 'center' });
+  row++;
+  box(row, row, 1, 3, 'GENEL TOPLAM · ИТОГО (nakliye dahil, с НДС 22%)', { bg: SUM, b: true });
+  S.forEach((s, k) => {
+    const [a, b] = spanOf(k);
+    const fr = `${colL(a)}${frRow}`;
+    box(row, row, a, b, { formula: `${colL(a)}${matRow}+IF(ISNUMBER(${fr}),${fr},0)`, result: Math.round(s.col.grandTotal * 100) / 100 }, { bg: SUM, b: true, al: 'right', fmt: NUM });
+  });
+  box(row, row, bc, bc + 2, '', { bg: SUM });
   ws.getRow(row).height = 20; row++;
   box(row, row, 1, 3, 'Kalem sayısı · Позиций', { bg: GREY, b: true, sz: 9 });
   S.forEach((s, k) => {
@@ -202,24 +222,21 @@ export async function buildTdfWorkbook(form: TdfForm, opts: { todayIso?: string;
     const full = s.col.covered === nMat;
     box(row, row, a, b, `${s.col.covered}/${nMat}`, { bg: full ? GREY : WARN, fc: full ? BLACK : WARNF, b: !full, al: 'center', sz: 9 });
   });
-  box(row, row, bc, bc + 2, 'kalem kalem en iyi', { bg: GREY, sz: 9, al: 'center' }); row++;
-  if (S.some(s => s.col.freight > 0)) {
-    box(row, row, 1, 3, 'Nakliye (fiyata dahil değil) · Доставка', { bg: GREY, b: true, sz: 9 });
-    S.forEach((s, k) => { const [a, b] = spanOf(k); box(row, row, a, b, s.col.freight > 0 ? s.col.freight : '—', { bg: GREY, sz: 9, al: 'right', fmt: NUM }); });
-    box(row, row, bc, bc + 2, '', { bg: GREY }); row++;
-  }
-  box(row, row, 1, 3, 'Ödeme koşulları · Условия оплаты', { bg: GREY, b: true, sz: 9 });
-  let payH = 30;
-  S.forEach((s, k) => {
-    const [a, b] = spanOf(k);
-    const t = s.col.offer.terms?.payment;
-    const v = termText(s.col, 'payment');
-    const text = v ? `${v}${t?.conflict ? `\n! ${t.conflict}` : ''}` : 'TEKLİFTE YOK';
-    const bad = !v || !!t?.conflict;
-    box(row, row, a, b, text, { bg: bad ? WARN : GREY, fc: bad ? WARNF : BLACK, b: bad, sz: 9 });
-    payH = Math.max(payH, heightFor(text, 36, 13, 30));
+  box(row, row, bc, bc + 2, '', { bg: GREY }); row++;
+  (['payment', 'delivery', 'deliveryPlace'] as const).forEach(key => {
+    box(row, row, 1, 3, TDF_TERM_ROWS.find(x => x.key === key)!.label, { bg: GREY, b: true, sz: 9 });
+    let hh = 20;
+    S.forEach((s, k) => {
+      const [a, b] = spanOf(k);
+      const t = s.col.offer.terms?.[key];
+      const v = termText(s.col, key);
+      const text = v ? `${v}${t?.conflict ? `\n! ${t.conflict}` : ''}` : 'TEKLİFTE YOK';
+      const bad = !v || !!t?.conflict;
+      box(row, row, a, b, text, { bg: bad ? WARN : GREY, fc: bad ? WARNF : BLACK, b: bad, sz: 9, al: 'center' });
+      hh = Math.max(hh, heightFor(text, 36, 13, 20));
+    });
+    box(row, row, bc, bc + 2, '', { bg: GREY }); ws.getRow(row).height = hh; row++;
   });
-  box(row, row, bc, bc + 2, '', { bg: GREY }); ws.getRow(row).height = payH; row++;
   box(row, row, 1, 3, 'Satınalmacının notu · Примечание', { bg: GREY, b: true, sz: 9 });
   let noteH = 30;
   S.forEach((s, k) => {
@@ -278,10 +295,12 @@ export async function buildTdfWorkbook(form: TdfForm, opts: { todayIso?: string;
       get: (sx: typeof S[number]) => {
         const t = sx.col.offer.terms?.[tr.key];
         const v = termText(sx.col, tr.key);
-        const optional = tr.key === 'installation' || tr.key === 'warranty';
-        return { text: v ? `${v}${t?.source === 'user' ? ' (elle)' : ''}${t?.conflict ? `\n! ${t.conflict}` : ''}` : (optional ? '—' : 'Teklifte yok'), bad: (!v && !optional) || !!t?.conflict };
+        const optional = tr.key === 'warranty';
+        const raw = t?.raw && t.raw !== v ? `\nTeklifte: ${t.raw}` : '';
+        return { text: v ? `${v}${t?.source === 'user' ? ' (elle)' : ''}${raw}${t?.conflict ? `\n! ${t.conflict}` : ''}` : (optional ? '—' : 'Teklifte yok'), bad: (!v && !optional) || !!t?.conflict };
       }
     })),
+    { label: 'Nakliye · Доставка', get: sx => ({ text: freightText(sx.col), bad: sx.col.freightMode === 'missing' }) },
     { label: 'Belge · Документ', get: sx => ({ text: r.documents.find(d => d.supplier === sx.short)?.current || '', bad: false }) },
     { label: 'INN', get: sx => ({ text: sx.col.offer.inn || '—', bad: false }) }
   ];
@@ -303,9 +322,10 @@ export async function buildTdfWorkbook(form: TdfForm, opts: { todayIso?: string;
   band(row, `3 · MALZEME VE KALİTE DEĞERLENDİRMESİ  ·  Качество${form.ai?.generatedAt ? '   (yapay zekâ araştırması, kontrol edilmeli)' : ''}`); row++;
   if (r.qualityItems.length) {
     r.qualityItems.forEach(q => {
+      const text = [q.text, q.product ? `Ürün: ${q.product}` : '', q.brand ? `Marka: ${q.brand}` : '', q.notes ? `Not: ${q.notes}` : ''].filter(Boolean).join('\n');
       box(row, row, 1, 3, `${q.title}${q.source === 'user' ? ' (satınalmacı)' : ''}`, { bg: GREY, b: true, sz: 9 });
-      box(row, row, 4, NC, q.text, { sz: 9 });
-      ws.getRow(row).height = heightFor(q.text, totalWidth - 47, 13, 22); row++;
+      box(row, row, 4, NC, text, { sz: 9 });
+      ws.getRow(row).height = heightFor(text, totalWidth - 47, 13, 22); row++;
     });
     if (form.ai?.sources?.length) { box(row, row, 1, NC, `Kaynaklar: ${form.ai.sources.slice(0, 8).join(' · ')}`, { fc: MUTED, sz: 8, border: false }); row++; }
   } else {
@@ -319,10 +339,10 @@ export async function buildTdfWorkbook(form: TdfForm, opts: { todayIso?: string;
   const rest = NC - vCols[1][1];
   const step = Math.max(1, Math.floor(rest / 4));
   for (let i = 0; i < 4; i++) { const a = vCols[vCols.length - 1][1] + 1; vCols.push([a, i === 3 ? NC : Math.min(NC, a + step - 1)]); }
-  ['Firma', 'INN', 'Bizdeki geçmiş alımlar', 'Durum · kuruluş · sermaye', 'Risk', 'Not ve kaynak'].forEach((t, i) => box(row, row, vCols[i][0], vCols[i][1], t, { bg: HEAD, b: true, sz: 9 }));
+  ['Firma', 'INN', 'Bizdeki geçmiş alımlar', 'Durum · kuruluş · sermaye', 'Risk', 'Not, yorumlar ve kaynak'].forEach((t, i) => box(row, row, vCols[i][0], vCols[i][1], t, { bg: HEAD, b: true, sz: 9 }));
   row++;
   r.vendorRows.forEach(v => {
-    const vals = [v.name, v.inn || '—', v.history || '—', v.aiStatus || '—', v.aiRisk || '—', [v.aiNotes, ...v.sources.slice(0, 3)].filter(Boolean).join('\n')];
+    const vals = [v.name, v.inn || '—', v.history || '—', v.aiStatus || '—', v.aiRisk || '—', [v.aiNotes, v.aiReviews ? `Yorumlar: ${v.aiReviews}` : '', ...v.sources.slice(0, 3)].filter(Boolean).join('\n')];
     vals.forEach((t, i) => box(row, row, vCols[i][0], vCols[i][1], t, { sz: 9, b: i === 0 }));
     ws.getRow(row).height = heightFor(vals[5], 40, 12, 20); row++;
   });
