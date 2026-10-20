@@ -15,6 +15,7 @@ import { InvoiceRecord, InvoiceItem, DiscountRecord } from '../types';
 import { processItem, ProcessItemInput, ProcessedItemResult } from './aiDecisionEngine';
 import { normalizeUnit, normalizeQuantityAndPrice, extractTechnicalSpecs } from './comparativeCalculation';
 import { areSpecSignaturesCompatible } from './materialGroupIntegrity';
+import { comparisonMultiplierForVat } from './vatBasis';
 import {
   buildSmartOriginalSignature,
   buildMode2CrossBrandFamilies,
@@ -75,6 +76,11 @@ export interface LineAuditResult {
     diameter?: string;
     grade?: string;
     dimensions?: string;
+    /** KDV hariç birim fiyat (belgeden) */
+    unitPriceNet?: number;
+    vatPercentage?: number;
+    /** false: satır belgeyle doğrulanamadı (miktar × fiyat ≠ tutar ya da toplam tutmuyor) */
+    lineVerified?: boolean;
   };
   processed: ProcessedItemResult;
   normalizedDraftUnitPrice: number; // Excl. VAT / standard currency
@@ -188,6 +194,39 @@ export function normalizePriceForComparison(
 }
 
 /**
+ * Kıyaslama tabanı: %22 KDV DAHİL birim fiyat (Berkant kararı, 2026-10-18; bkz. vatBasis.ts).
+ * Sunucudan gelen arşiv kalemlerinde unitPrice bazen net, bazen brüt tutulur; tek doğru taban
+ * unitPriceNet × KDV çarpanıdır. Net bilgisi olmayan (taslak) satırda unitPrice faturadaki KDV dahil fiyattır.
+ */
+export function comparisonGrossUnitPrice(item: { unitPrice?: number; unitPriceNet?: number; vatPercentage?: number; grossUnitPrice?: number; isGrossInvoicePrice?: boolean } | null | undefined): number {
+  if (!item) return 0;
+  const net = Number(item.unitPriceNet) || 0;
+  const grossStored = Number(item.grossUnitPrice) || 0;
+  // %22'lik satırın belgedeki KDV dahil fiyatı zaten tabandır (net'ten geri hesaplamak kuruş kaydırır).
+  if (Number(item.vatPercentage) === 22 && grossStored > 0) return Number(grossStored.toFixed(2));
+  if (net > 0 && item.vatPercentage !== undefined && item.vatPercentage !== null) {
+    return Number((net * comparisonMultiplierForVat(item.vatPercentage)).toFixed(2));
+  }
+  const gross = Number(item.grossUnitPrice) || 0;
+  if (gross > 0) return Number(gross.toFixed(2));
+  return Number((Number(item.unitPrice) || 0).toFixed(2));
+}
+
+/** Satır kendi içinde tutarlı mı (miktar × birim fiyat ≈ satır tutarı)? Tutar yoksa kontrol edilemez → true. */
+export function isLineArithmeticConsistent(item: { quantity?: number; unitPrice?: number; totalPrice?: number; discountAmount?: number }): boolean {
+  const qty = Number(item.quantity) || 0;
+  const price = Number(item.unitPrice) || 0;
+  const total = Number(item.totalPrice) || 0;
+  if (!(qty > 0 && price > 0 && total > 0)) return true;
+  const expected = qty * price - (Number(item.discountAmount) || 0);
+  return Math.abs(expected - total) <= Math.max(1, total * 0.01);
+}
+
+function cleanDocNo(v: string | undefined): string {
+  return String(v || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+/**
  * Checks whether two sets of technical specs match or conflict.
  * If diameter or grade or thickness conflict, returns false.
  */
@@ -230,6 +269,8 @@ export function areTechnicalSpecsCompatible(
 }
 
 export interface PreApprovalAuditOptions {
+  /** Denetlenen faturanın numarası: arşivdeki aynı faturayla kendini kıyaslamayı önler */
+  draftInvoiceNumber?: string;
   isUrgent?: boolean;
   isUrgentPurchase?: boolean;
   isSingleVendor?: boolean;
@@ -265,11 +306,15 @@ export function auditSingleLineItem(
   if (draftItem.grade && !draftSpecs.grade) draftSpecs.grade = draftItem.grade;
   if (draftItem.dimensions && !draftSpecs.dimensions) draftSpecs.dimensions = draftItem.dimensions;
 
+  // Taslak satırın kıyas fiyatı: faturadaki KDV dahil birim fiyat (%22 tabanı), yalnızca para birimi çevrilir.
+  // Taslakta unitPrice faturadaki KDV dahil fiyattır; yalnızca %20'lik faturalar %22 tabanına taşınır.
+  const draftBasisPrice = Number(draftItem.vatPercentage) === 20 && Number(draftItem.unitPriceNet) > 0
+    ? comparisonGrossUnitPrice({ unitPriceNet: draftItem.unitPriceNet, vatPercentage: 20 })
+    : draftItem.unitPrice;
   const normalizedDraftUnitPrice = normalizePriceForComparison(
-    draftItem.unitPrice,
+    draftBasisPrice,
     draftItem.currency,
-    draftItem.isVatIncluded,
-    draftItem.taxRate || 20
+    false
   );
 
   const draftSupplier = (draftItem.supplier || '').trim().toLowerCase();
@@ -297,15 +342,22 @@ export function auditSingleLineItem(
   // 2. Scan historical invoices for matching records (Mode 1: Apple-to-Apple)
   const candidateHistoricalMatches: HistoricalPricePoint[] = [];
 
+  const draftDocNo = cleanDocNo(options?.draftInvoiceNumber);
   for (const inv of historicalInvoices) {
     if (inv.isDeleted) continue;
     if (!Array.isArray(inv.items)) continue;
+    // Kalemleri fatura toplamını tutmayan (okuması doğrulanamamış) arşiv faturaları fiyat referansı olamaz.
+    if ((inv as any).linesReconciled === false || (inv as any).lineCheck === 'mismatch') continue;
 
     const invSupplier = (inv.supplier || '').trim().toLowerCase();
     const invJobsiteId = inv.jobsiteId || '';
+    // Denetlenen faturanın arşivdeki kopyası kendisiyle kıyaslanmaz.
+    if (draftDocNo && cleanDocNo(inv.invoiceNumber) === draftDocNo && draftSupplier && invSupplier &&
+        (draftSupplier.includes(invSupplier) || invSupplier.includes(draftSupplier))) continue;
 
     for (const pastIt of inv.items) {
       if (!pastIt.unitPrice || pastIt.unitPrice <= 0) continue;
+      if ((pastIt as any).lineVerified === false || !isLineArithmeticConsistent(pastIt as any)) continue;
 
       const pastSig = buildSmartOriginalSignature({
         originalName: pastIt.originalName,
@@ -402,22 +454,25 @@ export function auditSingleLineItem(
 
       if (!isMatch) continue;
 
-      // Unit conversion check
+      // Unit conversion check (KDV dahil %22 tabanındaki fiyat üzerinden)
+      const pastGrossUnitPrice = comparisonGrossUnitPrice(pastIt as any);
+      const sameUnit = normalizeUnit(pastIt.unit || 'adet') === normalizeUnit(draftItem.unit || 'adet');
       const unitConversion = normalizeQuantityAndPrice(
         pastIt.quantity || 1,
-        pastIt.unitPrice,
+        pastGrossUnitPrice,
         pastIt.unit || 'adet',
         draftItem.unit || 'adet',
         draftItem.materialName || pastIt.materialName || '',
         draftItem.category || pastIt.category || ''
       );
+      // Farklı birim ve güvenilir dönüşüm yoksa (ör. рулон ↔ м²) fiyatlar kıyaslanamaz.
+      if (!sameUnit && !unitConversion.conversionApplied) continue;
 
-      // Normalization of past price (VAT & Currency)
+      // Normalization of past price (Currency; KDV tabanı zaten %22 dahil)
       const normalizedPastUnitPrice = normalizePriceForComparison(
-        unitConversion.normalizedUnitPrice,
+        sameUnit ? pastGrossUnitPrice : unitConversion.normalizedUnitPrice,
         (inv as any).currency || 'RUB',
-        (inv as any).isVatIncluded || false,
-        (inv as any).taxRate || 20
+        false
       );
 
       // Determine Comparison Level
@@ -440,14 +495,14 @@ export function auditSingleLineItem(
         supplier: inv.supplier || 'Geçmiş Tedarikçi',
         jobsiteId: invJobsiteId,
         jobsiteName: inv.jobsiteName || 'Bilinmeyen Şantiye',
-        rawMaterialName: pastIt.materialName,
+        rawMaterialName: pastIt.originalName || pastIt.materialName,
         canonicalName: pastProcessed.canonicalName,
-        rawUnitPrice: pastIt.unitPrice,
+        rawUnitPrice: pastGrossUnitPrice,
         normalizedUnitPrice: normalizedPastUnitPrice,
         unit: draftItem.unit,
-        quantity: pastIt.quantity || 1,
+        quantity: sameUnit ? (pastIt.quantity || 1) : Number((unitConversion.normalizedQty || pastIt.quantity || 1).toFixed(3)),
         currency: 'RUB',
-        isVatIncluded: false,
+        isVatIncluded: true,
         matchScore: Number(matchScore.toFixed(2)),
         comparisonLevel: level,
         specs: pastSpecs
@@ -549,6 +604,15 @@ export function auditSingleLineItem(
     };
   }
 
+  // Taslak satır belgeyle doğrulanamadıysa (okuma hatası şüphesi) fiyat farkı iddia edilmez.
+  if (draftItem.lineVerified === false || !isLineArithmeticConsistent(draftItem)) {
+    status = 'DÜŞÜK GÜVENLİ EŞLEŞME';
+    statusColor = 'orange';
+    decisionReasoning = `Bu satırın fiyatı belgeden doğrulanamadı (miktar × birim fiyat satır tutarını veya kalem toplamı fatura toplamını vermiyor). Fark iddiası yapılmadı; faturadaki rakamları kontrol edin. Geçmiş en iyi fiyat: ${minHistoricalPrice.toLocaleString('tr-TR')} RUB.`;
+    suggestedAction = undefined;
+  }
+  const draftUnverified = status === 'DÜŞÜK GÜVENLİ EŞLEŞME' && (draftItem.lineVerified === false || !isLineArithmeticConsistent(draftItem));
+
   return {
     lineIndex,
     draftItem,
@@ -564,17 +628,17 @@ export function auditSingleLineItem(
     avgHistoricalPrice,
     lastHistoricalPrice,
     historicalPurchasesCount: candidateHistoricalMatches.length,
-    absolutePriceDiff,
-    percentagePriceDiff,
-    potentialSavings,
+    absolutePriceDiff: draftUnverified ? 0 : absolutePriceDiff,
+    percentagePriceDiff: draftUnverified ? 0 : percentagePriceDiff,
+    potentialSavings: draftUnverified ? 0 : potentialSavings,
     status,
     statusColor,
     decisionReasoning,
     isSingleVendor: !!options?.isSingleVendor,
     isUrgentPurchase: !!options?.isUrgentPurchase,
-    isLowConfidence,
+    isLowConfidence: isLowConfidence || draftUnverified,
     isScopeChange: !!options?.isScopeChange,
-    isCheaperPastPurchaseAvailable,
+    isCheaperPastPurchaseAvailable: draftUnverified ? false : isCheaperPastPurchaseAvailable,
     suggestedAction,
     smartSignature: draftSig,
     crossBrandEconomySuggestion
@@ -607,7 +671,7 @@ export function auditEntireInvoice(
       },
       index,
       historicalInvoices,
-      options
+      { ...options, draftInvoiceNumber: options?.draftInvoiceNumber || draftInvoice.invoiceNumber }
     );
   });
 

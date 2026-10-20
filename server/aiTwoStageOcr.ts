@@ -18,6 +18,7 @@ import {
   extractVendorInn,
   isInvoiceHeaderOrAddressGarbage
 } from '../src/utils/vendorNormalizer';
+import { parseInvoiceText, verifyParsedInvoice, extractDocumentHeaderDate, mapDocumentUnit } from '../src/utils/invoiceLineParser';
 
 const parseNumberSafe = (val: any): number => {
   if (val === undefined || val === null) return 0;
@@ -677,12 +678,16 @@ export function fallbackExtractInvoiceFromTextOrCsv(
     invoiceNumber = `BLG-${Date.now().toString().slice(-6)}`;
   }
 
-  // 2. Extract Date (YYYY-MM-DD)
+  // 2. Extract Date (YYYY-MM-DD) — önce belgenin kendi başlık tarihi ("Счет на оплату № .. от .."),
+  // sözleşme tarihi (Договор ... от 02.02.2023) asla belge tarihi sayılmaz.
   let date = new Date().toISOString().split('T')[0];
+  const headerDate = extractDocumentHeaderDate(fullText);
   const isoMatch = fullText.match(/\b(202\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b/);
   const dotMatch = fullText.match(/\b(0[1-9]|[12]\d|3[01])[./](0[1-9]|1[0-2])[./](202\d)\b/);
   const ruDateMatch = fullText.match(/[«"]?(\d{1,2})[»"]?\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+(202\d)\b/i);
-  if (isoMatch) {
+  if (headerDate) {
+    date = headerDate;
+  } else if (isoMatch) {
     date = isoMatch[1];
   } else if (dotMatch) {
     date = `${dotMatch[3]}-${dotMatch[2]}-${dotMatch[1]}`;
@@ -889,7 +894,16 @@ export async function processInvoiceTwoStages(params: {
   const isSummaryOnly = params.scanMode === 'full'
     ? false
     : (params.scanMode === 'summary-only' || params.offerType === 'first' || params.offerType === 'round');
-  const ai = getGenAI();
+  // Anahtar yoksa ya da AI kullanılamıyorsa belge YİNE DE metin katmanından okunur (aşağıdaki yerel ayrıştırıcı).
+  // Eskiden burada fırlayan hata, PDF metnini hiç kullanmayan boş bir "kurtarma" kaydına düşüyordu.
+  let ai: any = null;
+  let aiInitError: Error | null = null;
+  try {
+    ai = getGenAI();
+  } catch (initErr: any) {
+    aiInitError = initErr;
+    console.warn('[AI OCR] Yapay zekâ kullanılamıyor, belge yerel ayrıştırıcıyla okunacak:', initErr?.message);
+  }
   let usedModel = 'gemini-3.8-flash';
   let retryCount = 0;
   let rawExtracted: any = null;
@@ -994,6 +1008,7 @@ export async function processInvoiceTwoStages(params: {
     const contents = buildMultimodalContents(lightPrompt);
 
     try {
+      if (!ai) throw aiInitError || new Error('AI kullanılamıyor');
       const genResult = await generateContentWithResilience(ai, {
         contents,
         config: { responseMimeType: "application/json" },
@@ -1072,7 +1087,7 @@ export async function processInvoiceTwoStages(params: {
       seller: resolvedSupplier,
       taxId: extractStringSafe(rawExtracted.taxId) || extractVendorInn(extractedPdfText),
       invoiceNumber: resolvedSummaryInvNo,
-      date: extractStringSafe(rawExtracted.date) || extractStringSafe(localSupplement.date, new Date().toISOString().split('T')[0]),
+      date: extractDocumentHeaderDate(extractedPdfText) || extractStringSafe(rawExtracted.date) || extractStringSafe(localSupplement.date, new Date().toISOString().split('T')[0]),
       currency: extractStringSafe(rawExtracted.currency, 'RUB'),
       subtotal: parseNumberSafe(rawExtracted.subtotal?.value ?? rawExtracted.subtotal ?? resolvedTotal),
       discount: 0,
@@ -1134,6 +1149,7 @@ export async function processInvoiceTwoStages(params: {
   );
 
   try {
+    if (!ai) throw aiInitError || new Error('AI kullanılamıyor');
     // Channel 2: Multi-model Gemini chain starting with gemini-3.8-flash
     const genResult = await generateContentWithResilience(ai, {
       contents,
@@ -1232,7 +1248,9 @@ export async function processInvoiceTwoStages(params: {
     extractSupplierName(localFallback.supplier) ||
     'Tedarikçi Firma';
 
-  const resolvedDateStr = extractStringSafe(standardized.date) || extractStringSafe(rawExtracted.date) || extractStringSafe(localFallback.date, new Date().toISOString().split('T')[0]);
+  // Belge başlığındaki tarih (metin katmanından) yapay zekânın okuduğu tarihten önce gelir: AI zaman zaman
+  // "Основание: Договор ... от 02.02.2023" satırındaki sözleşme tarihini fatura tarihi sanıyordu.
+  const resolvedDateStr = extractDocumentHeaderDate(extractedPdfText) || extractStringSafe(standardized.date) || extractStringSafe(rawExtracted.date) || extractStringSafe(localFallback.date, new Date().toISOString().split('T')[0]);
   const resolvedCurrency = extractStringSafe(standardized.currency) || extractStringSafe(rawExtracted.currency, localFallback.currency?.value || 'RUB');
 
   // Resolve authoritative Invoice Grand Total and Tax Amount
@@ -1497,6 +1515,55 @@ export async function processInvoiceTwoStages(params: {
     }
   }
 
+  // STAGE 1b: Katı belge ayrıştırıcısı (invoiceLineParser). Satırlar kendi içinde (miktar × fiyat = tutar)
+  // ve belge toplamıyla kuruşu kuruşuna tutuyorsa fiyatlar yapay zekâdan değil BELGEDEN alınır.
+  const allLockedFromPdf = mappedItems.length > 0 && mappedItems.every((it: any) => it.lineSource === 'invoice_pdf');
+  if (!allLockedFromPdf && extractedPdfText) {
+    try {
+      const strictDoc = parseInvoiceText(extractedPdfText);
+      const strictTotal = Number(strictDoc.totalWithVat || 0);
+      const strictCheck = strictTotal > 0 ? verifyParsedInvoice(strictDoc, strictTotal) : null;
+      if (strictCheck?.verified) {
+        const goodsLines = strictDoc.lines.filter(l => !isFreightItem(l.name));
+        if (goodsLines.length > 0) {
+          const aiPool = [...mappedItems];
+          mappedItems = goodsLines.map((l, idx) => {
+            const grossTotal = Number(l.grossAmount.toFixed(2));
+            const grossUnit = strictDoc.pricesIncludeVat ? l.price : Number((grossTotal / (l.quantity || 1)).toFixed(2));
+            const vatPct = l.vatPct ?? defaultVatPct;
+            const aiIdx = aiPool.findIndex((a: any) => a && Math.abs((Number(a.totalPrice) || 0) - grossTotal) < 1.0);
+            const ai = aiIdx >= 0 ? aiPool.splice(aiIdx, 1)[0] : (mappedItems.length === goodsLines.length ? mappedItems[idx] : null);
+            const trName = /[А-Яа-яЁё]/.test(l.name) ? (translateRussianMaterialToTurkish(l.name) || l.name) : l.name;
+            return {
+              ...(ai || {}),
+              materialName: ai?.materialName || trName,
+              originalName: l.name,
+              category: normalizeCategoryName(ai?.category, `${trName} ${l.name}`),
+              quantity: l.quantity,
+              unit: normalizeExtractedUnit(ai?.unit || mapDocumentUnit(l.unitRaw)),
+              unitPrice: grossUnit,
+              grossUnitPrice: grossUnit,
+              unitPriceNet: vatPct > 0 ? Number((grossUnit / (1 + vatPct / 100)).toFixed(2)) : grossUnit,
+              discountAmount: 0,
+              totalPrice: grossTotal,
+              grossTotalPrice: grossTotal,
+              netTotalPrice: Number(l.netAmount.toFixed(2)),
+              vatPercentage: vatPct,
+              isNetNormalized: true,
+              isGrossInvoicePrice: true,
+              lineSource: 'invoice_pdf',
+              productCode: l.article || ai?.productCode || '',
+              confidence: 0.99
+            };
+          });
+          reconciliationNotes.push(`Kalemler belgenin metin katmanından okundu ve doğrulandı (${goodsLines.length} satır, miktar × fiyat = tutar, toplam ${strictTotal.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ${resolvedCurrency}).`);
+        }
+      }
+    } catch (strictErr: any) {
+      console.warn('[PDF Strict Parser] Satır ayrıştırma atlandı:', strictErr?.message);
+    }
+  }
+
   // STAGE 2: Reverse Accidental AI VAT Division on Image/Scanned Invoices (1.20x / 1.22x / 1.18x / 1.10x)
   const sumBeforeVatCheck = mappedItems.reduce((s: number, it: any) => s + (Number(it.totalPrice) || 0), 0);
   if (targetGoodsTotal > 0 && sumBeforeVatCheck > 0 && Math.abs(targetGoodsTotal - sumBeforeVatCheck) > 2.0) {
@@ -1605,6 +1672,24 @@ export async function processInvoiceTwoStages(params: {
     };
   });
 
+  // SATIR DOĞRULAMA: her satırda miktar × birim fiyat = tutar ve satır toplamı = fatura (mal) toplamı mı?
+  // Doğrulanamayan okumalar işaretlenir; fiyat denetimi ve tasarruf hesapları bu satırlara güvenmez.
+  const sumForCheck = mappedItems.reduce((acc: number, item: any) => acc + (Number(item.totalPrice) || 0), 0);
+  const totalAgrees = targetGoodsTotal > 0 && Math.abs(sumForCheck - targetGoodsTotal) <= Math.max(1.5, targetGoodsTotal * 0.0015);
+  mappedItems = mappedItems.map((it: any) => {
+    const qty = Number(it.quantity) || 0;
+    const expected = qty * (Number(it.unitPrice) || 0) - (Number(it.discountAmount) || 0);
+    const total = Number(it.totalPrice) || 0;
+    const rowOk = qty > 0 && total > 0 && Math.abs(expected - total) <= Math.max(0.5, total * 0.002);
+    return { ...it, lineVerified: rowOk && totalAgrees };
+  });
+  const lineCheck: 'verified' | 'mismatch' = mappedItems.length > 0 && mappedItems.every((it: any) => it.lineVerified) ? 'verified' : 'mismatch';
+  const lineCheckReason = lineCheck === 'verified'
+    ? undefined
+    : (!totalAgrees
+        ? `Kalem toplamı (${sumForCheck.toFixed(2)}) fatura toplamı (${targetGoodsTotal.toFixed(2)}) ile tutmuyor`
+        : 'Bazı satırlarda miktar × birim fiyat satır tutarını vermiyor');
+
   const computedItemsSum = Number(
     mappedItems.reduce((acc: number, item: any) => acc + (Number(item.totalPrice) || 0), 0).toFixed(2)
   );
@@ -1640,6 +1725,8 @@ export async function processInvoiceTwoStages(params: {
     totalAmount: finalTotalAmount,
     calculatedItemsSum: computedItemsSum,
     reconciliationNotes,
+    lineCheck,
+    ...(lineCheckReason ? { lineCheckReason } : {}),
     ...(excludedFreightNetSum > 0 ? {
       excludedFreightAmount: Number(excludedFreightNetSum.toFixed(2)),
       excludedFreightGrossAmount: Number(excludedFreightGrossSum.toFixed(2))

@@ -473,6 +473,14 @@ export interface TechnicalSpecs {
 export interface CanonicalMaterial {
   id: string;
   commonName: string;
+  /** Belgedeki özgün (Rusça) kalem adı */
+  originalName?: string;
+  /** Nihai faturadaki satır sırası (0'dan) */
+  sourceLineIndex?: number;
+  /** false: bu kalem ilk teklifte bulunamadı, referans fiyat yok */
+  referenceFound?: boolean;
+  /** 2 = bire bir ad/artikel eşleştirmesi (invoiceLineMatcher) */
+  lineMatchVersion?: number;
   materialType: string;
   standardUnit: string;
   specs: TechnicalSpecs;
