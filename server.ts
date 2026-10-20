@@ -25,7 +25,7 @@ import path from 'path';
 import crypto from 'crypto';
 import admin from 'firebase-admin';
 import { getStorage } from 'firebase-admin/storage';
-import { initializeApp as initFirebaseApp } from 'firebase/app';
+import { initializeApp as initFirebaseApp, getApps } from 'firebase/app';
 import { 
   getFirestore, 
   collection, 
@@ -37,7 +37,8 @@ import {
   deleteDoc, 
   query, 
   where, 
-  writeBatch 
+  writeBatch,
+  setLogLevel
 } from 'firebase/firestore';
 import { GoogleGenAI, Type } from '@google/genai';
 
@@ -100,6 +101,23 @@ import { registerTdfRoutes } from './server/tdfService';
 // 1. FIREBASE & STORAGE ENTEGRASYONU
 // ============================================================================
 // Cloud Storage için Firebase Admin SDK, Firestore için ise Proje Web SDK kullanılır.
+try {
+  setLogLevel('silent');
+} catch (_) {}
+
+const _origConsoleError = console.error.bind(console);
+console.error = (...args: any[]) => {
+  const firstMsg = args.map(a => (typeof a === 'string' ? a : (a?.message || ''))).join(' ');
+  if (
+    firstMsg.includes("GrpcConnection RPC 'Listen' stream") ||
+    firstMsg.includes("GrpcConnection RPC 'Write' stream") ||
+    (firstMsg.includes('@firebase/firestore') && firstMsg.includes('RST_STREAM'))
+  ) {
+    return;
+  }
+  _origConsoleError(...args);
+};
+
 if (!admin.getApps().length) {
   admin.initializeApp();
 }
@@ -110,7 +128,7 @@ let bucket: any = null;
 try {
   const configRaw = fs.readFileSync(path.join(process.cwd(), 'firebase-applet-config.json'), 'utf8');
   const firebaseConfig = JSON.parse(configRaw);
-  const fbApp = initFirebaseApp(firebaseConfig);
+  const fbApp = getApps().length > 0 ? getApps()[0] : initFirebaseApp(firebaseConfig);
   db = getFirestore(fbApp, firebaseConfig.firestoreDatabaseId || '(default)');
   const configuredBucket = (firebaseConfig.storageBucket && !String(firebaseConfig.storageBucket).includes('fatura-botu-505106.firebasestorage.app'))
     ? firebaseConfig.storageBucket
@@ -122,6 +140,23 @@ try {
   }
 } catch (e: any) {
   console.warn('[FIREBASE] firebase-applet-config.json bulunamadı veya hatalı:', e.message);
+}
+
+async function syncDailyCountsAfterAdminChange() {
+  if (!db) return;
+  try {
+    const [invSnap, discSnap] = await Promise.all([
+      getDocs(collection(db, 'invoices')),
+      getDocs(collection(db, 'discounts'))
+    ]);
+    await setDoc(doc(db, 'system_stats', 'daily_counts'), {
+      invoices: invSnap.size,
+      discounts: discSnap.size,
+      total: invSnap.size + discSnap.size,
+      date: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+  } catch (_) {}
 }
 
 // ============================================================================
@@ -9375,6 +9410,7 @@ app.delete('/api/invoices/:id/permanent', async (req, res) => {
     memoryStore.invoices = undefined;
     memoryStore.discounts = undefined;
     memoryStore.deletionLedger = undefined;
+    await syncDailyCountsAfterAdminChange();
 
     return res.json({
       success: true,
@@ -9580,6 +9616,7 @@ app.delete('/api/discounts/:id/permanent', async (req, res) => {
     memoryStore.invoices = undefined;
     memoryStore.discounts = undefined;
     memoryStore.deletionLedger = undefined;
+    await syncDailyCountsAfterAdminChange();
 
     return res.json({
       success: true,
@@ -9843,6 +9880,7 @@ app.delete(['/api/invoices/trash/orphan-cleaner', '/api/invoices/trash/empty', '
       memoryStore.invoices = undefined;
       memoryStore.discounts = undefined;
       memoryStore.deletionLedger = undefined;
+      await syncDailyCountsAfterAdminChange();
     }
 
     res.json({
@@ -12485,19 +12523,18 @@ async function startServer() {
       } catch (_) {}
     }, 100);
 
-    // Kalemleri henüz fatura belgesiyle doğrulanmamış Prizma faturalarını arka planda bir kez doğrula.
-    // Yalnızca belgeden kuruşu kuruşuna doğrulanan satırlar yazılır; her değişiklik önce yedeklenir.
-    if (process.env.DISABLE_INVOICE_LINE_RECONCILE !== '1') {
+    // Kalemleri henüz fatura belgesiyle doğrulanmamış Prizma faturalarını yalnızca açıkça etkinleştirildiğinde çalıştır.
+    if (process.env.ENABLE_STARTUP_INVOICE_LINE_RECONCILE === '1') {
       setTimeout(() => {
         if (!db) return;
-        reconcilePrizmaInvoiceLines({ apply: true })
+        reconcilePrizmaInvoiceLines({ apply: true, limit: 25 })
           .then(r => console.log(`[INVOICE LINE RECONCILE] ${r.scanned} fatura tarandı: ${r.verifiedFromDocument} belgeden doğrulandı, ${r.stfMatchesTotal} STF toplamı tutuyor, ${r.mismatch} doğrulanamadı, ${r.errors} erişim hatası; ${r.backups + r.invoiceBackups} kayıt yedeklendi.`))
           .catch(err => console.warn('[INVOICE LINE RECONCILE] Hata:', err.message));
       }, 90 * 1000);
     }
 
-    // İndirim kayıtlarını (kalemler, tarih, kalem bazlı ilk teklif referansları) kendi PDF'lerinden bir kez onar.
-    if (process.env.DISABLE_DISCOUNT_LINE_REPAIR !== '1') {
+    // İndirim kayıtlarını yalnızca açıkça etkinleştirildiğinde başlangıçta toplu onar.
+    if (process.env.ENABLE_STARTUP_DISCOUNT_LINE_REPAIR === '1') {
       setTimeout(() => {
         if (!db) return;
         repairDiscountLines({ apply: true })

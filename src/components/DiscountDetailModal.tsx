@@ -57,7 +57,20 @@ export const DiscountDetailModal: React.FC<DiscountDetailModalProps> = ({
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
   const [currentRecord, setCurrentRecord] = useState<DiscountRecord>(discount);
 
-  const allItems: InvoiceItem[] = discount.items || [];
+  const allItems: InvoiceItem[] = (Array.isArray(discount.items) && discount.items.length > 0)
+    ? discount.items
+    : (Number(discount.agreedPrice) > 0
+        ? [{
+            id: `fallback_${discount.id}`,
+            materialName: discount.category || 'Fatura Genel Kalemi',
+            originalName: discount.notes || discount.vendorName || '',
+            category: discount.category || 'Genel',
+            unit: 'Set',
+            quantity: 1,
+            unitPrice: Number(discount.agreedPrice) || 0,
+            totalPrice: Number(discount.agreedPrice) || 0
+          }]
+        : []);
   const filteredItems = detailItemSearch.trim()
     ? allItems.filter(item =>
         (item.materialName || '').toLowerCase().includes(detailItemSearch.toLowerCase()) ||
@@ -312,8 +325,8 @@ export const DiscountDetailModal: React.FC<DiscountDetailModalProps> = ({
     return [];
   })();
 
-  // Kalem bazlı ilk teklif referansı yalnızca bu kaydın kendi belgelerinden gelir (bkz. discountLineReference).
-  const lineComparisons = buildDiscountLineComparisons(discount as any, comparativeAnalysisData);
+  // Kalem bazlı ilk teklif referansı: önce ilk teklif PDF'inden, yoksa toplam indirim oranından (bkz. discountLineReference).
+  const lineComparisons = buildDiscountLineComparisons({ ...discount, items: allItems } as any, comparativeAnalysisData);
   const getComparativeInfoForItem = (item: InvoiceItem): DiscountLineComparison => {
     const pos = allItems.indexOf(item);
     return lineComparisons[pos >= 0 ? pos : 0] || {

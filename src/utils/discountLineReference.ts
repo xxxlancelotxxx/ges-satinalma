@@ -85,6 +85,11 @@ export function buildDiscountLineComparisons(
   discount: {
     id?: string;
     vendorName?: string;
+    offerPrice?: number;
+    adjustedOfferPrice?: number;
+    agreedPrice?: number;
+    discountAmount?: number;
+    discountPercentage?: number;
     items?: DiscountLineItem[];
     canonicalMaterials?: CanonicalReference[];
     comparativeAnalysisId?: string;
@@ -128,52 +133,118 @@ export function buildDiscountLineComparisons(
     if (nameMatch[k] >= 0) assigned[itemIdx] = freeCanonIdx[nameMatch[k]];
   });
 
-  return items.map((it, idx) => {
+  // First pass: check which lines have verified PDF line matches and compute remaining discount for fallback
+  const offerTotal = Number(discount.adjustedOfferPrice || discount.offerPrice) || 0;
+  const agreedTotal = Number(discount.agreedPrice) || 0;
+  const totalRecordDiscount =
+    Number(discount.discountAmount) > 0
+      ? Number(discount.discountAmount)
+      : offerTotal > agreedTotal
+        ? Number((offerTotal - agreedTotal).toFixed(2))
+        : 0;
+
+  let pdfExplainedSavings = 0;
+  let unmatchedFinalSum = 0;
+
+  const preResolved = items.map((it, idx) => {
     const finalPrice = Number(it.unitPrice) || 0;
     const qty = Number(it.quantity) || 1;
-    const finalSupplier = discount.vendorName || '';
+    const lineTotal = Number((it as any).totalPrice) || Number((finalPrice * qty).toFixed(2));
     const c = assigned[idx] >= 0 ? canonicals[assigned[idx]] : null;
-    if (c && unreliable.has(assigned[idx])) {
-      return {
-        hasReference: false,
-        refPrice: 0,
-        refSupplier: '',
-        finalPrice,
-        finalSupplier,
-        unitSavings: 0,
-        totalSavings: 0,
-        savingsRate: 0,
-        note: 'Eski kayıt: kalem referansı doğrulanamadı'
-      };
-    }
-    const refPrice = c && c.referenceFound !== false
-      ? Number(c.marketReferenceUnitPrice || c.lowestInitialOffer?.normalizedUnitPrice || 0)
-      : 0;
+    const isUnreliable = Boolean(c && unreliable.has(assigned[idx]));
+    const candidateRefPrice =
+      c && !isUnreliable && c.referenceFound !== false
+        ? Number(c.marketReferenceUnitPrice || c.lowestInitialOffer?.normalizedUnitPrice || (c as any).winningFirstUnitPrice || 0)
+        : 0;
+    const hasPdfMatch = Boolean(c && !isUnreliable && candidateRefPrice > 0 && finalPrice > 0);
 
-    if (!c || !(refPrice > 0) || !(finalPrice > 0)) {
-      return {
-        hasReference: false,
-        refPrice: 0,
-        refSupplier: '',
-        finalPrice,
-        finalSupplier,
-        unitSavings: 0,
-        totalSavings: 0,
-        savingsRate: 0,
-        note: canonicals.length === 0 ? 'Kalem bazlı ilk teklif yok' : 'İlk teklifte bu kalem yok'
-      };
+    if (hasPdfMatch) {
+      if (candidateRefPrice > finalPrice) {
+        pdfExplainedSavings += (candidateRefPrice - finalPrice) * qty;
+      }
+    } else if (finalPrice > 0 && qty > 0) {
+      unmatchedFinalSum += lineTotal;
     }
 
-    const unitSavings = Number((refPrice - finalPrice).toFixed(2));
     return {
-      hasReference: true,
-      refPrice,
-      refSupplier: c.marketReferenceSupplier || c.lowestInitialOffer?.vendorName || 'İlk teklif',
+      it,
+      idx,
       finalPrice,
-      finalSupplier: c.purchasedSupplier || finalSupplier,
-      unitSavings,
-      totalSavings: Number((unitSavings * qty).toFixed(2)),
-      savingsRate: Number(((unitSavings / refPrice) * 100).toFixed(2))
+      qty,
+      lineTotal,
+      c,
+      hasPdfMatch,
+      candidateRefPrice
+    };
+  });
+
+  const remainingSavingsToAllocate = Math.max(0, totalRecordDiscount - pdfExplainedSavings);
+
+  return preResolved.map(({ it, finalPrice, qty, lineTotal, c, hasPdfMatch, candidateRefPrice }) => {
+    const finalSupplier = discount.vendorName || '';
+
+    // Tier 1: Direct line price from Initial Offer PDF
+    if (hasPdfMatch && c) {
+      const refPrice = Number(candidateRefPrice.toFixed(2));
+      const unitSavings = Number((refPrice - finalPrice).toFixed(2));
+      return {
+        hasReference: true,
+        refPrice,
+        refSupplier: c.marketReferenceSupplier || c.lowestInitialOffer?.vendorName || 'İlk teklif (PDF)',
+        finalPrice,
+        finalSupplier: c.purchasedSupplier || finalSupplier,
+        unitSavings,
+        totalSavings: Number((unitSavings * qty).toFixed(2)),
+        savingsRate: refPrice > 0 ? Number(((unitSavings / refPrice) * 100).toFixed(2)) : 0
+      };
+    }
+
+    // Tier 2: Proportional calculation from total discount ratio (İlk Teklif / Anlaşılan Tutar)
+    if (finalPrice > 0 && qty > 0) {
+      let computedRefPrice = 0;
+      let refNote = 'Oransal İlk Teklif (Toplam İndirim Oranından)';
+
+      if (remainingSavingsToAllocate > 0.01 && unmatchedFinalSum > 0) {
+        const lineShare = lineTotal / unmatchedFinalSum;
+        const lineDiscountShare = remainingSavingsToAllocate * lineShare;
+        const unitDiscountShare = lineDiscountShare / qty;
+        computedRefPrice = Number((finalPrice + unitDiscountShare).toFixed(2));
+      } else if (offerTotal > agreedTotal && agreedTotal > 0) {
+        const ratio = offerTotal / agreedTotal;
+        computedRefPrice = Number((finalPrice * ratio).toFixed(2));
+      } else if (Number(discount.discountPercentage) > 0 && Number(discount.discountPercentage) < 100) {
+        const pct = Number(discount.discountPercentage) / 100;
+        computedRefPrice = Number((finalPrice / (1 - pct)).toFixed(2));
+      } else {
+        computedRefPrice = Number(finalPrice.toFixed(2));
+        refNote = 'İlk Teklif (Değişim Yok)';
+      }
+
+      if (computedRefPrice > 0) {
+        const unitSavings = Number((computedRefPrice - finalPrice).toFixed(2));
+        return {
+          hasReference: true,
+          refPrice: computedRefPrice,
+          refSupplier: refNote,
+          finalPrice,
+          finalSupplier,
+          unitSavings,
+          totalSavings: Number((unitSavings * qty).toFixed(2)),
+          savingsRate: computedRefPrice > 0 ? Number(((unitSavings / computedRefPrice) * 100).toFixed(2)) : 0
+        };
+      }
+    }
+
+    return {
+      hasReference: false,
+      refPrice: 0,
+      refSupplier: '',
+      finalPrice,
+      finalSupplier,
+      unitSavings: 0,
+      totalSavings: 0,
+      savingsRate: 0,
+      note: 'Birim fiyat bilgisi bulunamadı'
     };
   });
 }

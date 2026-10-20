@@ -38,6 +38,7 @@ interface Props {
   jobsites: Jobsite[];
   supervisors: PurchasingSupervisor[];
   invoices: InvoiceRecord[];
+  prizmaInvoices?: InvoiceRecord[];
   onInvoiceSaved: (invoice: Omit<InvoiceRecord, 'id' | 'createdAt'>) => Promise<any> | void;
 }
 
@@ -45,11 +46,20 @@ export const PreApprovalAudit: React.FC<Props> = ({
   jobsites,
   supervisors,
   invoices,
+  prizmaInvoices = [],
   onInvoiceSaved
 }) => {
   const { language } = useLanguage();
   const { user } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const combinedHistoricalInvoices = React.useMemo(() => {
+    const taggedPrizma = (prizmaInvoices || []).map(p => ({
+      ...p,
+      sourceCollection: 'prizma_invoices'
+    }));
+    return [...(invoices || []), ...taggedPrizma];
+  }, [invoices, prizmaInvoices]);
 
   // Transient / In-Memory State
   const [uploadedFile, setUploadedFile] = useState<{
@@ -249,8 +259,8 @@ export const PreApprovalAudit: React.FC<Props> = ({
       }
 
       if (draftToAudit) {
-        // Run deep audit against historical invoices without synthetic filters
-        const summary = auditEntireInvoice(draftToAudit, invoices);
+        // Run deep audit against combined historical invoices (GES Archive + Prizma ERP)
+        const summary = auditEntireInvoice(draftToAudit, combinedHistoricalInvoices);
         setAuditSummary(summary);
       }
     } catch (err: any) {
@@ -305,8 +315,8 @@ export const PreApprovalAudit: React.FC<Props> = ({
 
   // Open the Invoice detail modal when clicking a historical match
   const handleOpenHistoricalInvoice = (match: HistoricalPricePoint) => {
-    // Attempt to find full invoice in system invoices
-    const found = invoices.find(inv => 
+    // Attempt to find full invoice in system invoices or Prizma ERP invoices
+    const found = combinedHistoricalInvoices.find(inv => 
       (inv.id && inv.id === match.invoiceId) ||
       (inv.invoiceNumber && inv.invoiceNumber.toLowerCase() === match.invoiceNumber.toLowerCase()) ||
       (inv.invoiceNo && inv.invoiceNo.toLowerCase() === match.invoiceNumber.toLowerCase())
@@ -742,10 +752,28 @@ export const PreApprovalAudit: React.FC<Props> = ({
                               <div>
                                 <p className="font-bold text-emerald-700">{formatRuble(line.minHistoricalPrice)} / {line.draftItem.unit}</p>
                                 <p className="text-[11px] text-slate-500">{line.bestHistoricalMatch.date} • {line.bestHistoricalMatch.supplier}</p>
-                                <div className="flex items-center gap-1.5 mt-0.5">
-                                  <span className="text-[10px] font-bold px-1.5 py-0.2 bg-emerald-100 text-emerald-800 rounded">
-                                    En İyi Fiyat
-                                  </span>
+                                <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenHistoricalInvoice(line.bestHistoricalMatch!)}
+                                    className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded transition-colors cursor-pointer"
+                                    title="Geçmiş faturanın kalemlerini ve detaylarını görüntüle"
+                                  >
+                                    <Eye className="w-3 h-3" />
+                                    Fatura #{line.bestHistoricalMatch.invoiceNumber}
+                                  </button>
+                                  {line.bestHistoricalMatch.fileUrl && (
+                                    <a
+                                      href={line.bestHistoricalMatch.fileUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded transition-colors"
+                                      title="Orijinal PDF/belgeyi yeni sekmede aç"
+                                    >
+                                      <ExternalLink className="w-3 h-3" />
+                                      PDF
+                                    </a>
+                                  )}
                                   {pastCount > 1 && (
                                     <span className="text-[10px] font-medium text-slate-500">
                                       (+{pastCount - 1} diğer alım)

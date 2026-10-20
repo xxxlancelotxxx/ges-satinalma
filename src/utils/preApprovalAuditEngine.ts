@@ -261,9 +261,9 @@ export function areTechnicalSpecsCompatible(
     }
   }
 
-  let score = 0.8;
-  if (specA.diameter && specB.diameter) score += 0.1;
-  if (specA.grade && specB.grade) score += 0.1;
+  let score = 0.92;
+  if (specA.diameter && specB.diameter) score += 0.04;
+  if (specA.grade && specB.grade) score += 0.04;
 
   return { compatible: true, specMatchScore: Math.min(score, 1.0) };
 }
@@ -277,8 +277,249 @@ export interface PreApprovalAuditOptions {
   isScopeChange?: boolean;
 }
 
+interface IndexedHistoricalEntry {
+  inv: InvoiceRecord;
+  pastIt: any;
+  invSupplier: string;
+  invJobsiteId: string;
+  cleanInvNo: string;
+  pastSig: ReturnType<typeof buildSmartOriginalSignature>;
+  pastSpecs: ReturnType<typeof extractTechnicalSpecs>;
+  pastProcessed: ReturnType<typeof processItem>;
+  pastGrossUnitPrice: number;
+  orderFeatures: {
+    detectedBrand: string;
+    specTokens: string[];
+    meaningfulTokens: string[];
+    bilingualConcepts: string[];
+  };
+  sourceType: 'GES_ARCHIVE' | 'PRIZMA_ERP';
+}
+
+const HISTORICAL_INDEX_CACHE = new WeakMap<InvoiceRecord[], {
+  entries: IndexedHistoricalEntry[];
+  crossBrandFamilies: ReturnType<typeof buildMode2CrossBrandFamilies>;
+}>();
+
+const BILINGUAL_MATERIAL_CONCEPTS: Array<{ id: string; patterns: RegExp[] }> = [
+  { id: 'CABLE_VVG', patterns: [/ввг/i, /\bvvg\b/i, /\bnyy\b/i] },
+  { id: 'REBAR_STEEL', patterns: [/арматур/i, /inşaat\s*demir/i, /insaat\s*demir/i, /nervürlü\s*demir/i, /nervurlu\s*demir/i] },
+  { id: 'GYPSUM_BOARD', patterns: [/гипсокартон/i, /\bгкл\b/i, /\bgkl\b/i, /alçıpan/i, /alcipan/i] },
+  { id: 'CERAMIC_GLUE', patterns: [/клей\s+для\s+плитк/i, /плиточн\w*\s+клей/i, /seramik\s+yapıştırıcı/i, /seramik\s+yapistirici/i, /\bcm\s*11\b/i, /\bcm\s*17\b/i] },
+  { id: 'FLOOR_GLUE', patterns: [/клей\s+для\s+напольн/i, /zemin\s+yapıştırıcı/i, /\b26a\b/i] },
+  { id: 'LINOLEUM_COVER', patterns: [/напольн\w*\s+покрыт/i, /линолеум/i, /linolyum/i, /pvc\s+zemin/i, /master\s+proxi/i] },
+  { id: 'PU_FOAM', patterns: [/пена\s+монтажн/i, /монтажн\w*\s+пен/i, /poliüretan\s+köpük/i, /montaj\s+köpü/i] },
+  { id: 'MINERAL_WOOL', patterns: [/минват/i, /каменн\w*\s+ват/i, /базальт\w*\s+утеплит/i, /taş\s*yünü/i, /tasyunu/i, /mineral\s*yün/i] },
+  { id: 'XPS_FOAM', patterns: [/пеноплэкс/i, /техноплекс/i, /экструдирован\w*\s+пенополистирол/i, /\bxps\b/i] },
+  { id: 'PRIMER_GRUNT', patterns: [/грунтовк/i, /бетоноконтакт/i, /\bгрунт\b/i, /\bastar\b/i, /betokontakt/i] },
+  { id: 'PUTTY_SHPAKLEVKA', patterns: [/шпатлевк/i, /шпаклевк/i, /\bmacun\b/i, /alçı\s*sıva/i, /ротбанд/i, /rotband/i] },
+  { id: 'PLYWOOD_FANERA', patterns: [/фанер/i, /\bосб\b/i, /\bosb\b/i, /kontrplak/i, /plywood/i] },
+  { id: 'PIPE_PPR', patterns: [/труб\w*.*полипропилен/i, /труб\w*\s+ппр/i, /\bppr\s+boru/i, /pprc\s+boru/i] },
+  { id: 'PIPE_STEEL', patterns: [/труб\w*\s+стальн/i, /труб\w*\s+профильн/i, /труб\w*\s+вгп/i, /çelik\s+boru/i, /kutu\s+profil/i] },
+  { id: 'CEMENT_MIX', patterns: [/цемент/i, /пескобетон/i, /çimento/i, /cimento/i, /\bм300\b/i, /\bm300\b/i, /\bм500\b/i] },
+  { id: 'VALVE_KRAN', patterns: [/кран\s+шаров/i, /задвижк/i, /клапан/i, /küresel\s+vana/i, /\bvana\b/i] },
+  { id: 'SOCKET_SWITCH', patterns: [/розетк/i, /выключател/i, /автоматическ\w*\s+выключател/i, /\bpriz\b/i, /anahtar\s+priz/i, /sigorta\s+otomat/i] },
+  { id: 'LED_LUMINAIRE', patterns: [/светильник/i, /прожектор/i, /led\s+armatür/i, /led\s+projektör/i] },
+  { id: 'SAFETY_GLOVES', patterns: [/перчатк/i, /рукавиц/i, /iş\s*eldiven/i, /\beldiven\b/i] },
+  { id: 'CUTTING_DISC', patterns: [/круг\s+отрезн/i, /диск\s+отрезн/i, /диск\s+алмазн/i, /kesme\s+taşı/i, /kesici\s+disk/i, /elmas\s+disk/i] },
+  { id: 'ELECTRODE_WELD', patterns: [/электрод/i, /проволок\w*\s+сварочн/i, /kaynak\s+elektrod/i, /gazaltı\s+tel/i] },
+  { id: 'BOLT_NUT_ANCHOR', patterns: [/\bболт\b/i, /\bгайк/i, /шпильк\w*\s+резьбов/i, /\bанкер/i, /саморез/i, /дюбел/i, /saplama/i, /civat/i, /somun/i, /dübel/i, /akıllı\s+vida/i] },
+  { id: 'WATERPROOF_MEMBRANE', patterns: [/гидроизоляц/i, /техноэласт/i, /унифлекс/i, /бикрост/i, /su\s+yalıtım/i, /bitümlü\s+membran/i] },
+  { id: 'PAINT_ENAMEL', patterns: [/\bкраск/i, /\bэмаль/i, /водоэмульсион/i, /\bboya\b/i, /iç\s+cephe\s+boya/i, /dış\s+cephe\s+boya/i] },
+];
+
+const BRAND_SYNONYMS_MAP: Record<string, string> = {
+  'кнауф': 'knauf', 'knauf': 'knauf',
+  'церезит': 'ceresit', 'ceresit': 'ceresit',
+  'технониколь': 'technonicol', 'technonicol': 'technonicol', 'tn': 'technonicol',
+  'роквул': 'rockwool', 'rockwool': 'rockwool',
+  'пеноплэкс': 'penoplex', 'penoplex': 'penoplex',
+  'соудал': 'soudal', 'soudal': 'soudal',
+  'макрофлекс': 'makroflex', 'makroflex': 'makroflex',
+  'титан': 'tytan', 'tytan': 'tytan',
+  'иэк': 'iek', 'iek': 'iek',
+  'экф': 'ekf', 'ekf': 'ekf',
+  'шнайдер': 'schneider', 'schneider': 'schneider',
+  'абб': 'abb', 'abb': 'abb',
+  'легран': 'legrand', 'legrand': 'legrand',
+  'дкс': 'dkc', 'dkc': 'dkc',
+  'остендорф': 'ostendorf', 'ostendorf': 'ostendorf',
+  'рехау': 'rehau', 'rehau': 'rehau',
+  'валтек': 'valtec', 'valtec': 'valtec',
+  'грундфос': 'grundfos', 'grundfos': 'grundfos',
+  'вило': 'wilo', 'wilo': 'wilo',
+  'данфосс': 'danfoss', 'danfoss': 'danfoss',
+  'бош': 'bosch', 'bosch': 'bosch',
+  'макита': 'makita', 'makita': 'makita',
+  'деволт': 'dewalt', 'dewalt': 'dewalt',
+  'хилти': 'hilti', 'hilti': 'hilti',
+  'эсаб': 'esab', 'esab': 'esab',
+  'тиккурила': 'tikkurila', 'tikkurila': 'tikkurila',
+  'дюлакс': 'dulux', 'dulux': 'dulux',
+  'капарол': 'caparol', 'caparol': 'caparol',
+  'мастер': 'master', 'master': 'master',
+  'литокол': 'litokol', 'litokol': 'litokol',
+  'мапей': 'mapei', 'mapei': 'mapei',
+  'вебер': 'weber', 'weber': 'weber',
+  'ветонит': 'vetonit', 'vetonit': 'vetonit',
+  'юнис': 'unis', 'unis': 'unis',
+  'бергауф': 'bergauf', 'bergauf': 'bergauf',
+  'волма': 'volma', 'volma': 'volma',
+  'старатели': 'starateli', 'starateli': 'starateli',
+  'основит': 'osnovit', 'osnovit': 'osnovit',
+  'сика': 'sika', 'sika': 'sika',
+  'фишер': 'fischer', 'fischer': 'fischer',
+  'сормат': 'sormat', 'sormat': 'sormat',
+  'зубр': 'zubr', 'zubr': 'zubr',
+  'луга': 'luga', 'lugaa': 'luga',
+  'торекс': 'torex', 'torex': 'torex',
+  'керама': 'kerama', 'kerama': 'kerama',
+  'марацци': 'marazzi', 'marazzi': 'marazzi',
+  'эстима': 'estima', 'estima': 'estima',
+  'церсанит': 'cersanit', 'cersanit': 'cersanit',
+  'грое': 'grohe', 'grohe': 'grohe',
+  'геберит': 'geberit', 'geberit': 'geberit'
+};
+
+const STOP_WORDS_ORDER_INDEPENDENT = new Set([
+  'для', 'или', 'при', 'под', 'над', 'без', 'изделия', 'изделие', 'материал', 'материалы',
+  'строительный', 'строительные', 'товар', 'товары', 'комплект', 'компл', 'упак', 'упаковка',
+  'шт', 'штук', 'пог', 'мп', 'м2', 'м3', 'кг', 'тонн', 'литр', 'рулон', 'лист', 'мешок',
+  've', 'ile', 'için', 'icin', 'malzeme', 'inşaat', 'insaat', 'ürün', 'urun', 'adet', 'paket',
+  'gost', 'гост', 'ту', 'din', 'iso', 'ral', 'тип', 'марка', 'модель', 'цвет', 'размер', 'мм', 'см',
+  'белый', 'серый', 'черный', 'красный', 'синий', 'зеленый', 'коричневый', 'желтый'
+]);
+
+function extractOrderIndependentFeatures(rawText: string, sigBrand?: string) {
+  const lower = String(rawText || '').toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[«»"'`()[\]{}]/g, ' ')
+    .replace(/[,;:/\\|]/g, ' ');
+
+  let detectedBrand = '';
+  if (sigBrand && sigBrand !== 'GENERIC' && sigBrand !== 'UNSPECIFIED') {
+    const cleanSigBrand = sigBrand.toLowerCase();
+    detectedBrand = BRAND_SYNONYMS_MAP[cleanSigBrand] || cleanSigBrand;
+  }
+  if (!detectedBrand) {
+    for (const [rawKey, canonBrand] of Object.entries(BRAND_SYNONYMS_MAP)) {
+      const rx = new RegExp(`(^|\\s|-)${rawKey}(\\s|-|$)`, 'i');
+      if (rx.test(lower)) {
+        detectedBrand = canonBrand;
+        break;
+      }
+    }
+  }
+
+  const specMatches = lower.match(/\b(\d+(?:[.,]\d+)?(?:\s*[xх*×]\s*\d+(?:[.,]\d+)?)+|[dдфømм]\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*(?:мм|mm|см|cm|м|m|кг|kg|л|l|вт|w|а|a|квт|kw)|\b[a-zа-я]{1,4}[-]?\d{1,4}[a-zа-я]?\b)/gi) || [];
+  const specTokens = Array.from(new Set(
+    specMatches
+      .map(s => s.replace(/\s+/g, '').replace(/,/g, '.').replace(/[х×*]/g, 'x').replace(/^(д|ф|ø)/, 'd').replace(/^м(\d)/, 'm$1'))
+      .filter(s => s.length >= 2 && !/^(19|20)\d\d$/.test(s))
+  )).sort();
+
+  const words = lower
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .map(w => w.replace(/^[.-]+|[.-]+$/g, ''))
+    .filter(w => w.length >= 3 && !STOP_WORDS_ORDER_INDEPENDENT.has(w) && !/^\d+$/.test(w));
+
+  const meaningfulTokens = Array.from(new Set(words)).sort();
+
+  const bilingualConcepts: string[] = [];
+  for (const c of BILINGUAL_MATERIAL_CONCEPTS) {
+    if (c.patterns.some(p => p.test(lower))) {
+      bilingualConcepts.push(c.id);
+    }
+  }
+
+  return {
+    detectedBrand,
+    specTokens,
+    meaningfulTokens,
+    bilingualConcepts
+  };
+}
+
+function getOrBuildHistoricalIndex(historicalInvoices: InvoiceRecord[]) {
+  const cached = HISTORICAL_INDEX_CACHE.get(historicalInvoices);
+  if (cached) return cached;
+
+  const entries: IndexedHistoricalEntry[] = [];
+  for (const inv of historicalInvoices || []) {
+    if (!inv || inv.isDeleted) continue;
+    if (!Array.isArray(inv.items)) continue;
+    // Kalemleri fatura toplamını tutmayan (okuması doğrulanamamış) arşiv faturaları fiyat referansı olamaz.
+    if ((inv as any).linesReconciled === false || (inv as any).lineCheck === 'mismatch') continue;
+
+    const invSupplier = (inv.supplier || '').trim().toLowerCase();
+    const invJobsiteId = inv.jobsiteId || (inv as any).prizmaJobsite || '';
+    const cleanInvNo = cleanDocNo(inv.invoiceNumber || inv.invoiceNo);
+    const isPrizma = Boolean(
+      (inv as any).sourceCollection === 'prizma_invoices' ||
+      String(inv.id || '').startsWith('prizma_') ||
+      ((inv as any).prizmaProcessId && !inv.uploadedBySupervisorId)
+    );
+
+    for (const pastIt of inv.items) {
+      if (!pastIt || !pastIt.unitPrice || pastIt.unitPrice <= 0) continue;
+      if ((pastIt as any).lineVerified === false || !isLineArithmeticConsistent(pastIt as any)) continue;
+
+      const combinedText = `${pastIt.originalName || ''} ${pastIt.materialName || ''}`.trim();
+      if (!combinedText) continue;
+
+      const pastSig = buildSmartOriginalSignature({
+        originalName: pastIt.originalName,
+        materialName: pastIt.materialName,
+        category: pastIt.category,
+        unit: pastIt.unit,
+        unitPrice: pastIt.unitPrice
+      });
+
+      const pastSpecs = extractTechnicalSpecs(`${pastIt.materialName || ''} ${pastIt.originalName || ''} ${(pastIt as any).dimensions || ''} ${(pastIt as any).diameter || ''}`);
+      if ((pastIt as any).diameter && !pastSpecs.diameter) pastSpecs.diameter = (pastIt as any).diameter;
+      if ((pastIt as any).grade && !pastSpecs.grade) pastSpecs.grade = (pastIt as any).grade;
+      if ((pastIt as any).dimensions && !pastSpecs.dimensions) pastSpecs.dimensions = (pastIt as any).dimensions;
+
+      const pastProcessed = processItem({
+        materialName: pastIt.materialName || pastIt.originalName || '',
+        originalName: pastIt.originalName,
+        category: pastIt.category || inv.category || 'Diğer Malzeme',
+        unit: pastIt.unit || 'Adet',
+        unitPrice: pastIt.unitPrice,
+        brand: (pastIt as any).brand
+      });
+
+      const pastGrossUnitPrice = comparisonGrossUnitPrice(pastIt as any);
+      const orderFeatures = extractOrderIndependentFeatures(combinedText, pastSig.canonicalBrandKey);
+
+      entries.push({
+        inv,
+        pastIt,
+        invSupplier,
+        invJobsiteId,
+        cleanInvNo,
+        pastSig,
+        pastSpecs,
+        pastProcessed,
+        pastGrossUnitPrice,
+        orderFeatures,
+        sourceType: isPrizma ? 'PRIZMA_ERP' : 'GES_ARCHIVE'
+      });
+    }
+  }
+
+  const crossBrandFamilies = buildMode2CrossBrandFamilies([]);
+  const built = { entries, crossBrandFamilies };
+  HISTORICAL_INDEX_CACHE.set(historicalInvoices, built);
+  return built;
+}
+
 /**
- * Audits a single line item against all historical approved invoices and discounts.
+ * Audits a single line item against all historical approved invoices and Prizma ERP records.
+ * Handles vendor-independent brand placement (beginning/middle/end of line),
+ * bilingual (Russian/Turkish) descriptions, and strict no-substitute (muadil olmaz) rules.
  */
 export function auditSingleLineItem(
   draftItem: LineAuditResult['draftItem'],
@@ -328,156 +569,76 @@ export function auditSingleLineItem(
     unitPrice: draftItem.unitPrice
   });
 
-  const referenceCrossBrandFamilies = buildMode2CrossBrandFamilies([]);
-  const crossBrandEconomySuggestion = findCheaperEquivalentBrandSuggestion({
+  const crossBrandEconomySuggestion = undefined;
+
+  // 2. Scan historical invoices using the Strict Original-Language (Russian-first) O(1) Hash-Bucket Index
+  // Every word stem in the original language, brand, standard (GOST/TU), and ALL numbers (dimensions, diameter, thickness, density, model) must match 100%.
+  const candidateHistoricalMatches: HistoricalPricePoint[] = [];
+  const draftDocNo = cleanDocNo(options?.draftInvoiceNumber);
+  const strictSig = buildStrictOriginalMaterialSignature({
     originalName: draftItem.originalName,
     materialName: draftItem.materialName,
-    category: draftItem.category,
-    unit: draftItem.unit,
-    currentUnitPrice: normalizedDraftUnitPrice || draftItem.unitPrice,
-    quantity: draftItem.quantity || 1,
-    families: referenceCrossBrandFamilies
+    brand: draftItem.brand
   });
 
-  // 2. Scan historical invoices for matching records (Mode 1: Apple-to-Apple)
-  const candidateHistoricalMatches: HistoricalPricePoint[] = [];
+  if (strictSig) {
+    const strictBuckets = getOrBuildStrictOriginalIndex(historicalInvoices);
+    const bucketCandidates = strictBuckets.get(strictSig.exactKey) || [];
+    const draftUnitNorm = normalizeUnit(draftItem.unit || 'adet');
 
-  const draftDocNo = cleanDocNo(options?.draftInvoiceNumber);
-  for (const inv of historicalInvoices) {
-    if (inv.isDeleted) continue;
-    if (!Array.isArray(inv.items)) continue;
-    // Kalemleri fatura toplamını tutmayan (okuması doğrulanamamış) arşiv faturaları fiyat referansı olamaz.
-    if ((inv as any).linesReconciled === false || (inv as any).lineCheck === 'mismatch') continue;
+    for (const cand of bucketCandidates) {
+      const { inv, pastIt, sig: candSig, grossUnitPrice: pastGrossUnitPrice, normalizedUnit: candUnitNorm, cleanInvNo, invSupplierLower, sourceType } = cand;
 
-    const invSupplier = (inv.supplier || '').trim().toLowerCase();
-    const invJobsiteId = inv.jobsiteId || '';
-    // Denetlenen faturanın arşivdeki kopyası kendisiyle kıyaslanmaz.
-    if (draftDocNo && cleanDocNo(inv.invoiceNumber) === draftDocNo && draftSupplier && invSupplier &&
-        (draftSupplier.includes(invSupplier) || invSupplier.includes(draftSupplier))) continue;
-
-    for (const pastIt of inv.items) {
-      if (!pastIt.unitPrice || pastIt.unitPrice <= 0) continue;
-      if ((pastIt as any).lineVerified === false || !isLineArithmeticConsistent(pastIt as any)) continue;
-
-      const pastSig = buildSmartOriginalSignature({
-        originalName: pastIt.originalName,
-        materialName: pastIt.materialName,
-        category: pastIt.category,
-        unit: pastIt.unit,
-        unitPrice: pastIt.unitPrice
-      });
-
-      // Mode 1 (Apple-to-Apple) Brand & Product Series Protection Rule:
-      // For non-commodity branded materials (Drywall, Insulation, Waterproofing, Plaster, Paint, Tools),
-      // never mix different canonical brands or product series/density classes (e.g., Техновент Н vs Baswool Фасад 120) in Mode 1 historical benchmark!
-      if (!draftSig.isCommodity) {
-        if (draftSig.canonicalBrandKey !== pastSig.canonicalBrandKey) {
-          continue;
-        }
-        if ((draftSig.subBrandOrSeries || '') !== (pastSig.subBrandOrSeries || '')) {
-          continue;
-        }
-      }
-
-      // Check 3-layer original Russian specification signature compatibility (brand, series, density, pack weight, dimensions)
-      if (
-        (draftItem.originalName || draftItem.materialName) &&
-        (pastIt.originalName || pastIt.materialName) &&
-        !areSpecSignaturesCompatible(
-          draftItem.originalName || draftItem.materialName,
-          pastIt.originalName || pastIt.materialName
-        )
-      ) {
+      // Never compare the draft invoice against its own archived copy
+      if (draftDocNo && cleanInvNo === draftDocNo) {
         continue;
       }
 
-      // Extract past specs
-      const pastSpecs = extractTechnicalSpecs(`${pastIt.materialName} ${pastIt.originalName || ''} ${(pastIt as any).dimensions || ''} ${(pastIt as any).diameter || ''}`);
-      if ((pastIt as any).diameter && !pastSpecs.diameter) pastSpecs.diameter = (pastIt as any).diameter;
-      if ((pastIt as any).grade && !pastSpecs.grade) pastSpecs.grade = (pastIt as any).grade;
-      if ((pastIt as any).dimensions && !pastSpecs.dimensions) pastSpecs.dimensions = (pastIt as any).dimensions;
-
-      // Check technical spec compatibility
-      const specCompatibility = areTechnicalSpecsCompatible(draftSpecs, pastSpecs);
-      if (!specCompatibility.compatible) {
-        // Incompatible specs (e.g. Ø12 vs Ø16) - MUST NOT match!
+      // If both specify a brand or GOST / TU / DIN / ISO standard, they must be 100% identical
+      if (strictSig.brand && candSig.brand && strictSig.brand !== candSig.brand) {
         continue;
       }
-
-      // Process past item
-      const pastProcessed = processItem({
-        materialName: pastIt.materialName,
-        originalName: pastIt.originalName,
-        category: pastIt.category,
-        unit: pastIt.unit,
-        unitPrice: pastIt.unitPrice,
-        brand: (pastIt as any).brand
-      });
-
-      // Matching logic:
-      // 0: Smart Original Russian Invoice Signature Match (handles different vendor phrasings of same product & brand)
-      // A: CPID Exact match
-      // B: Canonical Name Exact match
-      // C: Same Category & strong keyword overlap
-      let isMatch = false;
-      let matchScore = 0.5;
-
-      if (
-        !draftSig.canonicalFamilyKey.startsWith('FAM_') &&
-        draftSig.canonicalFamilyKey === pastSig.canonicalFamilyKey &&
-        draftSig.canonicalSpecKey === pastSig.canonicalSpecKey &&
-        (draftSig.isCommodity ||
-          (draftSig.canonicalBrandKey === pastSig.canonicalBrandKey &&
-           (draftSig.subBrandOrSeries || '') === (pastSig.subBrandOrSeries || '')))
-      ) {
-        isMatch = true;
-        matchScore = 0.96 * specCompatibility.specMatchScore;
-      } else if (pastProcessed.canonicalProductId === processed.canonicalProductId) {
-        isMatch = true;
-        matchScore = 0.95 * specCompatibility.specMatchScore;
-      } else if (pastProcessed.canonicalName.toLowerCase() === processed.canonicalName.toLowerCase()) {
-        isMatch = true;
-        matchScore = 0.90 * specCompatibility.specMatchScore;
-      } else if (
-        pastProcessed.category === processed.category &&
-        pastProcessed.functionalDomain === processed.functionalDomain
-      ) {
-        // Fuzzy token overlap in same category
-        const tokensA = new Set(processed.canonicalName.toLowerCase().split(/\s+/).filter(w => w.length > 2));
-        const tokensB = pastProcessed.canonicalName.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-        const common = tokensB.filter(t => tokensA.has(t));
-        if (common.length >= 2) {
-          isMatch = true;
-          matchScore = Math.min(0.70 + (common.length * 0.05), 0.85) * specCompatibility.specMatchScore;
-        }
+      if (strictSig.gostKey && candSig.gostKey && strictSig.gostKey !== candSig.gostKey) {
+        continue;
       }
-
-      if (!isMatch) continue;
 
       // Unit conversion check (KDV dahil %22 tabanındaki fiyat üzerinden)
-      const pastGrossUnitPrice = comparisonGrossUnitPrice(pastIt as any);
-      const sameUnit = normalizeUnit(pastIt.unit || 'adet') === normalizeUnit(draftItem.unit || 'adet');
-      const unitConversion = normalizeQuantityAndPrice(
-        pastIt.quantity || 1,
-        pastGrossUnitPrice,
-        pastIt.unit || 'adet',
-        draftItem.unit || 'adet',
-        draftItem.materialName || pastIt.materialName || '',
-        draftItem.category || pastIt.category || ''
-      );
-      // Farklı birim ve güvenilir dönüşüm yoksa (ör. рулон ↔ м²) fiyatlar kıyaslanamaz.
-      if (!sameUnit && !unitConversion.conversionApplied) continue;
+      const sameUnit = candUnitNorm === draftUnitNorm;
+      let comparablePastPrice = pastGrossUnitPrice;
+      let convertedQuantity = Number(pastIt.quantity) || 1;
 
-      // Normalization of past price (Currency; KDV tabanı zaten %22 dahil)
+      if (!sameUnit) {
+        const unitConversion = normalizeQuantityAndPrice(
+          pastIt.quantity || 1,
+          pastGrossUnitPrice,
+          pastIt.unit || 'adet',
+          draftItem.unit || 'adet',
+          strictSig.rawOriginalText,
+          draftItem.category || pastIt.category || ''
+        );
+        if (!unitConversion.conversionApplied || unitConversion.normalizedUnitPrice <= 0) continue;
+        comparablePastPrice = Number(unitConversion.normalizedUnitPrice.toFixed(2));
+        convertedQuantity = Number((unitConversion.normalizedQty || pastIt.quantity || 1).toFixed(3));
+      }
+
       const normalizedPastUnitPrice = normalizePriceForComparison(
-        sameUnit ? pastGrossUnitPrice : unitConversion.normalizedUnitPrice,
+        comparablePastPrice,
         (inv as any).currency || 'RUB',
         false
       );
 
+      if (normalizedPastUnitPrice <= 0) continue;
+
+      // Sanity ratio guard: prevent extreme pack-vs-piece OCR unit errors (>10x difference) from polluting benchmark
+      const priceRatio = normalizedDraftUnitPrice > 0
+        ? Math.max(normalizedDraftUnitPrice / normalizedPastUnitPrice, normalizedPastUnitPrice / normalizedDraftUnitPrice)
+        : 1;
+      if (priceRatio > 10) continue;
+
       // Determine Comparison Level
       let level: ComparisonLevel = 'LEVEL_1_SAME_VARIANT';
-      const isSameSupplier = draftSupplier && invSupplier && (draftSupplier.includes(invSupplier) || invSupplier.includes(draftSupplier));
+      const isSameSupplier = draftSupplier && invSupplierLower && (draftSupplier.includes(invSupplierLower) || invSupplierLower.includes(draftSupplier));
+      const invJobsiteId = inv.jobsiteId || '';
       const isSameJobsite = draftJobsiteId && invJobsiteId && draftJobsiteId === invJobsiteId;
 
       if (isSameSupplier) {
@@ -490,22 +651,24 @@ export function auditSingleLineItem(
 
       candidateHistoricalMatches.push({
         invoiceId: inv.id || '',
-        invoiceNumber: inv.invoiceNumber || 'FT-GECMIS',
-        date: inv.date || inv.createdAt || '',
-        supplier: inv.supplier || 'Geçmiş Tedarikçi',
+        invoiceNumber: inv.invoiceNumber || inv.invoiceNo || (sourceType === 'PRIZMA_ERP' ? 'PRIZMA-ERP' : 'FT-GECMIS'),
+        date: inv.date || (inv as any).createdAt || '',
+        supplier: sourceType === 'PRIZMA_ERP'
+          ? `${String(inv.supplier || 'Prizma Tedarikçisi').replace(/\s*\(Prizma ERP\)\s*$/, '')} (Prizma ERP)`
+          : (inv.supplier || 'Geçmiş Tedarikçi'),
         jobsiteId: invJobsiteId,
-        jobsiteName: inv.jobsiteName || 'Bilinmeyen Şantiye',
-        rawMaterialName: pastIt.originalName || pastIt.materialName,
-        canonicalName: pastProcessed.canonicalName,
+        jobsiteName: inv.jobsiteName || (inv as any).prizmaJobsite || 'Bilinmeyen Şantiye',
+        rawMaterialName: candSig.rawOriginalText,
+        canonicalName: processed.canonicalName,
         rawUnitPrice: pastGrossUnitPrice,
         normalizedUnitPrice: normalizedPastUnitPrice,
         unit: draftItem.unit,
-        quantity: sameUnit ? (pastIt.quantity || 1) : Number((unitConversion.normalizedQty || pastIt.quantity || 1).toFixed(3)),
+        quantity: convertedQuantity,
         currency: 'RUB',
         isVatIncluded: true,
-        matchScore: Number(matchScore.toFixed(2)),
+        matchScore: 1.0,
         comparisonLevel: level,
-        specs: pastSpecs
+        specs: draftSpecs
       });
     }
   }
@@ -531,7 +694,7 @@ export function auditSingleLineItem(
       potentialSavings: 0,
       status: 'KARŞILAŞTIRILABİLİR KAYIT YOK',
       statusColor: 'slate',
-      decisionReasoning: 'Bu malzeme veya teknik özellik için sistemde geçmiş onaylı alım kaydı bulunamadı. Piyasa rayiç kontrolü yapılması önerilir.',
+      decisionReasoning: 'Bu malzeme (orijinal Rusça tanımı, markası ve tüm ölçü/teknik özellikleri birebir aynı) için sistemde geçmiş onaylı alım kaydı bulunamadı.',
       isSingleVendor: !!options?.isSingleVendor,
       isUrgentPurchase: !!options?.isUrgentPurchase,
       isLowConfidence: false,
@@ -542,11 +705,8 @@ export function auditSingleLineItem(
     };
   }
 
-  // Sort matches by best match score, then lowest price
-  candidateHistoricalMatches.sort((a, b) => {
-    if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
-    return a.normalizedUnitPrice - b.normalizedUnitPrice;
-  });
+  // Sort matches by lowest comparable price first
+  candidateHistoricalMatches.sort((a, b) => a.normalizedUnitPrice - b.normalizedUnitPrice);
 
   const bestMatch = candidateHistoricalMatches[0];
   const prices = candidateHistoricalMatches.map(m => m.normalizedUnitPrice);
@@ -558,40 +718,38 @@ export function auditSingleLineItem(
   const sortedByDate = [...candidateHistoricalMatches].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   const lastHistoricalPrice = sortedByDate[0].normalizedUnitPrice;
 
-  // Compute variance against the MINIMUM historical price
-  const absolutePriceDiff = Math.round((normalizedDraftUnitPrice - minHistoricalPrice) * 100) / 100;
-  const percentagePriceDiff = minHistoricalPrice > 0
+  // Compute variance against the MINIMUM historical price (require >= 1.0% difference to flag anomaly)
+  const rawPriceDiff = Math.round((normalizedDraftUnitPrice - minHistoricalPrice) * 100) / 100;
+  const rawPctDiff = minHistoricalPrice > 0
     ? Math.round(((normalizedDraftUnitPrice - minHistoricalPrice) / minHistoricalPrice) * 1000) / 10
     : 0;
-  const potentialSavings = absolutePriceDiff > 0 ? Math.round(absolutePriceDiff * (draftItem.quantity || 1)) : 0;
+  const isCheaperPastPurchaseAvailable = rawPriceDiff > 0.01 && rawPctDiff >= 1.0;
+  const absolutePriceDiff = isCheaperPastPurchaseAvailable ? rawPriceDiff : 0;
+  const percentagePriceDiff = isCheaperPastPurchaseAvailable ? rawPctDiff : 0;
+  const potentialSavings = isCheaperPastPurchaseAvailable ? Math.round(rawPriceDiff * (draftItem.quantity || 1)) : 0;
 
-  // Confidence assessment
-  const isLowConfidence = bestMatch.matchScore < 0.75;
-  const isCheaperPastPurchaseAvailable = normalizedDraftUnitPrice > minHistoricalPrice;
+  // Confidence assessment (always 1.0 for strict original-language match)
+  const isLowConfidence = false;
 
   // Determine Line Status
   let status: PreApprovalStatus = 'ONAYLANABİLİR';
   let statusColor: LineAuditResult['statusColor'] = 'green';
   let decisionReasoning = '';
 
-  if (isLowConfidence) {
-    status = 'DÜŞÜK GÜVENLİ EŞLEŞME';
-    statusColor = 'orange';
-    decisionReasoning = `Eşleşme güven skoru (%${Math.round(bestMatch.matchScore * 100)}) düşüktür. Teknik varyant veya malzeme tanımında olası nüans farkı bulunabilir, manuel teyit önerilir.`;
-  } else if (isCheaperPastPurchaseAvailable) {
+  if (isCheaperPastPurchaseAvailable) {
     if (percentagePriceDiff >= 15 || potentialSavings >= 100000) {
       status = 'YÖNETİCİ İNCELEMESİ GEREKLİ';
       statusColor = 'rose';
-      decisionReasoning = `⚠️ Yüksek Fiyat Artışı (%${percentagePriceDiff}): Bu malzeme daha önce ${bestMatch.date} tarihinde ${bestMatch.supplier} firmasından ${minHistoricalPrice.toLocaleString('tr-TR')} RUB birim fiyatla alınmıştı. Toplam ${potentialSavings.toLocaleString('tr-TR')} RUB ek maliyet riski bulunmaktadır.`;
+      decisionReasoning = `⚠️ Yüksek Fiyat Artışı (%${percentagePriceDiff}): Birebir aynı malzeme (${bestMatch.rawMaterialName}) daha önce ${bestMatch.date} tarihinde ${bestMatch.supplier} firmasından (Fatura No: ${bestMatch.invoiceNumber}) ${minHistoricalPrice.toLocaleString('tr-TR')} RUB birim fiyatla alınmıştı. Toplam ${potentialSavings.toLocaleString('tr-TR')} RUB ek maliyet riski bulunmaktadır.`;
     } else {
       status = 'İNDİRİM TALEP EDİLMELİ';
       statusColor = 'amber';
-      decisionReasoning = `Bu malzeme daha önce daha düşük fiyata alınmış (${bestMatch.date} / ${bestMatch.supplier} - ${minHistoricalPrice.toLocaleString('tr-TR')} RUB). Satınalmacının tedarikçiden en az %${percentagePriceDiff} indirim talep etmesi önerilir.`;
+      decisionReasoning = `Birebir aynı malzeme (${bestMatch.rawMaterialName}) daha önce daha düşük fiyata alınmış (${bestMatch.date} / ${bestMatch.supplier} / Fatura No: ${bestMatch.invoiceNumber} - ${minHistoricalPrice.toLocaleString('tr-TR')} RUB). Satınalmacının tedarikçiden en az %${percentagePriceDiff} indirim talep etmesi önerilir.`;
     }
   } else {
     status = 'ONAYLANABİLİR';
     statusColor = 'green';
-    decisionReasoning = `Birim fiyat (${normalizedDraftUnitPrice.toLocaleString('tr-TR')} RUB), geçmiş en iyi fiyatla (${minHistoricalPrice.toLocaleString('tr-TR')} RUB) uyumlu veya daha avantajlıdır.`;
+    decisionReasoning = `Birim fiyat (${normalizedDraftUnitPrice.toLocaleString('tr-TR')} RUB), geçmiş en iyi fiyatla (${minHistoricalPrice.toLocaleString('tr-TR')} RUB - Fatura No: ${bestMatch.invoiceNumber}) uyumlu veya daha avantajlıdır.`;
   }
 
   // Suggested negotiation action
@@ -744,3 +902,579 @@ export function auditEntireInvoice(
     auditTimestamp: new Date().toISOString()
   };
 }
+
+// ============================================================================
+// STRICT ORIGINAL-LANGUAGE (RUSSIAN-FIRST) O(1) HASH-BUCKET BENCHMARK ENGINE
+// ============================================================================
+
+const STRICT_STOP_WORDS = new Set([
+  'для', 'или', 'при', 'под', 'над', 'без', 'из', 'по', 'на', 'от', 'до', 'со', 'во', 'в', 'с', 'к', 'у', 'о',
+  'шт', 'штук', 'компл', 'комплект', 'упак', 'уп', 'пог', 'мп', 'м2', 'м3', 'куб', 'кв', 'кор', 'коробка',
+  'мм', 'см', 'м', 'кг', 'г', 'гр', 'т', 'тн', 'тонн', 'л', 'мл', 'рул', 'рулон', 'пл', 'меш', 'мешок', 'лист',
+  'марка', 'марки', 'тип', 'типа', 'вид', 'сорт', 'класс', 'класса',
+  'плотн', 'плотность', 'плотностью', 'размер', 'размером', 'длина', 'длиной', 'ширина', 'шириной', 'толщина', 'толщиной',
+  'диаметр', 'диаметром', 'сечение', 'сечением', 'вес', 'объем', 'цвет', 'арт', 'артикул', 'код', 'ф', 'd', 'д', 'ø', 'х', 'x'
+]);
+
+const STRICT_RUSSIAN_ABBREV_MAP: Record<string, string> = {
+  'бум': 'бумажн',
+  'прозр': 'прозрачн',
+  'бел': 'бел',
+  'чер': 'черн',
+  'цел': 'целлюлозн',
+  'оцинк': 'оцинкован',
+  'пневматич': 'пневматическ',
+  'метал': 'металлическ',
+  'сл': 'слойн',
+  'техн': 'техническ',
+  'унив': 'универсальн',
+  'проф': 'профессиональн'
+};
+
+function isFreightOrServiceLineText(text?: string): boolean {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  return /^(?:доставка|транспортн\w*\s+услуг|услуг\w*\s+доставк|перевозк|автоуслуг|разгрузк|погрузк|аренда|услуга\s+по|nakliye\b)/i.test(t);
+}
+
+function stemOriginalRussianWord(w: string): string {
+  if (STRICT_RUSSIAN_ABBREV_MAP[w]) return STRICT_RUSSIAN_ABBREV_MAP[w];
+  if (w === 'гкл' || w.startsWith('гипсокартон')) return 'гипсокартон';
+  if (w === 'гклв') return 'гклв';
+  if (w === 'гвл' || w.startsWith('гипсоволокн')) return 'гипсоволокн';
+  if (BRAND_SYNONYMS_MAP[w]) return BRAND_SYNONYMS_MAP[w];
+  if (w === 'свеза' || w === 'sveza') return 'sveza';
+  if (w === 'леика' || w === 'лейка' || w === 'leica') return 'leica';
+  if (w === 'корда' || w === 'korda') return 'korda';
+  if (w === 'сантал' || w === 'santal') return 'santal';
+  if (w.length <= 3) return w;
+  const stripped = w.replace(
+    /(?:ый|ий|ой|ая|яя|ое|ее|ые|ие|ого|его|ому|ему|ым|им|ом|ем|ую|юю|ами|ями|ах|ях|ов|ев|ей|ью|ии|ия|ие|ка|ки|ку|ке|а|я|о|е|ы|и|у|ю)$/,
+    ''
+  );
+  return STRICT_RUSSIAN_ABBREV_MAP[stripped] || (stripped.length >= 2 ? stripped : w);
+}
+
+export interface StrictOriginalMaterialSignature {
+  rawOriginalText: string;
+  hasCyrillic: boolean;
+  brand: string;
+  numericSig: string;
+  gostKey: string;
+  stems: string[];
+  exactKey: string;
+}
+
+const STRICT_SIGNATURE_CACHE = new Map<string, StrictOriginalMaterialSignature | null>();
+
+/**
+ * Extracts a strict, order-independent fingerprint strictly from the original language
+ * (Russian `originalName` whenever Cyrillic is present, never polluted by Turkish translations).
+ * Every number (dimensions, thickness, diameter, density, weight, pack size, model number),
+ * brand, standard (GOST vs TU), and Russian word stem must match 100%.
+ */
+export function buildStrictOriginalMaterialSignature(item: {
+  originalName?: string;
+  materialName?: string;
+  brand?: string;
+}): StrictOriginalMaterialSignature | null {
+  const orig = String(item.originalName || '').trim();
+  const mat = String(item.materialName || '').trim();
+  const brandHint = String(item.brand || '').trim();
+  const cacheKey = `${orig}\u0000${mat}\u0000${brandHint}`;
+
+  if (STRICT_SIGNATURE_CACHE.has(cacheKey)) {
+    return STRICT_SIGNATURE_CACHE.get(cacheKey)!;
+  }
+
+  const hasCyrOrig = /[а-яА-ЯёЁ]/.test(orig);
+  const hasCyrMat = /[а-яА-ЯёЁ]/.test(mat);
+
+  // Always prefer the original Russian text; never concatenate translated Turkish text when Russian exists
+  let raw = hasCyrOrig ? orig : (hasCyrMat ? mat : (orig || mat));
+  if (!raw || isFreightOrServiceLineText(raw) || isFreightOrServiceLineText(mat)) {
+    STRICT_SIGNATURE_CACHE.set(cacheKey, null);
+    return null;
+  }
+
+  // Fast, non-backtracking strip of Prizma jobsite prefixes and trailing bracketed translations
+  if (raw.includes('/') || raw.includes('\\')) {
+    raw = raw.replace(/^[^\n]{1,60}?(?:ФАКТ|FAKT|ПЛАН|PLAN|АВАНС|AVANS|STF|BTF|СЧЕТ|SCHET)\s*[/|\\-]\s*/i, '');
+  }
+  if (raw.endsWith(']')) {
+    raw = raw.replace(/\[[^\]]+\]$/g, '');
+  }
+  raw = raw.trim();
+
+  if (!raw || isFreightOrServiceLineText(raw)) {
+    STRICT_SIGNATURE_CACHE.set(cacheKey, null);
+    return null;
+  }
+
+  let s = raw.toLowerCase().replace(/ё/g, 'е');
+  // Strip vendor-internal 1C accounting/warehouse nomenclature prefixes (e.g. "00029058 ", "у0-00029058 ", "01-09о ") when followed by Cyrillic text
+  s = s
+    .replace(/^(?:[а-яa-z]{1,3}\d?[-/])?\d{5,12}\s+(?=[а-яa-z])/i, '')
+    .replace(/^\d{2}-\d{2}[а-яa-z]?\s+(?=[а-я])/i, '')
+    .trim();
+  // Normalize decimal commas between digits (e.g. 12,5 -> 12.5) and dotted brand names (e.g. D.BOR -> dbor)
+  s = s
+    .replace(/(\d),(\d)/g, '$1.$2')
+    .replace(/\b(?:d\.bor|д\.бор)\b/gi, 'dbor');
+
+  // Extract GOST / TU / DIN / ISO standards into gostKey
+  const gostMatches: string[] = [];
+  s = s.replace(/(?:^|[^а-яa-z0-9])(гост|ту|din|iso)\s*(?:р\s*)?(\d+(?:[.-]\d+)*)/gi, (_, std, num) => {
+    gostMatches.push(`${String(std).toLowerCase()}:${num}`);
+    return ` ${String(std).toLowerCase()} `;
+  });
+
+  // Extract all numbers (dimensions, thickness, diameter, density, weight, volume, pack count, model numbers)
+  const rawNums = s.match(/\d+(?:\.\d+)?/g) || [];
+  const normNums = rawNums
+    .map(n => String(Number(n)))
+    .filter(n => n !== 'NaN');
+  const numericSig = normNums
+    .slice()
+    .sort((a, b) => Number(a) - Number(b))
+    .join('|');
+
+  // Extract word tokens from original text
+  const cleanTokens = s
+    .replace(/\d+(?:\.\d+)?/g, ' ')
+    .replace(/[^а-яa-z]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  // Extract brand in O(1) via token lookup
+  let brand = '';
+  if (brandHint && brandHint !== 'GENERIC' && brandHint !== 'UNSPECIFIED') {
+    const cleanB = brandHint.toLowerCase().replace(/\b(?:d\.bor|д\.бор)\b/gi, 'dbor');
+    brand = BRAND_SYNONYMS_MAP[cleanB] || cleanB;
+  }
+  if (!brand) {
+    for (const tok of cleanTokens) {
+      if (tok === 'dbor') {
+        brand = 'dbor';
+        break;
+      }
+      const mapped = BRAND_SYNONYMS_MAP[tok];
+      if (mapped) {
+        brand = mapped;
+        break;
+      }
+    }
+  }
+
+  const wordStems: string[] = [];
+  for (const tok of cleanTokens) {
+    if (STRICT_STOP_WORDS.has(tok)) continue;
+    const stem = stemOriginalRussianWord(tok);
+    if (stem && stem.length >= 2 && !STRICT_STOP_WORDS.has(stem)) {
+      wordStems.push(stem);
+    }
+  }
+
+  const uniqueStems = Array.from(new Set(wordStems)).sort();
+  if (uniqueStems.length === 0) {
+    STRICT_SIGNATURE_CACHE.set(cacheKey, null);
+    return null;
+  }
+
+  const exactKey = `${numericSig || '_'}::${uniqueStems.join('|')}`;
+
+  const result: StrictOriginalMaterialSignature = {
+    rawOriginalText: raw,
+    hasCyrillic: hasCyrOrig || hasCyrMat,
+    brand,
+    numericSig,
+    gostKey: gostMatches.sort().join(','),
+    stems: uniqueStems,
+    exactKey
+  };
+
+  if (STRICT_SIGNATURE_CACHE.size < 25000) {
+    STRICT_SIGNATURE_CACHE.set(cacheKey, result);
+  }
+  return result;
+}
+
+interface StrictIndexedHistoricalItem {
+  inv: InvoiceRecord;
+  pastIt: any;
+  sig: StrictOriginalMaterialSignature;
+  grossUnitPrice: number;
+  normalizedUnit: string;
+  cleanInvNo: string;
+  invSupplierLower: string;
+  sourceType: 'GES_ARCHIVE' | 'PRIZMA_ERP';
+}
+
+const STRICT_ORIGINAL_INDEX_CACHE = new WeakMap<
+  InvoiceRecord[],
+  Map<string, StrictIndexedHistoricalItem[]>
+>();
+
+function getOrBuildStrictOriginalIndex(historicalInvoices: InvoiceRecord[]): Map<string, StrictIndexedHistoricalItem[]> {
+  const cached = STRICT_ORIGINAL_INDEX_CACHE.get(historicalInvoices);
+  if (cached) return cached;
+
+  const buckets = new Map<string, StrictIndexedHistoricalItem[]>();
+
+  for (const inv of historicalInvoices || []) {
+    if (!inv || inv.isDeleted) continue;
+    if (!Array.isArray(inv.items)) continue;
+    if ((inv as any).linesReconciled === false || (inv as any).lineCheck === 'mismatch') continue;
+
+    const cleanInvNo = cleanDocNo(inv.invoiceNumber || inv.invoiceNo);
+    const invSupplierLower = String(inv.supplier || (inv as any).vendorName || '').trim().toLowerCase();
+    const isPrizma = Boolean(
+      (inv as any).sourceCollection === 'prizma_invoices' ||
+      String(inv.id || '').startsWith('prizma_') ||
+      ((inv as any).prizmaProcessId && !inv.uploadedBySupervisorId)
+    );
+
+    for (const pastIt of inv.items) {
+      if (!pastIt) continue;
+      if ((pastIt as any).lineVerified === false || !isLineArithmeticConsistent(pastIt as any)) continue;
+
+      const grossUnitPrice = comparisonGrossUnitPrice(pastIt as any);
+      if (!grossUnitPrice || grossUnitPrice <= 0) continue;
+
+      const sig = buildStrictOriginalMaterialSignature({
+        originalName: pastIt.originalName,
+        materialName: pastIt.materialName,
+        brand: (pastIt as any).brand
+      });
+      if (!sig) continue;
+
+      const entry: StrictIndexedHistoricalItem = {
+        inv,
+        pastIt,
+        sig,
+        grossUnitPrice,
+        normalizedUnit: normalizeUnit(pastIt.unit || 'adet'),
+        cleanInvNo,
+        invSupplierLower,
+        sourceType: isPrizma ? 'PRIZMA_ERP' : 'GES_ARCHIVE'
+      };
+
+      const list = buckets.get(sig.exactKey);
+      if (list) {
+        list.push(entry);
+      } else {
+        buckets.set(sig.exactKey, [entry]);
+      }
+    }
+  }
+
+  STRICT_ORIGINAL_INDEX_CACHE.set(historicalInvoices, buckets);
+  return buckets;
+}
+
+/**
+ * Given a draft invoice or discount record's line items, checks in O(1) time via the
+ * Strict Original-Language (Russian-first) Hash-Bucket Index whether the 100% identical material
+ * (identical Russian words, brand, model, dimensions, thickness, diameter, density, and standard)
+ * was purchased at a cheaper unit price (at least 1% difference) across the system.
+ */
+export function findCheaperHistoricalBenchmarksForItems(
+  items: any[],
+  context: {
+    supplier?: string;
+    jobsiteId?: string;
+    invoiceNo?: string;
+    orderDate?: string;
+    excludeDiscountId?: string;
+    excludeInvoiceId?: string;
+  },
+  historicalInvoices: InvoiceRecord[]
+): import('../types').CheaperHistoricalBenchmark[] {
+  if (!Array.isArray(items) || items.length === 0 || !Array.isArray(historicalInvoices) || historicalInvoices.length === 0) {
+    return [];
+  }
+
+  const buckets = getOrBuildStrictOriginalIndex(historicalInvoices);
+  const results: import('../types').CheaperHistoricalBenchmark[] = [];
+  const cleanContextInvNo = cleanDocNo(context.invoiceNo);
+  const excludeInvId = context.excludeInvoiceId || (context.excludeDiscountId ? `inv_sync_${context.excludeDiscountId}` : '');
+  const excludeDiscId = context.excludeDiscountId || '';
+
+  items.forEach((rawIt, idx) => {
+    if (!rawIt) return;
+    const currentUnitPrice = comparisonGrossUnitPrice(rawIt);
+    const qty = Number(rawIt.quantity) || 1;
+    if (currentUnitPrice <= 0 || qty <= 0) return;
+
+    const sig = buildStrictOriginalMaterialSignature({
+      originalName: rawIt.originalName,
+      materialName: rawIt.materialName,
+      brand: rawIt.brand
+    });
+    if (!sig) return;
+
+    const candidates = buckets.get(sig.exactKey);
+    if (!candidates || candidates.length === 0) return;
+
+    const draftUnitNorm = normalizeUnit(rawIt.unit || 'adet');
+    const validMatches: Array<{ entry: StrictIndexedHistoricalItem; comparablePrice: number }> = [];
+
+    for (const cand of candidates) {
+      // Never compare a discount/invoice record against its own synced invoice copy
+      if (excludeInvId && cand.inv.id === excludeInvId) continue;
+      if (excludeDiscId && ((cand.inv as any).discountId === excludeDiscId || cand.inv.id === `inv_sync_${excludeDiscId}`)) continue;
+      if (cleanContextInvNo && cand.cleanInvNo === cleanContextInvNo) continue;
+
+      // If both specify a brand or GOST / TU / DIN standard, they must be 100% identical
+      if (sig.brand && cand.sig.brand && sig.brand !== cand.sig.brand) continue;
+      if (sig.gostKey && cand.sig.gostKey && sig.gostKey !== cand.sig.gostKey) continue;
+
+      // Unit check: must be identical unit or mathematically convertible
+      let comparablePrice = cand.grossUnitPrice;
+      if (cand.normalizedUnit !== draftUnitNorm) {
+        const conv = normalizeQuantityAndPrice(
+          cand.pastIt.quantity || 1,
+          cand.grossUnitPrice,
+          cand.pastIt.unit || 'adet',
+          rawIt.unit || 'adet',
+          sig.rawOriginalText,
+          rawIt.category || cand.pastIt.category || ''
+        );
+        if (!conv.conversionApplied || conv.normalizedUnitPrice <= 0) continue;
+        comparablePrice = Number(conv.normalizedUnitPrice.toFixed(2));
+      }
+
+      if (comparablePrice <= 0) continue;
+
+      // Sanity ratio guard against extreme pack-vs-piece OCR unit errors (>10x)
+      const ratio = Math.max(currentUnitPrice / comparablePrice, comparablePrice / currentUnitPrice);
+      if (ratio > 10) continue;
+
+      validMatches.push({ entry: cand, comparablePrice });
+    }
+
+    if (validMatches.length === 0) return;
+
+    validMatches.sort((a, b) => a.comparablePrice - b.comparablePrice);
+    const cheapest = validMatches[0];
+
+    // User confirmed rule: show when price difference is at least 1% (>= 1.0%)
+    if (currentUnitPrice < cheapest.comparablePrice * 1.01) return;
+
+    const unitOverpayment = Number((currentUnitPrice - cheapest.comparablePrice).toFixed(2));
+    const overpaymentPercentage = Number(((unitOverpayment / cheapest.comparablePrice) * 100).toFixed(1));
+    if (unitOverpayment <= 0.01 || overpaymentPercentage < 1.0) return;
+
+    const totalLineOverpayment = Number((unitOverpayment * qty).toFixed(2));
+    const avgPrice = Number(
+      (validMatches.reduce((s, m) => s + m.comparablePrice, 0) / validMatches.length).toFixed(2)
+    );
+
+    const bestInv = cheapest.entry.inv;
+    const isPrizma = cheapest.entry.sourceType === 'PRIZMA_ERP';
+    const rawSupplier = String(bestInv.supplier || (bestInv as any).vendorName || 'Geçmiş Tedarikçi')
+      .replace(/\s*\(Prizma ERP\)\s*$/, '')
+      .trim();
+
+    const prizmaDemandId =
+      (bestInv as any).prizmaDemandId ||
+      (isPrizma && String(bestInv.id || '').startsWith('prizma_')
+        ? String(bestInv.id).replace(/^prizma_/, '')
+        : undefined);
+    const lineCheckFileId = (bestInv as any).lineCheck?.fileId || (bestInv as any).invoiceFileId;
+    const historicalFileUrl =
+      bestInv.fileUrl ||
+      (prizmaDemandId ? `/api/prizma/invoice-file/${prizmaDemandId}?type=schet` : undefined) ||
+      (lineCheckFileId ? `/api/prizma/file/${lineCheckFileId}` : undefined);
+    const historicalPrizmaUrl = (bestInv as any).prizmaBtfUrl || (bestInv as any).prizmaUrl || undefined;
+
+    results.push({
+      lineIndex: idx,
+      materialName: rawIt.materialName || sig.rawOriginalText,
+      originalName: sig.rawOriginalText,
+      historicalOriginalName: cheapest.entry.sig.rawOriginalText,
+      brand: rawIt.brand || (sig.brand ? sig.brand.toUpperCase() : undefined),
+      unit: rawIt.unit || 'Adet',
+      quantity: qty,
+      currentUnitPrice: Number(currentUnitPrice.toFixed(2)),
+      historicalBestUnitPrice: Number(cheapest.comparablePrice.toFixed(2)),
+      historicalAvgUnitPrice: avgPrice,
+      historicalSupplier: rawSupplier,
+      historicalJobsiteName: bestInv.jobsiteName || (bestInv as any).prizmaJobsite || 'Merkez / Şantiye',
+      historicalDate: bestInv.date || (bestInv as any).createdAt || '-',
+      historicalInvoiceNo: bestInv.invoiceNumber || bestInv.invoiceNo || '-',
+      historicalInvoiceId: bestInv.id,
+      historicalFileUrl,
+      historicalPrizmaDemandId: prizmaDemandId,
+      historicalPrizmaUrl,
+      historicalSource: isPrizma ? 'PRIZMA_ERP' : 'GES_ARCHIVE',
+      unitOverpayment,
+      totalLineOverpayment,
+      overpaymentPercentage,
+      matchReason: `Orijinal Rusça metni, markası, modeli ve tüm ölçü/teknik özellikleri birebir aynı olan bu malzeme ${rawSupplier} firmasından ${cheapest.comparablePrice.toLocaleString('tr-TR')} ₽ birim fiyata alınmıştır.`
+    });
+  });
+
+  return results;
+}
+
+/**
+ * Scans all DiscountRecord entries in milliseconds using the O(1) Strict Original-Language Index
+ * to build the Admin-only "İndirimli Kayıtta Farklı Faturalar" invoice-level anomaly list.
+ */
+export function scanDiscountRecordsForHistoricalAnomalies(
+  discounts: import('../types').DiscountRecord[],
+  historicalInvoices: InvoiceRecord[]
+): import('../types').DiscountHistoricalAnomalyRecord[] {
+  if (!Array.isArray(discounts) || discounts.length === 0 || !Array.isArray(historicalInvoices) || historicalInvoices.length === 0) {
+    return [];
+  }
+
+  const anomalyRecords: import('../types').DiscountHistoricalAnomalyRecord[] = [];
+
+  for (const disc of discounts) {
+    if (!disc || disc.isDeleted) continue;
+    if (!Array.isArray(disc.items) || disc.items.length === 0) continue;
+
+    // Always evaluate with the strict original-language (Russian) 100% exact matcher
+    const affectedLines = findCheaperHistoricalBenchmarksForItems(
+      disc.items,
+      {
+        supplier: disc.vendorName,
+        jobsiteId: disc.jobsiteId,
+        invoiceNo: disc.invoiceNo || disc.invoiceNumber,
+        orderDate: disc.orderDate,
+        excludeDiscountId: disc.id,
+        excludeInvoiceId: `inv_sync_${disc.id}`
+      },
+      historicalInvoices
+    );
+
+    if (affectedLines.length === 0) continue;
+
+    const totalPotentialExtraSavings = Number(
+      affectedLines.reduce((sum, l) => sum + (Number(l.totalLineOverpayment) || 0), 0).toFixed(2)
+    );
+    if (totalPotentialExtraSavings <= 0) continue;
+
+    const storedAlert = (disc as any).historicalBenchmarkAlert;
+    const offerPrice = Number(disc.offerPrice) || 0;
+    const agreedPrice = Number(disc.agreedPrice) || 0;
+    const claimedDiscountAmount = Number(disc.discountAmount) || Math.max(0, offerPrice - agreedPrice);
+
+    anomalyRecords.push({
+      discountId: disc.id,
+      recordSource: 'DISCOUNT_CENTER',
+      invoiceNo: disc.invoiceNo || disc.invoiceNumber || '-',
+      orderDate: disc.orderDate || '-',
+      vendorName: disc.vendorName || 'Bilinmeyen Tedarikçi',
+      jobsiteName: disc.jobsiteName || 'Belirtilmemiş Şantiye',
+      supervisorId: disc.supervisorId || '',
+      supervisorName: disc.supervisorName || 'Atanmamış',
+      offerPrice,
+      agreedPrice,
+      claimedDiscountAmount,
+      totalPotentialExtraSavings,
+      buyerNotifiedBeforeSave: Boolean(storedAlert?.buyerNotifiedBeforeSave ?? true),
+      notifiedAt: storedAlert?.notifiedAt || disc.created_at || disc.orderDate,
+      firstOfferFileUrl: disc.firstOfferFileUrl,
+      finalOfferFileUrl: disc.finalOfferFileUrl,
+      affectedLines
+    });
+  }
+
+  return anomalyRecords.sort((a, b) => b.totalPotentialExtraSavings - a.totalPotentialExtraSavings);
+}
+
+/**
+ * Scans invoices uploaded directly via "AI Otomatik Fatura Okuma" (GES Archive `invoices`
+ * that are NOT synced copies of `discounts`) using the exact same O(1) Strict Original-Language
+ * (Russian-first) 100% exact material/brand/spec matcher.
+ */
+export function scanDirectInvoicesForHistoricalAnomalies(
+  invoices: InvoiceRecord[],
+  discounts: import('../types').DiscountRecord[],
+  historicalInvoices: InvoiceRecord[]
+): import('../types').DiscountHistoricalAnomalyRecord[] {
+  if (!Array.isArray(invoices) || invoices.length === 0 || !Array.isArray(historicalInvoices) || historicalInvoices.length === 0) {
+    return [];
+  }
+
+  const discountIds = new Set<string>();
+  const discountInvNos = new Set<string>();
+  for (const d of discounts || []) {
+    if (!d || d.isDeleted) continue;
+    if (d.id) discountIds.add(d.id);
+    const cNo = cleanDocNo(d.invoiceNo || d.invoiceNumber);
+    if (cNo) discountInvNos.add(cNo);
+  }
+
+  const anomalyRecords: import('../types').DiscountHistoricalAnomalyRecord[] = [];
+
+  for (const inv of invoices) {
+    if (!inv || inv.isDeleted) continue;
+    if (!Array.isArray(inv.items) || inv.items.length === 0) continue;
+
+    // Exclude Prizma ERP invoices
+    const isPrizma = Boolean(
+      (inv as any).sourceCollection === 'prizma_invoices' ||
+      String(inv.id || '').startsWith('prizma_') ||
+      ((inv as any).prizmaProcessId && !inv.uploadedBySupervisorId)
+    );
+    if (isPrizma) continue;
+
+    // Exclude invoices that were synced from the Discount Center
+    if (String(inv.id || '').startsWith('inv_sync_')) continue;
+    if ((inv as any).discountId && discountIds.has((inv as any).discountId)) continue;
+    const cleanNo = cleanDocNo(inv.invoiceNumber || inv.invoiceNo);
+    if (cleanNo && discountInvNos.has(cleanNo)) continue;
+
+    const affectedLines = findCheaperHistoricalBenchmarksForItems(
+      inv.items,
+      {
+        supplier: inv.supplier || (inv as any).vendorName,
+        jobsiteId: inv.jobsiteId,
+        invoiceNo: inv.invoiceNumber || inv.invoiceNo,
+        orderDate: inv.date,
+        excludeInvoiceId: inv.id
+      },
+      historicalInvoices
+    );
+
+    if (affectedLines.length === 0) continue;
+
+    const totalPotentialExtraSavings = Number(
+      affectedLines.reduce((sum, l) => sum + (Number(l.totalLineOverpayment) || 0), 0).toFixed(2)
+    );
+    if (totalPotentialExtraSavings <= 0) continue;
+
+    const totalAmount = Number(inv.totalAmount) || 0;
+
+    anomalyRecords.push({
+      discountId: `direct_${inv.id}`,
+      invoiceId: inv.id,
+      recordSource: 'DIRECT_INVOICE',
+      invoiceNo: inv.invoiceNumber || inv.invoiceNo || '-',
+      orderDate: inv.date || (inv as any).createdAt || '-',
+      vendorName: inv.supplier || (inv as any).vendorName || 'Bilinmeyen Tedarikçi',
+      jobsiteName: inv.jobsiteName || 'Belirtilmemiş Şantiye',
+      supervisorId: inv.uploadedBySupervisorId || '',
+      supervisorName: inv.uploadedBySupervisorName || 'Atanmamış',
+      offerPrice: totalAmount,
+      agreedPrice: totalAmount,
+      claimedDiscountAmount: 0,
+      totalPotentialExtraSavings,
+      buyerNotifiedBeforeSave: true,
+      notifiedAt: (inv as any).createdAt || inv.date,
+      firstOfferFileUrl: undefined,
+      finalOfferFileUrl: inv.fileUrl,
+      affectedLines
+    });
+  }
+
+  return anomalyRecords.sort((a, b) => b.totalPotentialExtraSavings - a.totalPotentialExtraSavings);
+}
+
+
+

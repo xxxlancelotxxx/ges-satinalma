@@ -1,6 +1,6 @@
 {
-  "summary": "OCR Fatura Kalem Ayrıştırma Hatasının (Firma ve Adres Bilgilerinin Kalem Olarak Eklenmesi) Kalıcı Çözümü, Çok Sütunlu (% НДС / Вес) PDF Tablo Okuyucu Güncellemesi ve Mevcut Hatalı Faturaların Orijinal PDF'lerinden Otomatik Onarım Planı",
-  "updatedAt": "2026-10-20T05:25:00.238925759Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Hızlı Ön Onay Fiyat Denetimi ve Şef İndirim & TDF Teklif Merkezi sekmelerindeki yanlış/halüsinasyonlu fiyat eşleştirmelerinin (örn. Fatura 3262'deki 1.477,38 ₽ panç kaleminin 296 ₽ matkap ucu ile eşleşmesi) kök nedenlerini gideren ve tüm modülleri Admin Fiyat Anomali Denetimi'ndeki birebir orijinal Rusça + tüm teknik/sayısal parametre eşleştirme motoruna bağlayan uygulama planı.",
+  "updatedAt":  "2026-10-20T16:05:18.446158765Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }

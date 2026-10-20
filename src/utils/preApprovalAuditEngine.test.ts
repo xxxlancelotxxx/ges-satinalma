@@ -87,12 +87,12 @@ const MOCK_HISTORICAL_INVOICES: InvoiceRecord[] = [
 ];
 
 // ----------------------------------------------------------------------------
-// Test 1: Aynı malzemenin farklı isimlerle eşleşmesi (Russian vs. Turkish)
+// Test 1: Birebir aynı orijinal Rusça malzemenin eşleşmesi (Strict Russian-first)
 // ----------------------------------------------------------------------------
-console.log('[Test 1] Multilingual Russian/Turkish Material Matching');
+console.log('[Test 1] Strict Original-Language (Russian-first) Material Matching');
 const draftItem1 = {
-  materialName: 'Арматура А500С 12мм',
-  originalName: 'Арматура А500С 12мм (11.7м)',
+  materialName: 'A500C İnşaat Demiri Ø12',
+  originalName: 'Арматура А500С 12мм ГОСТ 34028',
   category: 'İnşaat Demiri',
   unit: 'ton',
   quantity: 50,
@@ -102,17 +102,18 @@ const draftItem1 = {
 };
 
 const result1 = auditSingleLineItem(draftItem1, 0, MOCK_HISTORICAL_INVOICES);
-assert.strictEqual(result1.hasHistoricalMatch, true, 'Draft Russian rebar must match past Turkish rebar');
+assert.strictEqual(result1.hasHistoricalMatch, true, 'Identical Russian originalName must match');
 assert.strictEqual(result1.bestHistoricalMatch?.invoiceNumber, 'FT-2026-001');
-assert.ok(result1.matchConfidence >= 0.85, 'Confidence score should be >= 0.85');
-console.log('✓ Russian "Арматура А500С 12мм" matched historical Turkish "A500C İnşaat Demiri Ø12" with score:', result1.matchConfidence);
+assert.ok(result1.matchConfidence >= 0.95, 'Confidence score should be 1.0 for exact original match');
+console.log('✓ Russian "Арматура А500С 12мм ГОСТ 34028" matched historical record with score:', result1.matchConfidence);
 
 // ----------------------------------------------------------------------------
-// Test 2: Farklı çap/kalite/teknik özelliklerin ayrılması (Ø12 vs Ø16, B25 vs B30)
+// Test 2: Farklı çap/kalite/teknik özelliklerin ayrılması (Ø12 vs Ø16, B25 vs B30, 92mm vs 38mm vs 10x150/210)
 // ----------------------------------------------------------------------------
 console.log('[Test 2] Separation of Different Diameters and Technical Specs');
 const draftItem2_Ø16 = {
   materialName: 'Nervürlü İnşaat Demiri Ø16mm',
+  originalName: 'Арматура А500С 16мм',
   unit: 'ton',
   quantity: 10,
   unitPrice: 25000,
@@ -136,7 +137,8 @@ console.log('✓ Diameters and grades strictly separated and correctly routed to
 // ----------------------------------------------------------------------------
 console.log('[Test 3] Unit Conversion Normalization (kg <-> ton)');
 const draftItem3_kg = {
-  materialName: 'Арматура А500С 12мм',
+  materialName: 'Арматура А500С 12мм ГОСТ 34028',
+  originalName: 'Арматура А500С 12мм ГОСТ 34028',
   unit: 'kg',
   quantity: 5000,
   unitPrice: 25, // 25 RUB/kg = 25,000 RUB/ton
@@ -157,6 +159,7 @@ console.log('✓ Unit conversion correctly converted ton price 23200 RUB/ton to 
 console.log('[Test 4] Currency Conversion Normalization (USD -> RUB)');
 const draftItem4_USD = {
   materialName: 'A500C İnşaat Demiri Ø12',
+  originalName: 'Арматура А500С 12мм ГОСТ 34028',
   unit: 'ton',
   quantity: 10,
   unitPrice: 270, // 270 USD * 92.5 = 24,975 RUB
@@ -183,6 +186,7 @@ console.log('✓ VAT normalization confirmed: Gross 120 RUB -> Net 100 RUB');
 console.log('[Test 6] Comparison Levels (Same Supplier vs Other Suppliers vs Other Jobsites)');
 const draftSameSupplier = {
   materialName: 'A500C İnşaat Demiri Ø12',
+  originalName: 'Арматура А500С 12мм ГОСТ 34028',
   supplier: 'OOO Severstal Metiz', // Same as historical invoice 001
   jobsiteId: 'job_moscow_01',
   unit: 'ton',
@@ -198,6 +202,7 @@ console.log('✓ Comparison level detected as LEVEL_2_SAME_SUPPLIER');
 
 const draftOtherSupplier = {
   materialName: 'A500C İnşaat Demiri Ø12',
+  originalName: 'Арматура А500С 12мм ГОСТ 34028',
   supplier: 'OOO Mechel Trade', // Different supplier
   jobsiteId: 'job_moscow_01',
   unit: 'ton',
@@ -216,6 +221,7 @@ console.log('✓ Comparison level detected as LEVEL_3_OTHER_SUPPLIERS');
 console.log('[Test 7] Cheaper Past Purchase Warning & Discount Recommendation');
 const draftExpensive = {
   materialName: 'A500C İnşaat Demiri Ø12',
+  originalName: 'Арматура А500С 12мм ГОСТ 34028',
   supplier: 'OOO Mechel Trade',
   jobsiteId: 'job_moscow_01',
   unit: 'ton',

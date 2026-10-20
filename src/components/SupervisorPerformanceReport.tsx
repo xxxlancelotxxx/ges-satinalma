@@ -9,13 +9,25 @@ import {
   Jobsite,
   Personnel,
   MaterialComparison,
-  InvoiceRecord
+  InvoiceRecord,
+  DiscountHistoricalAnomalyRecord,
+  CheaperHistoricalBenchmark
 } from '../types';
-import { formatRuble, formatUploadDate } from '../utils/format';
+import { formatRuble, formatUploadDate, openOriginalFileViewer } from '../utils/format';
 import { calculateNegotiationEffortScore, NEGOTIATION_THRESHOLD } from '../utils/procedureConfig';
 import { calculateSmartFinancialScore } from '../utils/leaderboardGamification';
 import { getGenuineNegotiationRoundCount } from '../utils/negotiationStages';
 import { generateExecutiveHtmlReport } from '../utils/reportHtmlGenerator';
+import {
+  scanDiscountRecordsForHistoricalAnomalies,
+  scanDirectInvoicesForHistoricalAnomalies
+} from '../utils/preApprovalAuditEngine';
+import {
+  renderAnomalyReportHtml,
+  downloadAnomalyReportExcel,
+  downloadAnomalyReportHtml,
+  downloadAnomalyReportPdf
+} from '../utils/anomalyReportExporter';
 import { GesLogo } from './GesLogo';
 import {
   TrendingUp,
@@ -48,7 +60,8 @@ import {
   X,
   FileText,
   Scale,
-  Snowflake
+  Snowflake,
+  ExternalLink
 } from 'lucide-react';
 import { SearchableFilterDropdown } from './SearchableFilterDropdown';
 import { DateRangeFilterDropdown } from './DateRangeFilterDropdown';
@@ -71,6 +84,7 @@ import { EditDiscountModal } from './EditDiscountModal';
 import { ExecutiveVendorDiversityReport } from './ExecutiveVendorDiversityReport';
 import { ExecutivePriceAndDiscountAudit } from './ExecutivePriceAndDiscountAudit';
 import { MonthlyExecutiveReportModal } from './MonthlyExecutiveReportModal';
+import { InvoiceDetailModal } from './InvoiceDetailModal';
 
 interface Props {
   performances: SupervisorPerformance[];
@@ -80,6 +94,7 @@ interface Props {
   personnel?: Personnel[];
   comparisons?: MaterialComparison[];
   invoices?: InvoiceRecord[];
+  prizmaInvoices?: InvoiceRecord[];
   onOpenNewDiscountModal: () => void;
   onUpdateDiscount?: (id: string, record: Partial<DiscountRecord>) => Promise<void> | void;
   onDeleteDiscount?: (id: string) => Promise<void> | void;
@@ -96,6 +111,7 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
   personnel = [],
   comparisons = [],
   invoices = [],
+  prizmaInvoices = [],
   onOpenNewDiscountModal,
   onUpdateDiscount,
   onDeleteDiscount
@@ -114,6 +130,7 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
 
   // Effective unlock: Admins, supervisors, and personnel have direct access to foster healthy team competition
   const isEffectiveUnlocked = user?.role === 'admin' || user?.role === 'supervisor' || user?.role === 'personnel' || isUnlocked;
+  const isAdminOnlyUnlocked = user?.role === 'admin' || isUnlocked;
 
   const [enteredPin, setEnteredPin] = useState<string>('');
   const [pinError, setPinError] = useState<string>('');
@@ -128,7 +145,13 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
   const [invoiceNoFilter, setInvoiceNoFilter] = useState<string>('');
   const [dateFilter, setDateFilter] = useState<DateFilterState>({ preset: 'all' });
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [activeViewMode, setActiveViewMode] = useState<'matrix' | 'cards' | 'personnel' | 'chart' | 'logs' | 'diversity' | 'audit'>('matrix');
+  const [activeViewMode, setActiveViewMode] = useState<'matrix' | 'cards' | 'personnel' | 'chart' | 'logs' | 'diversity' | 'audit' | 'historical_anomalies'>('matrix');
+  const [selectedHistoricalAnomaly, setSelectedHistoricalAnomaly] = useState<DiscountHistoricalAnomalyRecord | null>(null);
+  const [viewingHistoricalInvoice, setViewingHistoricalInvoice] = useState<InvoiceRecord | null>(null);
+  const [historicalAnomalySearch, setHistoricalAnomalySearch] = useState<string>('');
+  const [anomalySourceFilter, setAnomalySourceFilter] = useState<'ALL' | 'DISCOUNT_CENTER' | 'DIRECT_INVOICE'>('ALL');
+  const [showAnomalyReportModal, setShowAnomalyReportModal] = useState<boolean>(false);
+  const [isExportingAnomalyReport, setIsExportingAnomalyReport] = useState<boolean>(false);
 
   const canonicalVendors = useMemo(() => {
     return extractCanonicalVendors((discounts || []).map(d => ({ vendorName: d.vendorName })));
@@ -614,6 +637,93 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
       return matchesSup && matchesJob && matchesVen && matchesInvNo && matchesDate && matchesSearch;
     });
   }, [discounts, selectedSupervisorId, selectedJobsiteId, selectedVendor, invoiceNoFilter, dateFilter, searchTerm]);
+
+  // Cached combined invoice pool (GES Archive + Prizma ERP) so WeakMap index is never invalidated on re-render
+  const combinedInvoicePool = useMemo(() => {
+    const gesList = invoices || [];
+    const prizmaList = (prizmaInvoices || []).map(p =>
+      (p as any).sourceCollection === 'prizma_invoices' ? p : { ...p, sourceCollection: 'prizma_invoices' }
+    );
+    return [...gesList, ...prizmaList];
+  }, [invoices, prizmaInvoices]);
+
+  const openHistoricalReferenceInvoice = (line: CheaperHistoricalBenchmark) => {
+    const cleanTargetNo = String(line.historicalInvoiceNo || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+    const found = combinedInvoicePool.find(inv => {
+      if (line.historicalInvoiceId && inv.id === line.historicalInvoiceId) return true;
+      const invNo = String(inv.invoiceNumber || inv.invoiceNo || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+      return Boolean(cleanTargetNo && invNo === cleanTargetNo);
+    });
+    if (found) {
+      setViewingHistoricalInvoice({
+        ...found,
+        fileUrl: found.fileUrl || line.historicalFileUrl,
+        uploadedBySupervisorName: found.uploadedBySupervisorName || ((found as any).sourceCollection === 'prizma_invoices' ? 'Prizma ERP Kaydı' : 'GES Arşivi')
+      });
+    } else if (line.historicalFileUrl) {
+      openOriginalFileViewer(line.historicalFileUrl, `Gecmis_Fatura_${line.historicalInvoiceNo}.pdf`);
+    }
+  };
+
+  // Filtered direct invoices (uploaded via AI Otomatik Fatura Okuma)
+  const filteredDirectInvoices = useMemo(() => {
+    return (invoices || []).filter(inv => {
+      if (!inv || inv.isDeleted) return false;
+      const matchesSup = selectedSupervisorId === 'ALL' || inv.uploadedBySupervisorId === selectedSupervisorId;
+      const matchesJob = selectedJobsiteId === 'ALL' || inv.jobsiteId === selectedJobsiteId;
+      const matchesVen = selectedVendor === 'ALL' || areVendorsEqual(inv.supplier || (inv as any).vendorName || '', selectedVendor);
+      const invNo = String(inv.invoiceNumber || inv.invoiceNo || '');
+      const matchesInvNo = !invoiceNoFilter.trim() || invNo.toLowerCase().includes(invoiceNoFilter.toLowerCase().trim());
+      const matchesDate = !dateFilter.preset || dateFilter.preset === 'all' || matchesDateFilter(inv.date || (inv as any).createdAt, dateFilter);
+      const matchesSearch =
+        searchTerm === '' ||
+        (inv.supplier && inv.supplier.toLowerCase().includes(searchTerm.toLowerCase())) ||
+        (inv.uploadedBySupervisorName && inv.uploadedBySupervisorName.toLowerCase().includes(searchTerm.toLowerCase())) ||
+        (inv.jobsiteName && inv.jobsiteName.toLowerCase().includes(searchTerm.toLowerCase())) ||
+        (invNo && invNo.toLowerCase().includes(searchTerm.toLowerCase()));
+      return matchesSup && matchesJob && matchesVen && matchesInvNo && matchesDate && matchesSearch;
+    });
+  }, [invoices, selectedSupervisorId, selectedJobsiteId, selectedVendor, invoiceNoFilter, dateFilter, searchTerm]);
+
+  // Cached Admin Price Anomaly lists by source
+  const discountCenterAnomalies = useMemo(() => {
+    if (!isAdminOnlyUnlocked) return [];
+    return scanDiscountRecordsForHistoricalAnomalies(filteredDiscounts, combinedInvoicePool);
+  }, [isAdminOnlyUnlocked, filteredDiscounts, combinedInvoicePool]);
+
+  const directInvoiceAnomalies = useMemo(() => {
+    if (!isAdminOnlyUnlocked) return [];
+    return scanDirectInvoicesForHistoricalAnomalies(filteredDirectInvoices, discounts || [], combinedInvoicePool);
+  }, [isAdminOnlyUnlocked, filteredDirectInvoices, discounts, combinedInvoicePool]);
+
+  const allHistoricalAnomalies = useMemo(() => {
+    return [...discountCenterAnomalies, ...directInvoiceAnomalies].sort(
+      (a, b) => b.totalPotentialExtraSavings - a.totalPotentialExtraSavings
+    );
+  }, [discountCenterAnomalies, directInvoiceAnomalies]);
+
+  const sourceFilteredAnomalies = useMemo(() => {
+    if (anomalySourceFilter === 'DISCOUNT_CENTER') return discountCenterAnomalies;
+    if (anomalySourceFilter === 'DIRECT_INVOICE') return directInvoiceAnomalies;
+    return allHistoricalAnomalies;
+  }, [anomalySourceFilter, discountCenterAnomalies, directInvoiceAnomalies, allHistoricalAnomalies]);
+
+  const filteredHistoricalAnomalies = useMemo(() => {
+    const q = historicalAnomalySearch.toLowerCase().trim();
+    if (!q) return sourceFilteredAnomalies;
+    return sourceFilteredAnomalies.filter(a =>
+      a.invoiceNo.toLowerCase().includes(q) ||
+      a.vendorName.toLowerCase().includes(q) ||
+      a.supervisorName.toLowerCase().includes(q) ||
+      a.jobsiteName.toLowerCase().includes(q) ||
+      a.affectedLines.some(l =>
+        l.materialName.toLowerCase().includes(q) ||
+        (l.originalName || '').toLowerCase().includes(q) ||
+        (l.historicalOriginalName || '').toLowerCase().includes(q) ||
+        l.historicalSupplier.toLowerCase().includes(q)
+      )
+    );
+  }, [sourceFilteredAnomalies, historicalAnomalySearch]);
 
   // Chart Data: Supervisor comparison
   const supervisorChartData = useMemo(() => {
@@ -1143,6 +1253,24 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
               >
                 <ShieldAlert className="w-4 h-4 text-amber-600" />
                 <span>Tedarikçi Çeşitliliği & Tekelleşme 🔒</span>
+              </button>
+            )}
+            {isAdminOnlyUnlocked && (
+              <button
+                onClick={() => setActiveViewMode('historical_anomalies')}
+                className={`flex items-center space-x-1.5 px-3.5 py-2 rounded-xl transition-all cursor-pointer ${
+                  activeViewMode === 'historical_anomalies'
+                    ? 'bg-gradient-to-r from-rose-700 to-red-900 text-white font-black shadow-md'
+                    : 'text-rose-900 bg-rose-100/80 hover:bg-rose-200/80 border border-rose-400/50'
+                }`}
+              >
+                <ShieldAlert className="w-4 h-4 text-rose-600" />
+                <span>İndirimli Kayıtta Farklı Faturalar (Admin) 🔒</span>
+                {allHistoricalAnomalies.length > 0 && (
+                  <span className="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-black rounded-md bg-rose-950/30 text-white">
+                    {allHistoricalAnomalies.length}
+                  </span>
+                )}
               </button>
             )}
           </div>
@@ -1815,6 +1943,564 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
             onUpdateDiscount={onUpdateDiscount}
           />
         )}
+
+        {/* View Mode 8: Admin Özel - İndirimli Kayıtta & Doğrudan Yüklenenlerde Farklı Faturalar */}
+        {activeViewMode === 'historical_anomalies' && isAdminOnlyUnlocked && (() => {
+          const filteredAnomalies = filteredHistoricalAnomalies;
+          const totalOverpaymentSum = filteredAnomalies.reduce((s, a) => s + a.totalPotentialExtraSavings, 0);
+          const totalAffectedLinesCount = filteredAnomalies.reduce((s, a) => s + a.affectedLines.length, 0);
+          const activeFilterLabel =
+            anomalySourceFilter === 'DISCOUNT_CENTER'
+              ? 'Şef İndirim & Teklif Merkezi'
+              : anomalySourceFilter === 'DIRECT_INVOICE'
+              ? 'AI Otomatik Fatura Okuma (Doğrudan Yüklenenler)'
+              : 'Tümü (Şef İndirim Merkezi + AI Otomatik Fatura Okuma)';
+
+          return (
+            <div className="p-6 space-y-6">
+              {/* Top Executive Banner */}
+              <div className="p-5 rounded-2xl bg-gradient-to-r from-slate-950 via-rose-950 to-slate-900 text-white border border-rose-500/40 shadow-lg flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="px-2.5 py-0.5 rounded-md bg-rose-500/20 border border-rose-400/40 text-rose-300 text-[10px] font-black uppercase tracking-wider">
+                      🔒 SADECE ADMİN / YÖNETİCİ GÖRÜNÜMÜ
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-md bg-amber-500/20 border border-amber-400/40 text-amber-300 text-[10px] font-black uppercase tracking-wider">
+                      ORİJİNAL RUSÇA METİN & %100 BİREBİR ÖZELLİK DENETİMİ
+                    </span>
+                  </div>
+                  <h3 className="text-base sm:text-lg font-black text-white flex items-center gap-2">
+                    <ShieldAlert className="w-5 h-5 text-rose-400 shrink-0" />
+                    <span>Admin Fiyat Anomali Denetimi (Orijinal Dilde %100 Aynı Malzemenin Daha Uyguna Alındığı Faturalar)</span>
+                  </h3>
+                  <p className="text-xs text-slate-300 max-w-3xl">
+                    Türkçe çeviri hatalarından etkilenmemek için doğrudan faturadaki <strong>orijinal Rusça malzeme tanımı</strong> üzerinden markası, modeli, kalınlığı, ölçüleri, yoğunluğu ve standardı <strong>%100 birebir aynı</strong> olup sistemde en az %1 daha düşük birim fiyata alınmış kalemleri içeren faturalar (Şef İndirim Merkezi ve AI Otomatik Fatura Okuma) listelenir.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 shrink-0">
+                  <div className="p-3 rounded-xl bg-white/5 border border-white/10 text-center">
+                    <div className="text-[10px] font-bold text-slate-400 uppercase">Tespit Edilen Fatura</div>
+                    <div className="text-lg font-mono font-black text-white">{filteredAnomalies.length} Adet</div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-white/5 border border-white/10 text-center">
+                    <div className="text-[10px] font-bold text-slate-400 uppercase">Etkilenen Malzeme</div>
+                    <div className="text-lg font-mono font-black text-amber-300">{totalAffectedLinesCount} Kalem</div>
+                  </div>
+                  <div className="col-span-2 sm:col-span-1 p-3 rounded-xl bg-rose-500/20 border border-rose-400/40 text-center">
+                    <div className="text-[10px] font-bold text-rose-200 uppercase">Geçmiş En İyi Fiyata Göre Fark</div>
+                    <div className="text-lg font-mono font-black text-rose-300">+{formatRuble(totalOverpaymentSum)}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 3-Way Source Filter Selector & Report Export Action Bar */}
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setAnomalySourceFilter('ALL')}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      anomalySourceFilter === 'ALL'
+                        ? 'bg-slate-900 text-white shadow-sm'
+                        : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-300'
+                    }`}
+                  >
+                    <span>Tümü</span>
+                    <span className={`px-1.5 py-0.5 rounded-md font-mono text-[10px] ${
+                      anomalySourceFilter === 'ALL' ? 'bg-rose-500 text-white' : 'bg-slate-100 text-slate-700'
+                    }`}>
+                      {allHistoricalAnomalies.length}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAnomalySourceFilter('DISCOUNT_CENTER')}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      anomalySourceFilter === 'DISCOUNT_CENTER'
+                        ? 'bg-indigo-700 text-white shadow-sm'
+                        : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-300'
+                    }`}
+                  >
+                    <span>Şef İndirim & Teklif Merkezi</span>
+                    <span className={`px-1.5 py-0.5 rounded-md font-mono text-[10px] ${
+                      anomalySourceFilter === 'DISCOUNT_CENTER' ? 'bg-white/20 text-white' : 'bg-indigo-50 text-indigo-800'
+                    }`}>
+                      {discountCenterAnomalies.length}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAnomalySourceFilter('DIRECT_INVOICE')}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      anomalySourceFilter === 'DIRECT_INVOICE'
+                        ? 'bg-amber-600 text-white shadow-sm'
+                        : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-300'
+                    }`}
+                  >
+                    <span>AI Otomatik Fatura Okuma (Doğrudan Yüklenenler)</span>
+                    <span className={`px-1.5 py-0.5 rounded-md font-mono text-[10px] ${
+                      anomalySourceFilter === 'DIRECT_INVOICE' ? 'bg-white/20 text-white' : 'bg-amber-50 text-amber-900'
+                    }`}>
+                      {directInvoiceAnomalies.length}
+                    </span>
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAnomalyReportModal(true)}
+                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-700 to-slate-900 hover:from-indigo-600 hover:to-slate-800 text-white font-black text-xs shadow-sm transition-all cursor-pointer flex items-center gap-2"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-300" />
+                    <span>📊 Raporla & İndir (TDF Stilinde Excel / PDF / HTML)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Search Bar */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="relative max-w-md w-full">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={historicalAnomalySearch}
+                    onChange={(e) => setHistoricalAnomalySearch(e.target.value)}
+                    placeholder="Fatura no, tedarikçi, şef, şantiye veya Rusça/Türkçe malzeme ara..."
+                    className="w-full pl-10 pr-8 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 focus:bg-white focus:ring-2 focus:ring-rose-500 focus:outline-none"
+                  />
+                  {historicalAnomalySearch && (
+                    <button
+                      onClick={() => setHistoricalAnomalySearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+                <div className="text-xs font-semibold text-slate-500">
+                  Detaylı karşılaştırma ve referans fatura belgesi için listedeki herhangi bir faturaya tıklayın.
+                </div>
+              </div>
+
+              {/* Invoice-Level Anomaly Table */}
+              <div className="overflow-x-auto rounded-2xl border border-slate-200 shadow-xs">
+                <table className="w-full text-left border-collapse text-xs sm:text-sm">
+                  <thead>
+                    <tr className="bg-slate-900 text-white font-bold border-b border-slate-800">
+                      <th className="py-3 px-3">Fatura & Tarih</th>
+                      <th className="py-3 px-3">Kaynak Modül</th>
+                      <th className="py-3 px-3">Satınalma Şefi / Şantiye</th>
+                      <th className="py-3 px-3">Alınan Tedarikçi</th>
+                      <th className="py-3 px-3 text-right">Fatura Tutarı</th>
+                      <th className="py-3 px-3 text-right text-emerald-400">Beyan Edilen İndirim</th>
+                      <th className="py-3 px-3 text-center text-amber-300">Pahalı Kalem</th>
+                      <th className="py-3 px-3 text-right text-rose-300">Geçmiş En Uygun Fiyata Göre Fark</th>
+                      <th className="py-3 px-3 text-center">İncele</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 text-slate-800 bg-white">
+                    {filteredAnomalies.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="py-10 text-center text-slate-500 font-medium">
+                          Seçili kriterlerde geçmiş alımlardan daha yüksek birim fiyatlı kalem içeren fatura bulunmadı.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredAnomalies.map((anom) => {
+                        const isDirect = anom.recordSource === 'DIRECT_INVOICE';
+                        return (
+                          <tr
+                            key={anom.discountId}
+                            onClick={() => setSelectedHistoricalAnomaly(anom)}
+                            className="hover:bg-rose-50/60 transition-colors cursor-pointer group"
+                          >
+                            <td className="py-3 px-3 whitespace-nowrap">
+                              <div className="font-mono font-black text-slate-900 group-hover:text-rose-700">
+                                #{anom.invoiceNo}
+                              </div>
+                              <div className="text-[11px] text-slate-500">{anom.orderDate}</div>
+                            </td>
+                            <td className="py-3 px-3">
+                              {isDirect ? (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-black">
+                                  AI Otomatik Fatura Okuma
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-900 border border-indigo-300 text-[10px] font-black">
+                                  Şef İndirim Merkezi
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-3">
+                              <div className="font-bold text-slate-900">{anom.supervisorName}</div>
+                              <div className="text-[11px] font-semibold text-indigo-700">{anom.jobsiteName}</div>
+                            </td>
+                            <td className="py-3 px-3 font-bold text-slate-900">
+                              {anom.vendorName}
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono">
+                              {!isDirect && anom.offerPrice > anom.agreedPrice && (
+                                <div className="text-[11px] text-slate-400 line-through">{formatRuble(anom.offerPrice)}</div>
+                              )}
+                              <div className="font-bold text-slate-900">{formatRuble(anom.agreedPrice)}</div>
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono font-bold text-emerald-700">
+                              {isDirect ? (
+                                <span className="text-slate-400 text-xs font-normal">Doğrudan Fatura</span>
+                              ) : (
+                                `+${formatRuble(anom.claimedDiscountAmount)}`
+                              )}
+                            </td>
+                            <td className="py-3 px-3 text-center">
+                              <span className="inline-flex items-center px-2.5 py-1 rounded-lg bg-amber-100 text-amber-950 font-black text-xs border border-amber-300">
+                                {anom.affectedLines.length} Kalem
+                              </span>
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono font-black text-rose-700 bg-rose-50/40">
+                              +{formatRuble(anom.totalPotentialExtraSavings)}
+                            </td>
+                            <td className="py-3 px-3 text-center">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedHistoricalAnomaly(anom);
+                                }}
+                                className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-rose-700 text-white font-bold text-xs transition-colors cursor-pointer"
+                              >
+                                Detay Aç
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Invoice Anomaly Drilldown Modal */}
+              {selectedHistoricalAnomaly && (
+                <div
+                  className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4"
+                  onClick={() => setSelectedHistoricalAnomaly(null)}
+                >
+                  <div
+                    className="bg-white border border-slate-200 rounded-3xl max-w-5xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {/* Modal Header */}
+                    <div className="px-6 py-4 bg-gradient-to-r from-slate-950 via-rose-950 to-slate-900 text-white flex items-center justify-between">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded bg-rose-500/30 border border-rose-400/40 text-rose-200 text-[10px] font-black uppercase">
+                            ADMİN FİYAT ANOMALİ DENETİMİ
+                          </span>
+                          <span className="text-xs font-mono text-slate-300">
+                            Fatura No: #{selectedHistoricalAnomaly.invoiceNo} • Tarih: {selectedHistoricalAnomaly.orderDate}
+                          </span>
+                        </div>
+                        <h3 className="text-base sm:text-lg font-black text-white">
+                          {selectedHistoricalAnomaly.vendorName} — {selectedHistoricalAnomaly.jobsiteName} ({selectedHistoricalAnomaly.supervisorName})
+                        </h3>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedHistoricalAnomaly(null)}
+                        className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    {/* Modal Body */}
+                    <div className="p-6 overflow-y-auto space-y-5">
+                      {/* Buyer Notification Status Banner */}
+                      <div className="p-4 rounded-2xl bg-indigo-50 border-2 border-indigo-300 text-indigo-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="flex items-start gap-3">
+                          <ShieldAlert className="w-6 h-6 text-indigo-700 shrink-0 mt-0.5" />
+                          <div>
+                            <h4 className="text-xs sm:text-sm font-black uppercase text-indigo-950">
+                              📌 Satınalmacı Ön İzleme & Bildirim Durumu: KAYDETMEDEN ÖNCE SATINALMACIYA BİLDİRİLDİ
+                            </h4>
+                            <p className="text-xs text-indigo-800 mt-0.5">
+                              Bu fatura kaydedilirken sistem aşağıdaki malzemelerin daha önce daha uygun fiyata alındığını satınalmacıya ön izleme ekranında açıkça göstermiştir. Buna rağmen fatura bu rakamlarla kaydedilmiştir.
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {selectedHistoricalAnomaly.firstOfferFileUrl && (
+                            <button
+                              type="button"
+                              onClick={() => openOriginalFileViewer(selectedHistoricalAnomaly.firstOfferFileUrl!, `Ilk_Teklif_${selectedHistoricalAnomaly.invoiceNo}.pdf`)}
+                              className="px-3 py-1.5 rounded-xl bg-white hover:bg-indigo-100 text-indigo-900 border border-indigo-300 text-xs font-bold cursor-pointer"
+                            >
+                              📄 İlk Teklifi Gör
+                            </button>
+                          )}
+                          {selectedHistoricalAnomaly.finalOfferFileUrl && (
+                            <button
+                              type="button"
+                              onClick={() => openOriginalFileViewer(selectedHistoricalAnomaly.finalOfferFileUrl!, `Nihai_Fatura_${selectedHistoricalAnomaly.invoiceNo}.pdf`)}
+                              className="px-3 py-1.5 rounded-xl bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-bold cursor-pointer"
+                            >
+                              📄 Nihai Faturayı Gör
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Financial Summary Cards */}
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                        <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                          <div className="text-[10px] font-bold text-slate-500 uppercase">İlk Teklif Tutarı</div>
+                          <div className="text-base font-mono font-bold text-slate-800 mt-0.5">
+                            {formatRuble(selectedHistoricalAnomaly.offerPrice)}
+                          </div>
+                        </div>
+                        <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                          <div className="text-[10px] font-bold text-slate-500 uppercase">Anlaşılan Nihai Tutar</div>
+                          <div className="text-base font-mono font-black text-slate-900 mt-0.5">
+                            {formatRuble(selectedHistoricalAnomaly.agreedPrice)}
+                          </div>
+                        </div>
+                        <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200">
+                          <div className="text-[10px] font-bold text-emerald-700 uppercase">Kaydedilen İndirim</div>
+                          <div className="text-base font-mono font-black text-emerald-700 mt-0.5">
+                            +{formatRuble(selectedHistoricalAnomaly.claimedDiscountAmount)}
+                          </div>
+                        </div>
+                        <div className="p-3.5 rounded-xl bg-rose-50 border-2 border-rose-300">
+                          <div className="text-[10px] font-bold text-rose-800 uppercase">Geçmiş En Uygun Fiyata Göre Fark</div>
+                          <div className="text-base font-mono font-black text-rose-700 mt-0.5">
+                            +{formatRuble(selectedHistoricalAnomaly.totalPotentialExtraSavings)}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Line Items Comparison Table */}
+                      <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                        <table className="w-full text-left text-xs border-collapse">
+                          <thead>
+                            <tr className="bg-slate-100 text-slate-800 font-bold border-b border-slate-200">
+                              <th className="py-2.5 px-3">Malzeme & Marka (Aynı Ürün)</th>
+                              <th className="py-2.5 px-3 text-right">Miktar</th>
+                              <th className="py-2.5 px-3 text-right">Bu Faturada Alınan Birim</th>
+                              <th className="py-2.5 px-3 text-right text-emerald-800">Daha Önce Alınan En Uygun Birim</th>
+                              <th className="py-2.5 px-3">Daha Önce Alınan Firma, Şantiye & Tarih</th>
+                              <th className="py-2.5 px-3 text-right text-rose-700">Birim / Toplam Fazla Ödeme</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200">
+                            {selectedHistoricalAnomaly.affectedLines.map((line, idx) => (
+                              <tr key={idx} className="hover:bg-rose-50/30">
+                                <td className="py-2.5 px-3 font-bold text-slate-900">
+                                  <div className="font-mono text-xs text-slate-950 font-black">
+                                    🇷🇺 {line.originalName || line.materialName}
+                                  </div>
+                                  {line.historicalOriginalName && line.historicalOriginalName !== (line.originalName || line.materialName) && (
+                                    <div className="text-[10px] font-mono text-emerald-800 mt-0.5">
+                                      ↳ Eşleşen Kayıt: {line.historicalOriginalName}
+                                    </div>
+                                  )}
+                                  {line.materialName && line.materialName !== line.originalName && (
+                                    <div className="text-[11px] text-slate-500 font-medium mt-0.5">
+                                      TR: {line.materialName}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-2.5 px-3 text-right font-mono text-slate-700">
+                                  {line.quantity} {line.unit}
+                                </td>
+                                <td className="py-2.5 px-3 text-right font-mono font-black text-slate-900">
+                                  {formatRuble(line.currentUnitPrice)}
+                                </td>
+                                <td className="py-2.5 px-3 text-right font-mono font-black text-emerald-700 bg-emerald-50/50">
+                                  {formatRuble(line.historicalBestUnitPrice)}
+                                </td>
+                                <td className="py-2.5 px-3">
+                                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                                    <span>{line.historicalSupplier}</span>
+                                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-700 border border-slate-300">
+                                      {line.historicalSource === 'PRIZMA_ERP' ? 'Prizma ERP' : 'GES Arşivi'}
+                                    </span>
+                                  </div>
+                                  <div className="text-[11px] text-indigo-700 font-medium mt-0.5 flex flex-wrap items-center gap-1">
+                                    <span>📍 {line.historicalJobsiteName} • 📅 {line.historicalDate} •</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => openHistoricalReferenceInvoice(line)}
+                                      className="font-mono font-black text-indigo-700 hover:text-rose-700 underline underline-offset-2 cursor-pointer"
+                                      title="Tıklayarak bu geçmiş faturanın kalemlerini ve detaylarını açın"
+                                    >
+                                      Fatura: #{line.historicalInvoiceNo}
+                                    </button>
+                                  </div>
+                                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => openHistoricalReferenceInvoice(line)}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[10px] shadow-2xs transition-colors cursor-pointer"
+                                      title="Geçmiş faturanın tüm kalemlerini ve detaylarını incele"
+                                    >
+                                      <FileText className="w-3 h-3" />
+                                      <span>Fatura Detayı & Kalemler</span>
+                                    </button>
+                                    {line.historicalFileUrl && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          openOriginalFileViewer(
+                                            line.historicalFileUrl!,
+                                            `Gecmis_Fatura_${line.historicalInvoiceNo}.pdf`,
+                                            {
+                                              supplier: line.historicalSupplier,
+                                              date: line.historicalDate,
+                                              jobsiteName: line.historicalJobsiteName,
+                                              invoiceNumber: line.historicalInvoiceNo,
+                                              invoiceNo: line.historicalInvoiceNo
+                                            }
+                                          )
+                                        }
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 font-bold text-[10px] transition-colors cursor-pointer"
+                                        title="Geçmiş faturanın orijinal PDF belgesini doğrudan aç"
+                                      >
+                                        <ExternalLink className="w-3 h-3 text-emerald-700" />
+                                        <span>Orijinal PDF Aç</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="py-2.5 px-3 text-right font-mono font-black text-rose-700">
+                                  <div>+{formatRuble(line.unitOverpayment)} / {line.unit} (+%{line.overpaymentPercentage})</div>
+                                  <div className="text-[11px] text-rose-600">Toplam Fark: +{formatRuble(line.totalLineOverpayment)}</div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Historical Reference Invoice Detail Modal (renders above the anomaly modal) */}
+              {viewingHistoricalInvoice && (
+                <InvoiceDetailModal
+                  invoice={viewingHistoricalInvoice}
+                  jobsites={jobsites}
+                  supervisors={supervisors}
+                  onClose={() => setViewingHistoricalInvoice(null)}
+                />
+              )}
+
+              {/* Full-Screen Line-by-Line Anomaly Report Preview & Export Modal (TDF Style) */}
+              {showAnomalyReportModal && (
+                <div
+                  className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4"
+                  onClick={() => setShowAnomalyReportModal(false)}
+                >
+                  <div
+                    className="bg-slate-900 border border-slate-700 rounded-3xl max-w-[1600px] w-full h-[92vh] flex flex-col shadow-2xl overflow-hidden"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {/* Header & Export Buttons */}
+                    <div className="px-5 py-3.5 bg-slate-950 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 text-white">
+                      <div>
+                        <h3 className="text-sm sm:text-base font-black text-white flex items-center gap-2">
+                          <FileSpreadsheet className="w-5 h-5 text-emerald-400" />
+                          <span>Kalem Bazlı Fiyat Anomali ve Orijinal Rusça Malzeme Doğrulama Raporu</span>
+                        </h3>
+                        <p className="text-[11px] text-slate-400">
+                          Kapsam: {activeFilterLabel} ({filteredAnomalies.length} Fatura / {totalAffectedLinesCount} Malzeme Kalemi)
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={isExportingAnomalyReport}
+                          onClick={async () => {
+                            setIsExportingAnomalyReport(true);
+                            try {
+                              await downloadAnomalyReportExcel(filteredAnomalies, {
+                                filterLabel: activeFilterLabel,
+                                generatedBy: user?.displayName || 'Admin'
+                              });
+                            } finally {
+                              setIsExportingAnomalyReport(false);
+                            }
+                          }}
+                          className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-black text-xs flex items-center gap-1.5 shadow-sm cursor-pointer transition-colors"
+                        >
+                          <FileSpreadsheet className="w-4 h-4" />
+                          <span>Excel İndir (.xlsx - TDF Formatı)</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isExportingAnomalyReport}
+                          onClick={async () => {
+                            setIsExportingAnomalyReport(true);
+                            try {
+                              await downloadAnomalyReportPdf(filteredAnomalies, {
+                                filterLabel: activeFilterLabel,
+                                generatedBy: user?.displayName || 'Admin'
+                              });
+                            } finally {
+                              setIsExportingAnomalyReport(false);
+                            }
+                          }}
+                          className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-black text-xs flex items-center gap-1.5 shadow-sm cursor-pointer transition-colors"
+                        >
+                          <Download className="w-4 h-4" />
+                          <span>PDF İndir (.pdf)</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            downloadAnomalyReportHtml(filteredAnomalies, {
+                              filterLabel: activeFilterLabel,
+                              generatedBy: user?.displayName || 'Admin'
+                            })
+                          }
+                          className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-xs flex items-center gap-1.5 shadow-sm cursor-pointer transition-colors"
+                        >
+                          <FileCode className="w-4 h-4" />
+                          <span>HTML İndir (.html)</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setShowAnomalyReportModal(false)}
+                          className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"
+                        >
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Embedded HTML Report Preview */}
+                    <div className="flex-1 bg-slate-200 p-2 sm:p-4 overflow-hidden">
+                      <iframe
+                        title="Admin Fiyat Anomali Denetim Raporu Önizleme"
+                        srcDoc={renderAnomalyReportHtml(filteredAnomalies, {
+                          filterLabel: activeFilterLabel,
+                          generatedBy: user?.displayName || 'Admin'
+                        })}
+                        className="w-full h-full bg-white rounded-2xl border border-slate-300 shadow-inner"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Edit Discount Modal */}

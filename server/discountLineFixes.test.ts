@@ -55,26 +55,28 @@ const initialDoc: VerifiedDocument = {
   total: 261683.94
 };
 
-test('eski eşleştirici tüm "Genel Malzeme" kalemlerini tek satıra bağlıyordu (hatanın kanıtı)', () => {
-  const picks = finalDoc!.lines.map(f => {
-    let best = -1;
-    let bi = -1;
-    initialDoc.lines.forEach((c, j) => {
-      const sc = calculateMatchScore({ description: f.name }, { description: c.name }).score;
-      if (sc > best) { best = sc; bi = j; }
-    });
-    return bi;
-  });
-  assert.ok(new Set(picks).size < 4, `eski yöntem çoğu kalemi aynı satıra bağlar: ${picks}`);
+test('calculateMatchScore farklı sayısal/ölçü değerlerine sahip kalemleri birbirine bağlamaz', () => {
+  const sDiff = calculateMatchScore(
+    { description: 'D-HS-BIM- CO-38-092 Биметаллическая коронка COBALT (M42), 92 мм (арт. HS-BIM-CO-38-092) "D.BOR"' },
+    { description: '210 Бур SDS-plus 4C PLUS 10*150/210, 4-cutting (арт. 4PD10L0210) "D.BOR"' }
+  );
+  assert.strictEqual(sDiff.score, 0);
 });
 
-test('yeni eşleştirici her kalemi ilk teklifteki kendi satırına bire bir bağlar', () => {
+test('yeni eşleştirici her kalemi ilk teklifteki kendi satırına bire bir bağlar (Fatura 25400 & 3262)', () => {
   const map = matchLines(finalLines, initialDoc.lines.map(l => ({ originalName: l.name, article: l.article })));
   map.forEach((m, i) => assert.strictEqual(initialOrder[m], i, `kalem ${i + 1}`));
   // Farklı ürünler asla eşleşmez
   assert.strictEqual(lineSimilarity({ originalName: finalDoc!.lines[2].name }, { originalName: finalDoc!.lines[3].name }), 0);
-  // Ölçü farkı (70 mm ↔ 100 mm) eşleşmeyi engeller
+  // Ölçü farkı (70 mm ↔ 100 mm ve 92 mm ↔ 54 mm ↔ 10*150/210) eşleşmeyi engeller
   assert.strictEqual(lineSimilarity({ originalName: 'Маяки реперные Rocks 70 мм 50 шт.' }, { originalName: 'Маяки реперные Rocks 100 мм 50 шт.' }), 0);
+  assert.strictEqual(
+    lineSimilarity(
+      { originalName: 'D-HS-BIM- CO-38-092 Биметаллическая коронка COBALT (M42), 92 мм (арт. HS-BIM-CO-38-092) "D.BOR"' },
+      { originalName: '210 Бур SDS-plus 4C PLUS 10*150/210, 4-cutting (арт. 4PD10L0210) "D.BOR"' }
+    ),
+    0
+  );
 });
 
 // Ekran görüntüsündeki kayıt: eski kanonik referanslar (1. satır 140,40; diğerleri yanlışlıkla 673,40)
@@ -97,22 +99,24 @@ const screenshotDiscount = {
   }))
 };
 
-test('detay ekranı eski kayıttaki yanlış referansları göstermez (673,40 artık her satırda görünmez)', () => {
+test('detay ekranı eski kayıttaki yanlış referansları göstermez (673,40 artık her satırda görünmez, kalan fark oransal dağıtılır)', () => {
   const rows = buildDiscountLineComparisons(screenshotDiscount as any);
   assert.strictEqual(rows[0].hasReference, true);
   assert.strictEqual(rows[0].refPrice, 140.4);
   for (const r of rows.slice(1)) {
-    assert.strictEqual(r.hasReference, false);
-    assert.strictEqual(r.totalSavings, 0);
+    // 673,40 yapay kopyası reddedilir; kalan indirim tutarından oransal İlk Teklif Birim hesaplanır
+    assert.strictEqual(r.hasReference, true);
+    assert.notStrictEqual(r.refPrice, 673.4);
+    assert.ok(r.refPrice >= r.finalPrice);
   }
   // Anlaşılan birim her zaman faturadaki gerçek fiyattır
   assert.deepStrictEqual(rows.map(r => r.finalPrice), [137.16, 663.04, 967.2, 3057.76, 1117.5, 1040]);
 });
 
-test('detay ekranı başka bir analizin kalemlerini bu kayda bağlamaz', () => {
+test('detay ekranı başka bir analizin kalemlerini bu kayda bağlamaz (50000 yabancı referans reddedilir, oransal hesap çalışır)', () => {
   const foreign = { id: 'cmp_other', canonicalMaterials: [{ commonName: 'Арматура А500С 12мм', marketReferenceUnitPrice: 50000, lineMatchVersion: 2 }] };
   const rows = buildDiscountLineComparisons({ ...screenshotDiscount, canonicalMaterials: [] } as any, foreign as any);
-  assert.ok(rows.every(r => !r.hasReference));
+  assert.ok(rows.every(r => r.hasReference && r.refPrice !== 50000 && r.refPrice >= r.finalPrice));
 });
 
 const plan = planDiscountRepair(screenshotDiscount, finalDoc, [{ doc: initialDoc, supplier: 'ООО "САМ"' }]);

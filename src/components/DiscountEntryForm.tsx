@@ -18,6 +18,7 @@ import {
 } from '../utils/comparativeCalculation';
 
 import { matchLines } from '../utils/invoiceLineMatcher';
+import { findCheaperHistoricalBenchmarksForItems } from '../utils/preApprovalAuditEngine';
 import { GesLogo } from './GesLogo';
 import {
   Coins,
@@ -78,6 +79,7 @@ interface Props {
   personnel?: Personnel[];
   discounts?: DiscountRecord[];
   invoices?: InvoiceRecord[];
+  prizmaInvoices?: InvoiceRecord[];
   onSaveDiscount: (record: Omit<DiscountRecord, 'id' | 'supervisorName' | 'jobsiteName' | 'discountAmount' | 'discountPercentage' | 'status'> & { forceSave?: boolean; forceSaveDuplicate?: boolean; firstOfferFileData?: string; finalOfferFileData?: string }) => void | Promise<void>;
   onUpdateDiscount?: (id: string, record: Partial<DiscountRecord>) => Promise<void> | void;
   onDeleteDiscount?: (id: string) => Promise<void> | void;
@@ -92,6 +94,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
   personnel = [],
   discounts = [],
   invoices = [],
+  prizmaInvoices = [],
   onSaveDiscount,
   onUpdateDiscount,
   onDeleteDiscount,
@@ -2223,7 +2226,8 @@ export const DiscountEntryForm: React.FC<Props> = ({
     // TDF Canonical Item Matching + VAT Normalization + Unit Conversion (Ton ↔ Metre ↔ Adet)
     const baseItems = baselineDoc?.items || [];
     const finalItems = finalDoc?.items || [];
-    const maxItemsLen = Math.max(baseItems.length, finalItems.length);
+    const purchasedItems = finalItems.length > 0 ? finalItems : baseItems;
+    const maxItemsLen = purchasedItems.length;
     const activeRounds = roundDocs.filter(rd => rd.id !== baselineDoc?.id && rd.id !== finalDoc?.id);
 
     let isAboveBestOfferCount = 0;
@@ -2249,31 +2253,31 @@ export const DiscountEntryForm: React.FC<Props> = ({
 
     const canonicalMaterials: CanonicalMaterial[] = [];
 
-    // Kalemler belgeler arasında ad/artikel ile BİRE BİR eşleştirilir (bkz. invoiceLineMatcher). Eşleşmeyen satıra
-    // başka bir malzemenin ilk teklif fiyatı yazılmaz; satır sırasına körü körüne düşülmez.
-    const linesForMatch = Array.from({ length: maxItemsLen }, (_, i) => finalItems[i] || baseItems[i]).filter(Boolean);
+    // Kalemler belgeler arasında ad/artikel/orijinal Rusça imza ile BİRE BİR eşleştirilir (bkz. invoiceLineMatcher).
+    // Eşleşmeyen satıra başka bir malzemenin ilk teklif fiyatı yazılmaz; satır sırasına körü körüne düşülmez.
+    const linesForMatch = purchasedItems.filter(Boolean);
     const candidateInitialDocs = initialDocs.length > 0 ? initialDocs : (baselineDoc ? [baselineDoc] : []);
     const initialMatchMaps = new Map<string, number[]>();
     candidateInitialDocs.forEach(d => initialMatchMaps.set(d.id, matchLines(linesForMatch, d.items || [])));
     const roundMatchMaps = new Map<string, number[]>();
     activeRounds.forEach(rd => roundMatchMaps.set(rd.id, matchLines(linesForMatch, rd.items || [])));
 
-    for (let i = 0; i < maxItemsLen; i++) {
-      const bIt = baseItems[i];
-      const fIt = finalItems[i] || bIt;
-      if (!bIt && !fIt) continue;
+    for (let i = 0; i < linesForMatch.length; i++) {
+      const fIt = linesForMatch[i];
+      if (!fIt) continue;
 
-      const rawMatName = (fIt || bIt).materialName || `Kalem #${i + 1}`;
-      const specs = extractTechnicalSpecs(rawMatName);
-      const matType = detectMaterialType(rawMatName);
+      const rawMatName = fIt.materialName || fIt.originalName || `Kalem #${i + 1}`;
+      const combinedSpecText = `${fIt.originalName || ''} ${rawMatName}`.trim();
+      const specs = extractTechnicalSpecs(combinedSpecText);
+      const matType = detectMaterialType(combinedSpecText);
       const specBadges = [specs.grade, specs.diameter, specs.dimensions, specs.standard].filter(Boolean);
       const specsSummary = specBadges.length > 0 ? specBadges.join(' • ') : undefined;
 
-      const targetUnit = (fIt || bIt).unit || 'Adet';
-      const qty = Number((fIt || bIt).quantity) || 1;
+      const targetUnit = fIt.unit || 'Adet';
+      const qty = Number(fIt.quantity) || 1;
 
       // Final item VAT normalization
-      const rawFinalUp = Number(fIt?.unitPrice) || Number(bIt?.unitPrice) || 0;
+      const rawFinalUp = Number(fIt.unitPrice) || 0;
       const finalVatRes = normalizeVatPrice(rawFinalUp, finalDoc?.isVatIncluded !== false, true, 0.20);
       const finUp = finalVatRes.normalizedPrice;
 
@@ -2392,7 +2396,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
       canonicalMaterials.push({
         id: `can_mat_${i + 1}_${Date.now()}`,
         commonName: rawMatName,
-        originalName: (fIt || bIt).originalName || rawMatName,
+        originalName: fIt.originalName || rawMatName,
         sourceLineIndex: i,
         referenceFound,
         lineMatchVersion: 2,
@@ -2548,6 +2552,23 @@ export const DiscountEntryForm: React.FC<Props> = ({
       setNotification({ type: 'error', message: 'Lütfen geçerli İlk Teklif Fiyatı ve Son İndirimli Fiyatı yükleyin veya girin.' });
       return;
     }
+
+    const activeHistoricalPool = [
+      ...(invoices || []),
+      ...(prizmaInvoices || []).map(p => ({ ...p, sourceCollection: 'prizma_invoices' }))
+    ];
+    const cheaperPreviewMatches = extractedItems.length > 0
+      ? findCheaperHistoricalBenchmarksForItems(
+          extractedItems,
+          {
+            supplier: vendorName,
+            jobsiteId,
+            invoiceNo,
+            orderDate
+          },
+          activeHistoricalPool
+        )
+      : [];
 
     // Smart Auto-Correction if Offer and Agreed prices or Rounds are inverted
     let calcOffer = numOffer;
@@ -2714,6 +2735,16 @@ export const DiscountEntryForm: React.FC<Props> = ({
           isAboveBestOffer: schematicAnalysis.isAboveBestOfferCount > 0,
           competitorCount: Math.max(0, schematicAnalysis.uniqueVendorsCount - 1),
           canonicalMaterials: schematicAnalysis.canonicalMaterials
+        } : {}),
+        ...(cheaperPreviewMatches.length > 0 ? {
+          historicalBenchmarkAlert: {
+            buyerNotifiedBeforeSave: true,
+            notifiedAt: new Date().toISOString(),
+            totalPotentialExtraSavings: Number(
+              cheaperPreviewMatches.reduce((s, m) => s + (Number(m.totalLineOverpayment) || 0), 0).toFixed(2)
+            ),
+            affectedLines: cheaperPreviewMatches
+          }
         } : {})
       } as any);
 
@@ -4507,6 +4538,101 @@ export const DiscountEntryForm: React.FC<Props> = ({
             </div>
           </div>
         )}
+
+        {/* Pre-Save Historical Cheaper Purchase Preview Banner (Preview Only - Not Saved Inside Buyer's Visible Invoice Text) */}
+        {(() => {
+          if (extractedItems.length === 0) return null;
+          const combinedPool = [
+            ...(invoices || []),
+            ...(prizmaInvoices || []).map(p => ({ ...p, sourceCollection: 'prizma_invoices' }))
+          ];
+          const previewBenchmarks = findCheaperHistoricalBenchmarksForItems(
+            extractedItems,
+            {
+              supplier: vendorName,
+              jobsiteId,
+              invoiceNo,
+              orderDate
+            },
+            combinedPool
+          );
+          if (previewBenchmarks.length === 0) return null;
+          const totalExtraDiff = previewBenchmarks.reduce((s, b) => s + (b.totalLineOverpayment || 0), 0);
+
+          return (
+            <div className="p-4 rounded-2xl bg-amber-50/90 border-2 border-amber-400 text-amber-950 shadow-sm space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-amber-200 pb-2.5">
+                <div className="flex items-start space-x-2.5">
+                  <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="text-xs sm:text-sm font-black text-amber-950 uppercase">
+                        🔍 GEÇMİŞ ALIM FİYAT ÖN İZLEMESİ ({previewBenchmarks.length} Kalemde Daha Uygun Geçmiş Alım Mevcut)
+                      </h4>
+                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-amber-200/80 text-amber-950 border border-amber-400">
+                        Sadece Ön İzleme • Kayda Eklenmez
+                      </span>
+                    </div>
+                    <p className="text-xs text-amber-800 mt-0.5">
+                      Bu faturadaki aynı malzeme ve markalar daha önce sistemde daha düşük birim fiyata alınmıştır. Kaydetmeden önce tedarikçiyle ek pazarlık için inceleyebilirsiniz:
+                    </p>
+                  </div>
+                </div>
+                <div className="text-right shrink-0 bg-white px-3 py-1.5 rounded-xl border border-amber-300">
+                  <div className="text-[10px] font-bold text-amber-700 uppercase">Geçmiş En İyi Fiyata Göre Fark</div>
+                  <div className="text-sm font-mono font-black text-rose-700">+{formatRuble(totalExtraDiff)}</div>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto rounded-xl border border-amber-300 bg-white">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-amber-100/70 text-amber-950 font-bold border-b border-amber-200">
+                      <th className="py-2 px-3">Malzeme & Marka</th>
+                      <th className="py-2 px-3 text-right">Bu Fatura Birim</th>
+                      <th className="py-2 px-3 text-right text-emerald-800">Geçmiş En Uygun Birim</th>
+                      <th className="py-2 px-3">Daha Önce Alınan Firma & Şantiye</th>
+                      <th className="py-2 px-3 text-right text-rose-700">Birim / Toplam Fark</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-amber-100">
+                    {previewBenchmarks.map((bm, bIdx) => (
+                      <tr key={bIdx} className="hover:bg-amber-50/40">
+                        <td className="py-2 px-3 font-semibold text-slate-900">
+                          <div>{bm.materialName}</div>
+                          {bm.originalName && bm.originalName !== bm.materialName && (
+                            <div className="text-[10px] text-slate-500 font-normal truncate max-w-[240px]">{bm.originalName}</div>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono font-bold text-slate-900">
+                          {formatRuble(bm.currentUnitPrice)} <span className="text-[10px] text-slate-500">/{bm.unit}</span>
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono font-black text-emerald-700 bg-emerald-50/40">
+                          {formatRuble(bm.historicalBestUnitPrice)} <span className="text-[10px] text-emerald-600">/{bm.unit}</span>
+                        </td>
+                        <td className="py-2 px-3">
+                          <div className="font-bold text-slate-800 flex items-center gap-1.5">
+                            <span>{bm.historicalSupplier}</span>
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
+                              {bm.historicalSource === 'PRIZMA_ERP' ? 'Prizma ERP' : 'GES Arşivi'}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-indigo-700 font-medium">
+                            📍 {bm.historicalJobsiteName} • 📅 {bm.historicalDate} • #{bm.historicalInvoiceNo}
+                          </div>
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono font-bold text-rose-700">
+                          <div>+{formatRuble(bm.unitOverpayment)}/br (+%{bm.overpaymentPercentage})</div>
+                          <div className="text-[10px] text-rose-600">Toplam: +{formatRuble(bm.totalLineOverpayment)}</div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Inline Error / Success Notification right above Save Button */}
         {notification && (

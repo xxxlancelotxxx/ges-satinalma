@@ -1,133 +1,207 @@
-/**
- * İki belge (ör. ilk teklif ↔ nihai fatura) arasında kalemleri birebir eşleştirir.
- *
- * Neden ayrı bir modül: eski eşleştirmeler (a) adları /[^a-z0-9]/ ile temizliyordu — Kiril harfleri
- * silinince boş metin her kalemle "eşleşiyordu", (b) "Genel Malzeme" türündeki her aday aynı skoru
- * aldığı için tüm kalemler ilk teklifin ilk satırına bağlanıyordu, (c) eşleşme bulunamayınca satır
- * sırasına (index) körü körüne düşüyordu. Sonuç: başka bir malzemenin fiyatı "Piyasa Baz Birim"
- * olarak gösteriliyordu.
- *
- * Kurallar:
- * - Ad karşılaştırması Unicode'dur (Kiril/Latin/Türkçe harfler ve rakamlar korunur).
- * - Artikel kodu iki tarafta da varsa eşit olmalıdır.
- * - Addaki sayılar (ölçü, hacim, adet/paket) iki tarafta da varsa aynı olmalıdır.
- * - Her kalem en fazla bir kalemle eşleşir (bire bir); emin olunamayan satır eşleşmesiz kalır.
- */
+import { buildStrictOriginalMaterialSignature } from './preApprovalAuditEngine';
 
-export interface MatchableLine {
+export interface MatchableInvoiceLine {
   materialName?: string;
   originalName?: string;
+  unit?: string;
+  quantity?: number;
+  unitPrice?: number;
+  brand?: string;
   article?: string;
   productCode?: string;
-  unit?: string;
 }
 
-const STOP_WORDS = new Set([
-  'для', 'под', 'над', 'при', 'без', 'шт', 'уп', 'упак', 'мм', 'см', 'м', 'кг', 'гр', 'л', 'мл', 'ml', 'mm',
-  'the', 'and', 've', 'ile', 'için', 'adet', 'paket', 'на', 'из', 'по', 'с', 'в', 'и'
+export type MatchableLine = MatchableInvoiceLine;
+export const LINE_MATCH_THRESHOLD = 0.65;
+
+const STOP_TOKENS = new Set([
+  've', 'ile', 'için', 'mm', 'cm', 'm', 'mt', 'kg', 'gr', 'lt', 'adet', 'paket', 'rulo', 'boy', 'set', 'takım', 'çift',
+  'шт', 'мм', 'см', 'м', 'мп', 'м2', 'м3', 'кг', 'г', 'л', 'уп', 'упак', 'рул', 'компл', 'пар', 'для', 'из', 'по', 'в', 'с', 'на',
+  'standart', 'standard', 'eco', 'line', 'plus', 'max', 'pro', 'genel', 'malzeme', 'inşaat', 'malzemesi'
 ]);
 
-/** Kiril/Latin/Türkçe harf ve rakamları koruyan sade biçim. */
-export function normalizeLineText(raw: string | undefined | null): string {
-  return String(raw || '')
+function extractArticleCode(text: string, explicitArt?: string): string | null {
+  if (explicitArt && String(explicitArt).trim().length >= 2) {
+    return String(explicitArt).trim().toLowerCase();
+  }
+  const m = text.match(/(?:арт\.?|артикул|art\.?|код)\s*[:#№]?\s*([a-zа-яё0-9][\w.-]{2,})/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function getPreferredOriginalText(line: MatchableInvoiceLine): string {
+  const orig = String(line.originalName || '').trim();
+  const mat = String(line.materialName || '').trim();
+  const hasCyrOrig = /[а-яА-ЯёЁ]/.test(orig);
+  const hasCyrMat = /[а-яА-ЯёЁ]/.test(mat);
+  return hasCyrOrig ? orig : (hasCyrMat ? mat : (orig || mat));
+}
+
+function extractNumericSignature(text: string): string {
+  const withoutArt = text
+    .toLowerCase()
+    .replace(/\(?\s*(?:арт\.?|артикул|art\.?|код)\s*[:#№]?\s*[a-zа-яё0-9][\w.-]{2,}\s*\)?/gi, ' ')
+    .replace(/^(?:[а-яa-z]{1,3}\d?[-/])?\d{5,12}\s+(?=[а-яa-z])/i, '')
+    .replace(/(\d),(\d)/g, '$1.$2');
+
+  const nums = (withoutArt.match(/\d+(?:\.\d+)?/g) || [])
+    .map(n => String(Number(n)))
+    .filter(n => n !== 'NaN');
+  const uniqueSorted = Array.from(new Set(nums)).sort((a, b) => Number(a) - Number(b));
+  return uniqueSorted.join('|');
+}
+
+function extractDimensions(text: string): string[] {
+  const matches = text.toLowerCase().replace(/,/g, '.').match(/\d+(?:\.\d+)?(?:\s*[xх*×/]\s*\d+(?:\.\d+)?)+/g) || [];
+  return matches.map(s => s.replace(/\s+/g, '').replace(/[х*×]/g, 'x'));
+}
+
+function extractWordTokens(text: string): string[] {
+  return text
     .toLowerCase()
     .replace(/ё/g, 'е')
-    .replace(/(\d)[,](\d)/g, '$1.$2')
-    .replace(/[^\p{L}\p{N}.]+/gu, ' ')
-    .replace(/(?<!\d)\.|\.(?!\d)/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/\(?\s*(?:арт\.?|артикул|art\.?|код)\s*[:#№]?\s*[a-zа-яё0-9][\w.-]{2,}\s*\)?/gi, ' ')
+    .replace(/\d+(?:[.,]\d+)?/g, ' ')
+    .replace(/[^a-zа-яğüşıöç]+/gi, ' ')
+    .split(/\s+/)
+    .map(t => t.trim())
+    .filter(t => t.length >= 2 && !STOP_TOKENS.has(t));
 }
-
-function lineNames(l: MatchableLine): string[] {
-  const out: string[] = [];
-  for (const n of [l.originalName, l.materialName]) {
-    const t = String(n || '').trim();
-    if (t && !out.includes(t)) out.push(t);
-  }
-  return out;
-}
-
-function wordStems(norm: string): string[] {
-  return norm
-    .split(' ')
-    .filter(w => w && !/^\d/.test(w) && w.length >= 3 && !STOP_WORDS.has(w))
-    // Rusça çekim eklerini tolere etmek için kök: ilk 5 harf
-    .map(w => (w.length > 5 ? w.slice(0, 5) : w));
-}
-
-function numberSet(norm: string): Set<string> {
-  const out = new Set<string>();
-  for (const m of norm.match(/\d+(?:\.\d+)?/g) || []) {
-    out.add(String(Number(m)));
-  }
-  return out;
-}
-
-function articleOf(l: MatchableLine): string {
-  return normalizeLineText(l.article || l.productCode || '').replace(/\s+/g, '');
-}
-
-function setsEqual(a: Set<string>, b: Set<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const x of a) if (!b.has(x)) return false;
-  return true;
-}
-
-function nameSimilarity(rawA: string, rawB: string): number {
-  const na = normalizeLineText(rawA);
-  const nb = normalizeLineText(rawB);
-  if (!na || !nb) return 0;
-  if (na === nb) return 1;
-
-  const numsA = numberSet(na);
-  const numsB = numberSet(nb);
-  if (numsA.size > 0 && numsB.size > 0 && !setsEqual(numsA, numsB)) return 0;
-
-  const wa = new Set(wordStems(na));
-  const wb = new Set(wordStems(nb));
-  if (wa.size === 0 || wb.size === 0) return 0;
-  let common = 0;
-  for (const w of wa) if (wb.has(w)) common++;
-  return Number(((2 * common) / (wa.size + wb.size)).toFixed(3));
-}
-
-/** 0..1 benzerlik; 0 = kesinlikle farklı kalem. Belgedeki (Rusça) ad ve sistem adı ayrı ayrı denenir. */
-export function lineSimilarity(a: MatchableLine, b: MatchableLine): number {
-  const artA = articleOf(a);
-  const artB = articleOf(b);
-  if (artA && artB) return artA === artB ? 1 : 0;
-
-  let best = 0;
-  for (const x of lineNames(a)) {
-    for (const y of lineNames(b)) {
-      best = Math.max(best, nameSimilarity(x, y));
-      if (best === 1) return 1;
-    }
-  }
-  return best;
-}
-
-export const LINE_MATCH_THRESHOLD = 0.6;
 
 /**
- * targets[i] için sources içindeki eşini döndürür (yoksa -1). Bire bir, en yüksek benzerlik önce.
+ * İki fatura/teklif satırının aynı malzeme olup olmadığını [0..1] aralığında puanlar.
+ * - Orijinal Rusça imza (`buildStrictOriginalMaterialSignature`) birebir aynıysa -> 1.0
+ * - Artikel / ürün kodu varsa ve farklıysa -> 0 (kesin ret)
+ * - Ölçü/ebat veya sayısal değerler (örn. 10x150/210 vs 20x250 vs 92 mm vs 400 mm) farklıysa -> 0 (kesin ret)
  */
-export function matchLines(targets: MatchableLine[], sources: MatchableLine[], threshold = LINE_MATCH_THRESHOLD): number[] {
-  const pairs: Array<{ t: number; s: number; score: number }> = [];
-  targets.forEach((t, ti) => {
-    sources.forEach((s, si) => {
-      const score = lineSimilarity(t, s);
-      if (score >= threshold) pairs.push({ t: ti, s: si, score: score + (ti === si ? 0.001 : 0) });
-    });
-  });
-  pairs.sort((x, y) => y.score - x.score);
-  const result = new Array<number>(targets.length).fill(-1);
-  const usedSources = new Set<number>();
-  for (const p of pairs) {
-    if (result[p.t] !== -1 || usedSources.has(p.s)) continue;
-    result[p.t] = p.s;
-    usedSources.add(p.s);
+export function lineMatchScore(a: MatchableInvoiceLine, b: MatchableInvoiceLine): number {
+  const rawA = getPreferredOriginalText(a);
+  const rawB = getPreferredOriginalText(b);
+  const fullA = `${a.originalName || ''} ${a.materialName || ''}`.trim();
+  const fullB = `${b.originalName || ''} ${b.materialName || ''}`.trim();
+  if (!rawA || !rawB) return 0;
+
+  // 1. Kesin artikel / ürün kodu kontrolü
+  const artA = extractArticleCode(fullA, a.article || a.productCode);
+  const artB = extractArticleCode(fullB, b.article || b.productCode);
+  if (artA && artB) {
+    return artA === artB ? 1.0 : 0.0;
   }
+
+  // 2. Orijinal dil (Rusça) tam imza kontrolü
+  const strictA = buildStrictOriginalMaterialSignature({
+    originalName: a.originalName,
+    materialName: a.materialName,
+    brand: a.brand
+  });
+  const strictB = buildStrictOriginalMaterialSignature({
+    originalName: b.originalName,
+    materialName: b.materialName,
+    brand: b.brand
+  });
+  if (strictA && strictB) {
+    if (strictA.exactKey === strictB.exactKey) {
+      if (strictA.gostKey && strictB.gostKey && strictA.gostKey !== strictB.gostKey) return 0.0;
+      return 1.0;
+    }
+    if (strictA.brand && strictB.brand && strictA.brand !== strictB.brand) {
+      return 0.0;
+    }
+  }
+
+  // 3. Tüm sayısal değerlerin (çap, ebat, kalınlık, model no: 92 mm, 400 mm, 10x150/210 vb.) birebir uyumu
+  const numSigA = extractNumericSignature(rawA);
+  const numSigB = extractNumericSignature(rawB);
+  if (numSigA || numSigB) {
+    if (numSigA !== numSigB) {
+      return 0.0;
+    }
+  }
+
+  // 4. AxB ölçü / ebat kontrolü
+  const dimsA = extractDimensions(rawA);
+  const dimsB = extractDimensions(rawB);
+  if (dimsA.length > 0 || dimsB.length > 0) {
+    if (dimsA.length === 0 || dimsB.length === 0) return 0.0;
+    const overlap = dimsA.some(d => dimsB.includes(d));
+    if (!overlap) return 0.0;
+  }
+
+  // 5. Kelime kesişimi (tercihen orijinal metin üzerinden)
+  const tokensA = extractWordTokens(rawA);
+  const tokensB = extractWordTokens(rawB);
+  if (tokensA.length === 0 || tokensB.length === 0) return 0;
+
+  const setB = new Set(tokensB);
+  let common = 0;
+  for (const t of tokensA) {
+    if (setB.has(t)) {
+      common++;
+    } else if (t.length >= 4) {
+      const prefix = t.slice(0, 4);
+      if (tokensB.some(tb => tb.length >= 4 && tb.slice(0, 4) === prefix)) {
+        common += 0.8;
+      }
+    }
+  }
+
+  if (common === 0) return 0;
+
+  const denom = Math.max(tokensA.length, tokensB.length);
+  const tokenRatio = common / denom;
+
+  if (artA || artB) {
+    return tokenRatio >= 0.6 ? Math.min(0.95, tokenRatio + 0.15) : 0;
+  }
+
+  if (numSigA && numSigA === numSigB) {
+    return tokenRatio >= 0.5 ? Math.min(0.95, tokenRatio + 0.25) : 0;
+  }
+
+  return tokenRatio >= LINE_MATCH_THRESHOLD ? tokenRatio : 0;
+}
+
+export const lineSimilarity = lineMatchScore;
+
+/**
+ * `finalLines` içindeki her satır için `candidateLines` içinde Birebir (1-e-1) en yüksek puanlı
+ * ve eşik değeri (>= 0.65) geçen satırın indeksini döndürür.
+ * Aynı aday satır birden fazla nihai satıra ASLA atanmaz; eşleşmeyenler için `-1` döner.
+ */
+export function matchLines(
+  finalLines: MatchableInvoiceLine[],
+  candidateLines: MatchableInvoiceLine[]
+): number[] {
+  const result = new Array<number>(finalLines.length).fill(-1);
+  if (!Array.isArray(finalLines) || !Array.isArray(candidateLines) || finalLines.length === 0 || candidateLines.length === 0) {
+    return result;
+  }
+
+  const pairs: Array<{ finalIdx: number; candIdx: number; score: number }> = [];
+  for (let i = 0; i < finalLines.length; i++) {
+    for (let j = 0; j < candidateLines.length; j++) {
+      const s = lineMatchScore(finalLines[i], candidateLines[j]);
+      if (s >= 0.65) {
+        pairs.push({ finalIdx: i, candIdx: j, score: s });
+      }
+    }
+  }
+
+  pairs.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    const aSameRow = a.finalIdx === a.candIdx ? 1 : 0;
+    const bSameRow = b.finalIdx === b.candIdx ? 1 : 0;
+    return bSameRow - aSameRow;
+  });
+
+  const usedFinal = new Set<number>();
+  const usedCand = new Set<number>();
+
+  for (const p of pairs) {
+    if (usedFinal.has(p.finalIdx) || usedCand.has(p.candIdx)) continue;
+    result[p.finalIdx] = p.candIdx;
+    usedFinal.add(p.finalIdx);
+    usedCand.add(p.candIdx);
+  }
+
   return result;
 }

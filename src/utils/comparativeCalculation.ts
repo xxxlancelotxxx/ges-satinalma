@@ -69,9 +69,8 @@ export function extractTechnicalSpecs(text: string): TechnicalSpecs {
                         normalized.match(/(?:^|[^0-9a-zA-Zа-яА-Я])(\d+(?:[.,]\d+)?)\s*(?:мм|mm)(?:$|[^a-zA-Zа-яА-Я0-9])/i);
   if (diameterMatch && diameterMatch[1]) {
     const val = diameterMatch[1].replace(',', '.');
-    // Ensure reasonable construction rebar diameter (e.g. 6 to 40)
     const num = parseFloat(val);
-    if (num >= 4 && num <= 60) {
+    if (num >= 1 && num <= 3000) {
       specs.diameter = `Ø${val} mm`;
     }
   }
@@ -170,14 +169,38 @@ export function calculateMatchScore(
     reasons.push(`Aynı malzeme türü (${typeA})`);
   }
 
+  // Numeric signature check: different numbers (e.g. 92 mm vs 54 mm vs 400 mm vs 10x150/210) must never match
+  const extractNums = (s: string) =>
+    Array.from(
+      new Set(
+        (s.toLowerCase().replace(/(\d),(\d)/g, '$1.$2').match(/\d+(?:\.\d+)?/g) || [])
+          .map(n => String(Number(n)))
+          .filter(n => n !== 'NaN')
+      )
+    )
+      .sort((a, b) => Number(a) - Number(b))
+      .join('|');
+  const numsA = extractNums(lineA.description || '');
+  const numsB = extractNums(lineB.description || '');
+  if ((numsA || numsB) && numsA !== numsB) {
+    return {
+      score: 0.0,
+      reason: `Sayısal/ölçü değerleri farklı: [${numsA}] vs [${numsB}]`,
+      commonName: lineA.description
+    };
+  }
+
   // Diameter check
   if (specsA.diameter && specsB.diameter) {
     if (specsA.diameter === specsB.diameter) {
       score += 0.20;
       reasons.push(`Çap birebir eşleşiyor (${specsA.diameter})`);
     } else {
-      score -= 0.35;
-      reasons.push(`Çap uyumsuzluğu: ${specsA.diameter} vs ${specsB.diameter}`);
+      return {
+        score: 0.0,
+        reason: `Çap uyumsuzluğu: ${specsA.diameter} vs ${specsB.diameter}`,
+        commonName: lineA.description
+      };
     }
   }
 
@@ -187,8 +210,11 @@ export function calculateMatchScore(
       score += 0.15;
       reasons.push(`Kalite sınıfı aynı (${specsA.grade})`);
     } else {
-      score -= 0.20;
-      reasons.push(`Kalite sınıfı farklı: ${specsA.grade} vs ${specsB.grade}`);
+      return {
+        score: 0.0,
+        reason: `Kalite sınıfı farklı: ${specsA.grade} vs ${specsB.grade}`,
+        commonName: lineA.description
+      };
     }
   }
 
@@ -197,6 +223,12 @@ export function calculateMatchScore(
     if (specsA.standard === specsB.standard) {
       score += 0.10;
       reasons.push(`Standart aynı (${specsA.standard})`);
+    } else {
+      return {
+        score: 0.0,
+        reason: `Standart farklı: ${specsA.standard} vs ${specsB.standard}`,
+        commonName: lineA.description
+      };
     }
   }
 
@@ -206,6 +238,12 @@ export function calculateMatchScore(
     if (normDim(specsA.dimensions) === normDim(specsB.dimensions)) {
       score += 0.18;
       reasons.push(`Ebat/Uzunluk eşleşiyor (${specsA.dimensions})`);
+    } else {
+      return {
+        score: 0.0,
+        reason: `Ebat/Uzunluk farklı: ${specsA.dimensions} vs ${specsB.dimensions}`,
+        commonName: lineA.description
+      };
     }
   }
 

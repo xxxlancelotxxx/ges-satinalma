@@ -5,7 +5,7 @@ import { prizmaService } from './prizmaService';
 import { normalizeVendorName } from '../src/utils/vendorNormalizer';
 import { normalizeCategoryName, translateRussianMaterialToTurkish, ensureRussianOriginalName } from '../src/utils/categoryClassifier';
 import { initializeApp, getApps } from 'firebase/app';
-import { getFirestore, collection, getDocs, doc, writeBatch } from 'firebase/firestore';
+import { getFirestore, collection, getDocs, doc, writeBatch, setLogLevel } from 'firebase/firestore';
 import {
   InvoiceLineCheck,
   DocumentLinesResult,
@@ -18,6 +18,10 @@ import {
   repairDocumentItems,
   repairDocumentItemName
 } from './invoiceDocumentLines';
+
+try {
+  setLogLevel('silent');
+} catch (_) {}
 
 let defaultDb: any = null;
 try {

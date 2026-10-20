@@ -79,6 +79,7 @@ function AppContent() {
   const [jobsites, setJobsites] = useState<Jobsite[]>([]);
   const [discounts, setDiscounts] = useState<DiscountRecord[]>([]);
   const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
+  const [prizmaInvoices, setPrizmaInvoices] = useState<InvoiceRecord[]>([]);
   const [trashInvoices, setTrashInvoices] = useState<InvoiceRecord[]>([]);
   const [trashDiscounts, setTrashDiscounts] = useState<DiscountRecord[]>([]);
   const [materialComparisons, setMaterialComparisons] = useState<MaterialComparison[]>([]);
@@ -187,6 +188,7 @@ function AppContent() {
       const matsPromise = safeFetchJson('/api/materials/compare');
       const trashInvsPromise = safeFetchJson('/api/invoices/trash');
       const trashDscsPromise = safeFetchJson('/api/discounts/trash');
+      const prizmaInvsPromise = safeFetchJson('/api/prizma/invoices');
 
       const [sups, pers, jobs, dscs, invs, perfs] = await Promise.all([
         safeFetchJson('/api/supervisors'),
@@ -205,14 +207,17 @@ function AppContent() {
       if (Array.isArray(perfs) && perfs.length > 0) setPerformances(perfs);
       setIsLoading(false);
 
-      const [mats, trashInvs, trashDscs] = await Promise.all([
+      const [mats, trashInvs, trashDscs, prizmaInvs] = await Promise.all([
         matsPromise,
         trashInvsPromise,
-        trashDscsPromise
+        trashDscsPromise,
+        prizmaInvsPromise
       ]);
       if (Array.isArray(mats)) setMaterialComparisons(ensureComparisonGroupIntegrity(mats));
       if (Array.isArray(trashInvs)) setTrashInvoices(trashInvs);
       if (Array.isArray(trashDscs)) setTrashDiscounts(trashDscs);
+      if (Array.isArray(prizmaInvs)) setPrizmaInvoices(prizmaInvs);
+      else if (prizmaInvs && Array.isArray((prizmaInvs as any).invoices)) setPrizmaInvoices((prizmaInvs as any).invoices);
     } catch (err) {
       console.error('Data loading error:', err);
     } finally {
@@ -760,6 +765,7 @@ function AppContent() {
                   jobsites={jobsites}
                   supervisors={supervisors}
                   invoices={invoices}
+                  prizmaInvoices={prizmaInvoices}
                   onInvoiceSaved={handleSaveInvoice}
                 />
               </div>
@@ -774,6 +780,7 @@ function AppContent() {
                 personnel={personnel}
                 comparisons={materialComparisons}
                 invoices={invoices}
+                prizmaInvoices={prizmaInvoices}
                 onOpenNewDiscountModal={() => setShowQuickDiscountModal(true)}
                 onUpdateDiscount={handleUpdateDiscount}
                 onDeleteDiscount={handleDeleteDiscount}
@@ -802,6 +809,7 @@ function AppContent() {
                   jobsites={jobsites}
                   discounts={discounts}
                   invoices={invoices}
+                  prizmaInvoices={prizmaInvoices}
                   personnel={personnel}
                   onSaveDiscount={handleSaveDiscount}
                   onUpdateDiscount={handleUpdateDiscount}
@@ -946,6 +954,7 @@ function AppContent() {
                 jobsites={jobsites}
                 discounts={discounts}
                 invoices={invoices}
+                prizmaInvoices={prizmaInvoices}
                 personnel={personnel}
                 onSaveDiscount={handleSaveDiscount}
                 onUpdateDiscount={handleUpdateDiscount}

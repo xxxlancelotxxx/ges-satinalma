@@ -203,10 +203,10 @@ export function planDiscountRepair(
     }
   }
 
-  // 6) Kalem bazlı ilk teklif referansları (TDF teklif merkezi kayıtları)
+  // 6) Kalem bazlı ilk teklif referansları (tüm kayıtlar için ilk teklif PDF'inden satır eşleştirme)
   const storedCanonicals: any[] = Array.isArray(discount.canonicalMaterials) ? discount.canonicalMaterials : [];
   const hasLegacyCanonicals = storedCanonicals.some(c => (c?.lineMatchVersion || 0) < CURRENT_LINE_MATCH_VERSION);
-  if (finalDoc && initialDocs.length > 0 && (storedCanonicals.length > 0 || discount.calculationMethod === 'MARKET_BASELINE_TO_FINAL')) {
+  if (finalDoc && initialDocs.length > 0) {
     const finalLines = goodsLines(finalDoc);
     const perInitial = initialDocs.map(d => {
       const lines = goodsLines(d.doc);

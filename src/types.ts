@@ -642,3 +642,52 @@ export interface ComparativeAnalysisConfig {
   updatedAt?: string;
 }
 
+export interface CheaperHistoricalBenchmark {
+  lineIndex: number;
+  materialName: string;
+  originalName?: string;
+  historicalOriginalName?: string;
+  brand?: string;
+  unit: string;
+  quantity: number;
+  currentUnitPrice: number;
+  historicalBestUnitPrice: number;
+  historicalAvgUnitPrice: number;
+  historicalSupplier: string;
+  historicalJobsiteName: string;
+  historicalDate: string;
+  historicalInvoiceNo: string;
+  historicalInvoiceId?: string;
+  historicalFileUrl?: string;
+  historicalPrizmaDemandId?: number | string;
+  historicalPrizmaUrl?: string;
+  historicalSource: 'GES_ARCHIVE' | 'PRIZMA_ERP';
+  unitOverpayment: number;
+  totalLineOverpayment: number;
+  overpaymentPercentage: number;
+  matchReason: string;
+}
+
+export interface DiscountHistoricalAnomalyRecord {
+  discountId: string;
+  invoiceId?: string;
+  recordSource?: 'DISCOUNT_CENTER' | 'DIRECT_INVOICE';
+  invoiceNo: string;
+  orderDate: string;
+  vendorName: string;
+  jobsiteName: string;
+  supervisorId: string;
+  supervisorName: string;
+  offerPrice: number;
+  agreedPrice: number;
+  claimedDiscountAmount: number;
+  totalPotentialExtraSavings: number;
+  buyerNotifiedBeforeSave: boolean;
+  notifiedAt?: string;
+  firstOfferFileUrl?: string;
+  finalOfferFileUrl?: string;
+  affectedLines: CheaperHistoricalBenchmark[];
+}
+
+
+

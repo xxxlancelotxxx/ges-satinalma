@@ -1,78 +1,30 @@
-# OCR Fatura Kalem Ayrıştırma Hatası Kalıcı Çözümü ve Mevcut Kayıtların Onarım Planı
+# Hızlı Ön Onay Fiyat Denetimi & Şef İndirim/TDF Teklif Merkezi Doğruluk ve Eşleştirme Planı
 
-Rusça faturalarda (ör. Fatura 3987 ve Fatura 3971) malzeme tablosu yerine firma, vergi numarası (`ИНН`/`КПП`) ve adres satırlarının malzeme kalemi olarak kaydedilmesine yol açan OCR ayrıştırma hatasını kalıcı olarak giderir ve sistemdeki mevcut hatalı faturaları orijinal PDF belgelerinden gerçek tablo satırlarını okuyarak otomatik onarır.
+## 1. Tespit Edilen Kök Nedenler (Canlı Veri Analizi — Fatura No: `3262`)
+Sistemde yaptığımız incelemede, belirttiğiniz **"1.477,38 ₽'lik malzemenin sistemde 296 ₽'ye daha ucuz var gibi gösterilmesi"** hatasının iki noktada tetiklendiği tespit edilmiştir:
 
-## User Review & Critical Decisions
+1. **Hızlı Ön Onay Fiyat Denetimi (`PreApprovalAudit.tsx` & `auditSingleLineItem`):**
+   - **Admin Fiyat Anomali Denetimi** sekmesi birebir orijinal Rusça + tüm sayısal değerler/marka (`buildStrictOriginalMaterialSignature`) motorunu kullanırken, **Hızlı Ön Onay Fiyat Denetimi** sekmesindeki `auditSingleLineItem` fonksiyonu eski bulanık (fuzzy) eşleştirme katmanlarını (`Path 0..F`) kullanmaya devam ediyordu.
+   - Örneğin Fatura `3262` içindeki **`D-HS-BIM- CO-38-092 Биметаллическая коронка COBALT (M42), 92 мм "D.BOR"` (1.477,38 ₽)** kalemi taratıldığında; eski motor `"M42"` ve `"D.BOR"` kelimelerinden hareketle geçmiş Fatura `3239` içindeki `38 мм` (679,25 ₽), `54 мм` (950,04 ₽), `73 мм` (1.168,44 ₽) pançları ve hatta aynı faturadaki **`210 Бур SDS-plus 10*150/210` (296,00 ₽)** matkap ucunu aynı havuza dahil edip en düşük fiyat olarak **296,00 ₽** gösteriyordu. Oysa aynı `92 мм` malzemenin geçmiş Fatura `3239`'daki gerçek fiyatı **1.538,94 ₽** olup yeni alınan **1.477,38 ₽** fiyat aslında geçmişten **%4 daha uygundur**.
 
-> [!IMPORTANT]
-> Kullanıcımızla yapılan netleştirme doğrultusunda alınan kararlar aşağıda özetlenmiştir:
-
-- **Onaylanan Karar 1 (Mevcut Hatalı Faturaların Onarımı)**: Firma ve adres bilgilerini malzeme kalemi gibi kaydetmiş olan mevcut faturalar (Fatura 3987, 3971 vb.), sistemdeki orijinal PDF belgelerinden gerçek tablo satırları okunarak otomatik olarak onarılacaktır.
-- **Onaylanan Karar 2 (Son 1 Saatte Yüklenen Eski Tarihli 6 Fatura)**: Son 1 saatte yüklenen ancak fatura tarihi Ekim 2026 öncesi (Mart, Temmuz, Ağustos 2026) olan ve şef indirimi bağlantısı bulunmayan 6 adet eski tarihli fatura da kalemleri onarıldıktan sonra Çöp Kutusuna taşınacaktır.
-
----
-
-## 1. Overview & Core Concept
-
-- **Ne Yapar**: Çok sütunlu Rusça 1С faturalarında `% НДС` (`22%`, `20%`, `Без НДС`) ve `Вес` (`0`) sütunlarını deterministik tablo okuyucuya tanıtır; düz PDF metinlerinin adres/ondalık virgüllerinden bölünerek sahte kalem üretmesini engeller ve mevcut hatalı faturaların kalem listelerini orijinal PDF tablolarından birebir onarır.
-- **Hedef Kullanıcılar**: Satınalma şefleri, satınalma personeli ve maliyet kontrol ekibi.
-- **Temel Kazanım**: Fatura kalem toplamlarının fatura genel toplamıyla (`Σ satır_toplamı = fatura_toplamı`) kuruşu kuruşuna eşleşmesi ve GES Arşivinde sıfır adres/üst bilgi gürültüsü.
+2. **Şef İndirim & TDF Teklif Merkezi (`DiscountEntryForm.tsx` & `invoiceLineMatcher.ts`):**
+   - İlk teklif ile son indirimli fatura kalemlerini karşılaştıran `invoiceLineMatcher.ts` ve `schematicAnalysis` modülü, yalnızca `AxB` (`10x150`, `20x250`) formatındaki ölçüleri kontrol ediyor; tekil çap/boyut içeren (`92 мм` veya `400 мм`) kalemlerde ölçü dizisi boş döndüğü için ortak marka/kelime (`"D.BOR"`, `"SDS"`, `"Eco Line"`) üzerinden **1.477,38 ₽**'lik panç ve **679,40 ₽**'lik murç kalemlerini 1. satırdaki **296,00 ₽**'lik matkap ucu ile eşleştirip **"⚠️ TDF Denetim Uyarısı: En İyi İlk Teklif Üstü Alım (296 ₽ yerine 1.477,38 ₽)"** şeklinde yanlış uyarı üretiyordu.
 
 ---
 
-## 2. User Experience & Visual Design
+## 2. Yapılacak Düzenlemeler
 
-- **Temel Kullanıcı Akışı**:
-  1. Kullanıcı bir Rusça PDF faturayı sisteme yüklediğinde veya mevcut Fatura 3987 detayını açtığında, üst bilgi (`Поставщик`, `Грузоотправитель`, `Покупатель`, `Грузополучатель`, `ИНН`, `КПП`, adres) satırları kesin olarak dışlanır.
-  2. Tablo içerisindeki gerçek malzeme kalemleri (ör. Fatura 3987 için `Коврик-травка` `3 Rulo × 6.435 ₽ = 19.305 ₽`, `Канализационный насос Oasis ST-600` `1 Adet × 11.800 ₽ = 11.800 ₽`, `Кофе растворимый Nescafe Gold 900г` `30 Adet × 2.500 ₽ = 75.000 ₽`) KDV dahil birim fiyatlarıyla net olarak listelenir.
-  3. Fatura detay ekranındaki kalem toplamı uyuşmazlık uyarısı ortadan kalkar (`3 Kalem Malzeme`, toplam `106.105,00 ₽`, fark `0,00 ₽`).
-- **Görsel Kimlik ve Tablo Düzeni**:
-  - Kurumsal SaaS veri yoğunluğu standartlarına uygun olarak tüm miktar, birim fiyat ve toplam sütunlarında hizalı rakam (`tabular-nums`) disiplini korunur.
+### A. Hızlı Ön Onay Fiyat Denetimi Motorunun Birebir Orijinal Rusça İndeks Motoruna Bağlanması (`src/utils/preApprovalAuditEngine.ts`)
+- `auditSingleLineItem` ve `auditEntireInvoice` fonksiyonlarındaki eski bulanık (fuzzy) eşleştirme katmanları (`Path 0..F`, `canonicalMaterialId` genellemesi, Türkçe çeviri üzerinden eşleştirme ve farklı ölçüleri birleştirme) tamamen kaldırılacak.
+- Bunun yerine **Admin Fiyat Anomali Denetimi** sekmesinde çalışan `getOrBuildStrictOriginalIndex` ve `buildStrictOriginalMaterialSignature` motoru doğrudan kullanılacak:
+  - Malzemenin **orijinal Rusça metni (`originalName`)**, **markası**, **GOST/TU standardı** ve **tüm sayısal değerleri (çap, kalınlık, ebat, yoğunluk, model/boyut numarası — örn. `92` vs `38`/`54`/`210`)** %100 birebir aynı olmadan hiçbir geçmiş fatura (GES Arşivi veya Prizma ERP) eşleştirilmeyecek.
+  - O(1) hash-bucket indeksleme sayesinde **Hızlı Ön Onay Fiyat Denetimi** sekmesinde 15.000+ kalemlik GES + Prizma ERP taraması **milisaniyeler içinde** tamamlanacak.
+  - Geçmiş referans faturaya tıklandığında hem PDF açma hem de kalem listeli fatura detay penceresine erişim desteklenecek.
 
----
-
-## 3. Key Product Decisions & Trade-Offs
-
-- **Karar 1: Çok Sütunlu (`% НДС` ve `Вес`) Deterministik PDF Tablo Ayrıştırma**
-  - *Seçilen Yaklaşım*: Tablo satırı sonu desenine fiyat sütunları arasında yer alabilen KDV oranı (`22%`, `20%`, `Без НДС`) ve birimden sonra gelebilen tam sayı ağırlık (`Вес`) sütunları ile `ед`, `рул`, `пар`, `упак` birimleri eklenecektir. Ayrıca aynı satırda hem KDV hariç (`Цена без НДС`) hem KDV dahil (`Цена с НДС`) birim fiyat bulunduğunda `miktar × birim_fiyat ≈ satır_toplamı` eşitliğini sağlayan KDV dahil birim fiyat seçilecektir.
-  - *Neden*: ТД Поинтер, Системные Решения, М.С.К ve Строительный двор gibi tedarikçilerin 1С faturalarında KDV oranı sütunu fiyat sütunlarının ortasında yer aldığı için önceki desen bu satırları atlamaktaydı.
-- **Karar 2: Düz PDF Metninde Virgül (CSV) Bölmesinin Kapatılması ve Üst Bilgi Kara Listesi**
-  - *Seçilen Yaklaşım*: Yedek CSV ayrıştırıcı yalnızca gerçek tablo ayırıcıları (`;` veya sekme) içeren verilerde çalışacak; PDF metnindeki adres ve ondalık virgüller sütun ayırıcı olarak kullanılmayacaktır. Ek olarak `Поставщик`, `Грузоотправитель`, `Покупатель`, `Грузополучатель`, `ИНН`, `КПП`, `БИК`, `Сч. №`, sokak/adres ifadeleri ve vergi numarası kaynaklı gerçek dışı miktarları (`miktar >= 1.000.000` ve `birim_fiyat = 0`) reddeden koruma katmanı eklenecektir.
-  - *Neden*: Deterministik okuyucu satır bulamadığında düz PDF metninin virgüllerden bölünmesi, posta kodlarını fiyata ve vergi numaralarını miktara dönüştürmekteydi.
-
----
-
-## 4. Technical Architecture & Data Strategy
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                        PDF Fatura Metin Katmanı                          │
-└────────────────────────────────────┬─────────────────────────────────────┘
-                                     │
-                                     ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│            1. Deterministik PDF Tablo Okuyucu (Çok Sütunlu)              │
-│  • Çok satırlı sıra no + ürün kodu ("1 100968") satır birleştirme        │
-│  • "% НДС" (22%, 20%, Без НДС) ve "Вес" (0) ara sütun desteği            │
-│  • KDV dahil birim fiyat doğrulaması (Miktar × Fiyat ≈ Satır Toplamı)    │
-└────────────────────────────────────┬─────────────────────────────────────┘
-                                     │
-                                     ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│         2. Üst Bilgi / Adres / Vergi No Gürültü Kalkanı (Filtre)         │
-│  • Поставщик / Грузоотправитель / Покупатель / ИНН / КПП / Адрес engeli  │
-│  • Düz PDF metninde virgülle (,) sahte CSV bölme yasağı                  │
-│  • Vergi no kaynaklı sahte miktar (≥ 1.000.000, fiyat = 0) engeli        │
-└────────────────────────────────────┬─────────────────────────────────────┘
-                                     │
-                                     ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│        3. Firestore Mevcut Fatura Onarımı & Eski Fatura Temizliği        │
-│  • Orijinal PDF'lerden (Fatura 3987, 3971 vb.) gerçek kalemlerin onarımı │
-│  • Son 1 saatte yüklenen 6 eski tarihli faturanın Çöp Kutusuna taşınması │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-- **Veri Modeli ve Kalem Onarım Akışı**:
-  - Firestore'daki aktif ve ilişkili faturalar taranarak kalemlerinde adres/üst bilgi gürültüsü veya toplam uyuşmazlığı bulunan kayıtların orijinal PDF dosyaları okunacak, gerçek tablo kalemleri çıkarılarak `items`, `totalAmount`, `vatAmount` ve `amountWithoutVat` alanları güncellenecektir.
-  - Son 1 saatte yüklenen Ekim 2026 öncesi 6 adet fatura (`Mart`, `Temmuz`, `Ağustos 2026`) kalemleri onarıldıktan sonra `isDeleted: true` olarak Çöp Kutusuna taşınacaktır.
+### B. Şef İndirim & TDF Teklif Merkezi Kalem Eşleştirme ve Ön İzleme Denetiminin Düzeltilmesi (`src/utils/invoiceLineMatcher.ts`, `src/utils/comparativeCalculation.ts`, `src/components/DiscountEntryForm.tsx`)
+- **Birebir Kalem Eşleştirme (`invoiceLineMatcher.ts` & `comparativeCalculation.ts`):**
+  - 1. İlk Teklif, Ara Pazarlık Turları ve Nihai İndirimli Fatura kalemleri eşleştirilirken önce `buildStrictOriginalMaterialSignature` ve ürün/artikel kodu (`арт.`) kontrol edilecek.
+  - Yalnızca `AxB` değil, kalem içindeki **tüm sayısal ölçüler (`92 мм`, `400 мм`, `10*150/210` vb.)** karşılaştırılacak; sayısal değerleri farklı olan iki kalem asla birbiriyle eşleştirilmeyecek.
+  - Birebir (1-e-1) eşleştirme kuralı uygulanarak birden fazla satırın aynı ilk teklif satırına (`296 ₽`) bağlanması ve eşleşmeyen satırlarda farklı bir malzemenin fiyatının referans alınması kesin olarak engellenecek.
+- **Kayıtlı Hatalı TDF Matris Verilerinin Temizlenmesi (Firestore):**
+  - Fatura `3262` (`disc_1792509109686` ve `disc_1792509799444`) ve `ХМ-1369` kayıtlarında yanlış eşleşme nedeniyle oluşan hatalı `canonicalMaterials` / `isAboveBestOffer` uyarıları, belge sayıları (`invoices: 467, discounts: 261`) korunarak gerçek kalem fiyatlarıyla düzeltilecek ve sunucu yeniden başlatılarak güncel kodun tüm sekmelerde aktif olması sağlanacak.
