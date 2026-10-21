@@ -1972,10 +1972,10 @@ const TR_TO_RU_TECH_DICT: Array<[RegExp, string]> = [
   [/\byazı\s*tahtas|\bbeyaz\s*tahta\b|\btahta\s*silgi/i, 'Доска магнитно-маркерная офисная / аксессуары'],
   [/\bsu\s*terazi|\bterazi\b|\bşerit\s*metre|\bserit\s*metre|\blazer\b|\bnivo\b/i, 'Рулетка измерительная / уровень строительный'],
   [/\bkombine\s*anahtar|\banahtar\s*kombine|\btork\s*anahtar|\bt\s*anahtar|\ballen\s*anahtar|\bboru\s*anahtar|\blokma\b|\bcırcır\b|\bcircir\b/i, 'Ключ гаечный комбинированный / слесарный инструмент'],
-  [/\bkereste\b|\bçam\b|\btahta\b|\bkalas\b/i, 'Пиломатериал обрезной (брус / доска) ГОСТ 8486'],
-  [/\bosb\b/i, 'Плита ориентированно-стружечная ОСП-3 (OSB-3)'],
-  [/\bbeton\b|\bgrobeton\b/i, 'Бетон товарный БСГ ГОСТ 7473'],
-  [/\bçimento\b|\bcimento\b/i, 'Цемент портландцемент ЦЕМ I 42,5Н (М500)'],
+  [/\bkereste\b|\bçam\b|\btahta\b|\bkalas\b/i, 'Пиломатериал обрезной (брус / доска)'],
+  [/\bosb\b/i, 'Плита ориентированно-стружечная ОСП (OSB)'],
+  [/\bbeton\b|\bgrobeton\b/i, 'Бетон товарный БСГ'],
+  [/\bçimento\b|\bcimento\b/i, 'Цемент портландцемент строительный'],
   [/\bkum\b/i, 'Песок строительный карьерный / мытый'],
   [/\bmıcır\b|\bmicir\b|\bçakıl\b|\bcakil\b/i, 'Щебень гранитный / гравийный фракционный'],
   [/\btuğla\b|\btugla\b/i, 'Кирпич строительный полнотелый / пустотелый'],
@@ -2014,7 +2014,7 @@ const TR_TO_RU_TECH_DICT: Array<[RegExp, string]> = [
   [/\bkilit\b|\bmenteşe\b|\bmentese\b|\bkapı\b|\bkapi\b|\bpencere\b|\bkol\b/i, 'Фурнитура дверная / замок навесной / петли стальные'],
   [/\bhalat\b|\bsapan\b|\bzincir\b|\bkanca\b|\bmapa\b|\bgerdirme\b/i, 'Строп грузоподъемный / канат стальной / такелаж'],
   [/\biskele\b|\bkalıp\b|\bkalip\b|\btij\b|\bpayanda\b|\bkriko\b|\bkamalı\b|\bbaşlangıç\s*ayağ|\bbaslangic\s*ayag/i, 'Комплектующие опалубки и строительных лесов'],
-  [/\byelek\b|\breflektör\b|\breflektor\b/i, 'Жилет сигнальный светоотражающий ГОСТ'],
+  [/\byelek\b|\breflektör\b|\breflektor\b/i, 'Жилет сигнальный светоотражающий'],
   [/\bayakkabı\b|\bayakkabi\b|\bbot\b|\bçizme\b|\bcizme\b/i, 'Спецобувь защитная рабочая с металлоподноском / сапоги'],
   [/\bmont\b|\bparka\b|\btulum\b|\bpantolon\b|\byağmurluk\b|\byagmurluk\b|\bkıyafet\b|\bkiyafet\b/i, 'Спецодежда рабочая защитная (костюм / куртка утепленная)'],
   [/\bgözlük\b|\bgozluk\b|\bmaske\b|\bsiperlik\b|\bkulaklık\b|\bkulaklik\b|\bemniyet kemeri\b/i, 'Средства индивидуальной защиты (СИЗ: очки / респиратор / привязь)'],
@@ -2035,7 +2035,7 @@ function isGenuineRussianOriginal(text?: string): boolean {
   const s = text.trim();
   if (!s) return false;
   // Exclude synthetic TR_TO_RU_TECH_DICT strings and auto-generated Russian templates
-  if (/^(?:Гидроизоляция рулонная наплавляемая|Утеплитель теплоизоляционный|Хозяйственно-бытовое обеспечение|Хозяйственные товары и средства|Диск отрезной \/ круг шлифовальный|Труба полипропиленовая \/ ПВХ|Канцелярские товары и бумага офисная|Канцелярские принадлежности|Валик малярный строительный|Оборудование стройплощадки, мебель|Инструмент слесарно-монтажный ручной|Строительно-монтажный материал \/ ТМЦ)/i.test(s)) {
+  if (/^(?:Пиломатериал обрезной \(брус \/ доска\)|Бетон товарный БСГ|Жилет сигнальный светоотражающий|Гидроизоляция рулонная наплавляемая|Утеплитель теплоизоляционный|Хозяйственно-бытовое обеспечение|Хозяйственные товары и средства|Диск отрезной \/ круг шлифовальный|Труба полипропиленовая \/ ПВХ|Канцелярские товары и бумага офисная|Канцелярские принадлежности|Валик малярный строительный|Оборудование стройплощадки, мебель|Инструмент слесарно-монтажный ручной|Строительно-монтажный материал \/ ТМЦ)/i.test(s)) {
     return false;
   }
   // Exclude Turkish stock card strings that happen to contain "ГОСТ" or "А400"
@@ -2058,13 +2058,14 @@ export function ensureRussianOriginalName(materialName?: string, rawOriginalName
   if (cachedRu !== undefined) return cachedRu;
 
   const res = ((): string => {
-    let orig = (rawOriginalName || '').trim();
+    let orig = (rawOriginalName || '').trim()
+      .replace(/Пиломатериал обрезной\s*\(брус\s*\/\s*доска\)\s*ГОСТ\s*8486/gi, 'Пиломатериал обрезной (брус / доска)');
     // Unwrap previous generic ТМЦ fallback or synthetic [STOCK CARD] suffix
     const tmcMatch = orig.match(/^Строительно-монтажный материал\s*\/\s*ТМЦ\s*\((.+)\)$/i);
     if (tmcMatch && tmcMatch[1]) {
       orig = tmcMatch[1].trim();
     }
-    const synthBracketMatch = orig.match(/^(?:Гидроизоляция рулонная наплавляемая \/ мембрана|Утеплитель теплоизоляционный минераловатный|Хозяйственно-бытовое обеспечение офиса и площадки|Диск отрезной \/ круг шлифовальный абразивный|Труба полипропиленовая \/ ПВХ \/ ПНД инженерная|Канцелярские товары и бумага офисная|Валик малярный строительный).*?\[([^\]]+)\]$/i);
+    const synthBracketMatch = orig.match(/^(?:Пиломатериал обрезной \(брус \/ доска\)|Гидроизоляция рулонная наплавляемая \/ мембрана|Утеплитель теплоизоляционный минераловатный|Хозяйственно-бытовое обеспечение офиса и площадки|Диск отрезной \/ круг шлифовальный абразивный|Труба полипропиленовая \/ ПВХ \/ ПНД инженерная|Канцелярские товары и бумага офисная|Валик малярный строительный).*?\[([^\]]+)\]$/i);
     if (synthBracketMatch && synthBracketMatch[1]) {
       orig = synthBracketMatch[1].trim();
     }

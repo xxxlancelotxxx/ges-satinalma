@@ -14,7 +14,13 @@
 import { InvoiceRecord, InvoiceItem, DiscountRecord } from '../types';
 import { processItem, ProcessItemInput, ProcessedItemResult } from './aiDecisionEngine';
 import { normalizeUnit, normalizeQuantityAndPrice, extractTechnicalSpecs } from './comparativeCalculation';
-import { areSpecSignaturesCompatible } from './materialGroupIntegrity';
+import {
+  areSpecSignaturesCompatible,
+  extractTechnicalStandardAndGrade,
+  areTechnicalVariantsCompatible,
+  formatTechnicalVariantBadges,
+  TechnicalVariantProfile
+} from './materialGroupIntegrity';
 import { comparisonMultiplierForVat } from './vatBasis';
 import {
   buildSmartOriginalSignature,
@@ -581,6 +587,13 @@ export function auditSingleLineItem(
     brand: draftItem.brand
   });
 
+  if (strictSig?.techVariant) {
+    const badgeStr = formatTechnicalVariantBadges(strictSig.techVariant);
+    if (badgeStr && !processed.canonicalName.includes(badgeStr)) {
+      processed.canonicalName = `${processed.canonicalName.replace(/\s*\(1\.\s*Sınıf\s*GOST\)/gi, '')} ${badgeStr}`.trim();
+    }
+  }
+
   if (strictSig) {
     const strictBuckets = getOrBuildStrictOriginalIndex(historicalInvoices);
     const bucketCandidates = strictBuckets.get(strictSig.exactKey) || [];
@@ -591,6 +604,12 @@ export function auditSingleLineItem(
 
       // Never compare the draft invoice against its own archived copy
       if (draftDocNo && cleanInvNo === draftDocNo) {
+        continue;
+      }
+
+      // 0. Technical Variant & Standard Lock (GOST vs TU, Sort 1/2/3, Moisture, Surface Treatment, Wood Species, Cross-section)
+      const techCompat = areTechnicalVariantsCompatible(strictSig.techVariant, candSig.techVariant);
+      if (!techCompat.compatible) {
         continue;
       }
 
@@ -963,6 +982,7 @@ export interface StrictOriginalMaterialSignature {
   gostKey: string;
   stems: string[];
   exactKey: string;
+  techVariant: TechnicalVariantProfile;
 }
 
 const STRICT_SIGNATURE_CACHE = new Map<string, StrictOriginalMaterialSignature | null>();
@@ -971,7 +991,7 @@ const STRICT_SIGNATURE_CACHE = new Map<string, StrictOriginalMaterialSignature |
  * Extracts a strict, order-independent fingerprint strictly from the original language
  * (Russian `originalName` whenever Cyrillic is present, never polluted by Turkish translations).
  * Every number (dimensions, thickness, diameter, density, weight, pack size, model number),
- * brand, standard (GOST vs TU), and Russian word stem must match 100%.
+ * brand, standard (GOST vs TU), quality grade (Sort 1/2/3), and Russian word stem must match.
  */
 export function buildStrictOriginalMaterialSignature(item: {
   originalName?: string;
@@ -997,6 +1017,9 @@ export function buildStrictOriginalMaterialSignature(item: {
     return null;
   }
 
+  // Extract technical variant profile (GOST vs TU, Sort 1/2/3, moisture, surface treatment, wood species, cross-section) BEFORE stripping SKU prefixes like 01-09О / 01-14Г
+  const techVariant = extractTechnicalStandardAndGrade(orig, mat);
+
   // Fast, non-backtracking strip of Prizma jobsite prefixes and trailing bracketed translations
   if (raw.includes('/') || raw.includes('\\')) {
     raw = raw.replace(/^[^\n]{1,60}?(?:ФАКТ|FAKT|ПЛАН|PLAN|АВАНС|AVANS|STF|BTF|СЧЕТ|SCHET)\s*[/|\\-]\s*/i, '');
@@ -1012,10 +1035,10 @@ export function buildStrictOriginalMaterialSignature(item: {
   }
 
   let s = raw.toLowerCase().replace(/ё/g, 'е');
-  // Strip vendor-internal 1C accounting/warehouse nomenclature prefixes (e.g. "00029058 ", "у0-00029058 ", "01-09о ") when followed by Cyrillic text
+  // Strip vendor-internal 1C accounting/warehouse nomenclature prefixes (e.g. "00029058 ", "у0-00029058 ", "01-09о ", "01-102г ") when followed by Cyrillic text
   s = s
     .replace(/^(?:[а-яa-z]{1,3}\d?[-/])?\d{5,12}\s+(?=[а-яa-z])/i, '')
-    .replace(/^\d{2}-\d{2}[а-яa-z]?\s+(?=[а-я])/i, '')
+    .replace(/^\d{1,3}-\d{1,3}[а-яa-z]?\s+(?=[а-я])/i, '')
     .trim();
   // Normalize decimal commas between digits (e.g. 12,5 -> 12.5) and dotted brand names (e.g. D.BOR -> dbor)
   s = s
@@ -1025,8 +1048,9 @@ export function buildStrictOriginalMaterialSignature(item: {
   // Extract GOST / TU / DIN / ISO standards into gostKey
   const gostMatches: string[] = [];
   s = s.replace(/(?:^|[^а-яa-z0-9])(гост|ту|din|iso)\s*(?:р\s*)?(\d+(?:[.-]\d+)*)/gi, (_, std, num) => {
-    gostMatches.push(`${String(std).toLowerCase()}:${num}`);
-    return ` ${String(std).toLowerCase()} `;
+    const mainNum = String(num).split(/[.-]/)[0];
+    gostMatches.push(`${String(std).toLowerCase()}:${mainNum}`);
+    return ' ';
   });
 
   // Extract all numbers (dimensions, thickness, diameter, density, weight, volume, pack count, model numbers)
@@ -1070,19 +1094,27 @@ export function buildStrictOriginalMaterialSignature(item: {
   const wordStems: string[] = [];
   for (const tok of cleanTokens) {
     if (STRICT_STOP_WORDS.has(tok)) continue;
+    // Standart kelimeleri (гост/gost/ту/tu) techVariant tarafından yönetilir;
+    // böylece standart belirtilmeyen kayıtlar aynı kovaya düşüp hem GOST hem TU ile eşleşebilir,
+    // ancak GOST ile TU birbirleriyle asla eşleşmez.
+    if (tok === 'гост' || tok === 'gost' || tok === 'ту' || tok === 'tu') continue;
     const stem = stemOriginalRussianWord(tok);
-    if (stem && stem.length >= 2 && !STRICT_STOP_WORDS.has(stem)) {
+    if (stem && stem.length >= 2 && !STRICT_STOP_WORDS.has(stem) && stem !== 'гост' && stem !== 'ту') {
       wordStems.push(stem);
     }
   }
 
   const uniqueStems = Array.from(new Set(wordStems)).sort();
-  if (uniqueStems.length === 0) {
+  if (uniqueStems.length === 0 && !techVariant.isTimber) {
     STRICT_SIGNATURE_CACHE.set(cacheKey, null);
     return null;
   }
 
-  const exactKey = `${numericSig || '_'}::${uniqueStems.join('|')}`;
+  // Kereste kalemlerinde kova anahtarı tam kesit/ölçüye göre oluşturulur (örn. TIMBER::50x100x6000);
+  // kova içindeki adaylar areTechnicalVariantsCompatible ile GOST/TU, Sort 1/1-2/2/3, Nem, Yüzey ve Ağaç Türü bazında kesin filtrelenir.
+  const exactKey = (techVariant.isTimber && techVariant.crossSectionDims)
+    ? `TIMBER::${techVariant.crossSectionDims}`
+    : `${numericSig || '_'}::${uniqueStems.join('|')}`;
 
   const result: StrictOriginalMaterialSignature = {
     rawOriginalText: raw,
@@ -1091,7 +1123,8 @@ export function buildStrictOriginalMaterialSignature(item: {
     numericSig,
     gostKey: gostMatches.sort().join(','),
     stems: uniqueStems,
-    exactKey
+    exactKey,
+    techVariant
   };
 
   if (STRICT_SIGNATURE_CACHE.size < 25000) {
@@ -1225,6 +1258,10 @@ export function findCheaperHistoricalBenchmarksForItems(
       if (excludeInvId && cand.inv.id === excludeInvId) continue;
       if (excludeDiscId && ((cand.inv as any).discountId === excludeDiscId || cand.inv.id === `inv_sync_${excludeDiscId}`)) continue;
       if (cleanContextInvNo && cand.cleanInvNo === cleanContextInvNo) continue;
+
+      // 0. Technical Variant & Standard Lock (GOST vs TU, Sort 1/2/3, Moisture, Surface Treatment, Wood Species, Cross-section)
+      const techCompat = areTechnicalVariantsCompatible(sig.techVariant, cand.sig.techVariant);
+      if (!techCompat.compatible) continue;
 
       // If both specify a brand or GOST / TU / DIN standard, they must be 100% identical
       if (sig.brand && cand.sig.brand && sig.brand !== cand.sig.brand) continue;

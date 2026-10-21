@@ -4,6 +4,7 @@ import { isExemptFromBenchmarkAudit } from './auditRiskEngine';
 import { ensureRussianOriginalName } from './categoryClassifier';
 import { areMaterialSegmentsCompatible } from './materialSegmentIntelligence';
 import { clusterSameProductRows, isSameProductForPriceAlert } from './sameMaterialGuard';
+import { extractTechnicalStandardAndGrade, formatTechnicalVariantBadges } from './materialGroupIntegrity';
 
 export interface AnomalyAlert {
   id: string;
@@ -185,6 +186,15 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
       const sortedByPrice = [...rows].sort((a, b) => unitPriceOf(a) - unitPriceOf(b));
       const cheapestRec = sortedByPrice[0];
       const priciestRec = sortedByPrice[sortedByPrice.length - 1];
+      const clusterTech = extractTechnicalStandardAndGrade(
+        priciestRec?.originalName || cheapestRec?.originalName || '',
+        comp.materialName
+      );
+      const clusterBadgeStr = formatTechnicalVariantBadges(clusterTech);
+      const baseClusterMatName = comp.materialName.replace(/\s*\(1\.\s*Sınıf\s*GOST\)/gi, '').trim();
+      const clusterMaterialName = clusterBadgeStr && !baseClusterMatName.includes(clusterBadgeStr)
+        ? `${baseClusterMatName} ${clusterBadgeStr}`.trim()
+        : baseClusterMatName;
       const minUnitPrice = unitPriceOf(cheapestRec);
       const maxUnitPrice = unitPriceOf(priciestRec);
       const avgUnitPrice = Number((rows.reduce((s: number, h: any) => s + unitPriceOf(h), 0) / rows.length).toFixed(2));
@@ -232,8 +242,8 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
           title: language === 'RU'
             ? `Повышение цены у того же поставщика: ${latest.supplier} (+%${pctIncrease})`
             : `Aynı Firmadan Fiyat Artışı: ${latest.supplier} (+%${pctIncrease} Zam)`,
-          materialName: comp.materialName,
-          russianSubtitle: ensureRussianOriginalName(comp.materialName, latest.originalName || first.originalName),
+          materialName: clusterMaterialName,
+          russianSubtitle: ensureRussianOriginalName(clusterMaterialName, latest.originalName || first.originalName),
           category: comp.category,
           vendorName: latest.supplier,
           jobsiteName: latest.jobsiteName,
@@ -249,10 +259,10 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
           quantity: currQty,
           unit: stdUnit,
           historyRows: mappedHistoryRows,
-          marketCluster: getMarketCluster(comp.materialName, comp.category),
+          marketCluster: getMarketCluster(clusterMaterialName, comp.category),
           description: language === 'RU'
-            ? `Цена за единицу (${stdUnit}) материала "${comp.materialName}" у поставщика "${latest.supplier}" выросла с ${formatRuble(prevPrice)} (${(first.date || '').split('T')[0]}) до ${formatRuble(currPrice)} (${(latest.date || '').split('T')[0]}) (+${pctIncrease}%).`
-            : `"${latest.supplier}" firmasından alınan "${comp.materialName}" malzemesinin standart birim fiyatı (${stdUnit}) ${(first.date || '').split('T')[0]} tarihli alımda ${formatRuble(prevPrice)}/${stdUnit} iken, ${(latest.date || '').split('T')[0]} tarihli faturada ${formatRuble(currPrice)}/${stdUnit} seviyesine yükselmiştir (+%${pctIncrease} artış).`,
+            ? `Цена за единицу (${stdUnit}) материала "${clusterMaterialName}" у поставщика "${latest.supplier}" выросла с ${formatRuble(prevPrice)} (${(first.date || '').split('T')[0]}) до ${formatRuble(currPrice)} (${(latest.date || '').split('T')[0]}) (+${pctIncrease}%).`
+            : `"${latest.supplier}" firmasından alınan "${clusterMaterialName}" malzemesinin standart birim fiyatı (${stdUnit}) ${(first.date || '').split('T')[0]} tarihli alımda ${formatRuble(prevPrice)}/${stdUnit} iken, ${(latest.date || '').split('T')[0]} tarihli faturada ${formatRuble(currPrice)}/${stdUnit} seviyesine yükselmiştir (+%${pctIncrease} artış).`,
           recommendation: language === 'RU'
             ? `Проверьте рыночные котировки и потребуйте у поставщика возврата к прежней цене ${formatRuble(prevPrice)}/${stdUnit}.`
             : `Tedarikçi ile önceki anlaşma fiyatı olan ${formatRuble(prevPrice)}/${stdUnit} baz alınarak revize iskonto talep edilmelidir.`
@@ -286,8 +296,8 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
         title: language === 'RU'
           ? `Разница цен на один и тот же материал: +%${priceDiffPct}`
           : `Elma-Elma Malzeme Fiyat Farkı: +%${priceDiffPct} Sapma (${rows.length} Alım)`,
-        materialName: comp.materialName,
-        russianSubtitle: ensureRussianOriginalName(comp.materialName, priciestRec?.originalName || cheapestRec?.originalName),
+        materialName: clusterMaterialName,
+        russianSubtitle: ensureRussianOriginalName(clusterMaterialName, priciestRec?.originalName || cheapestRec?.originalName),
         category: comp.category,
         vendorName: `${cheapestRec?.supplier || comp.cheapestJobsiteName} (${formatRuble(minUnitPrice)}) ⟷ ${priciestRec?.supplier || comp.priciestJobsiteName} (${formatRuble(maxUnitPrice)})`,
         jobsiteName: priciestRec?.jobsiteName || comp.priciestJobsiteName,
@@ -304,8 +314,8 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
         historyRows: mappedHistoryRows,
         marketCluster: 'LOGISTICS_GAP',
         description: language === 'RU'
-          ? `Материал "${comp.materialName}" (${stdUnit}) закупался на объекте "${cheapestRec?.jobsiteName || comp.cheapestJobsiteName}" у "${cheapestRec?.supplier || '-'}" по цене ${formatRuble(minUnitPrice)}/${stdUnit}, а на объекте "${priciestRec?.jobsiteName || comp.priciestJobsiteName}" у "${priciestRec?.supplier || '-'}" по цене ${formatRuble(maxUnitPrice)}/${stdUnit} (+%${priceDiffPct}).`
-          : `Birebir aynı teknik özellikteki "${comp.materialName}" malzemesi (${stdUnit} bazında normalize edilmiş elma-elma kıyas) en uygun "${cheapestRec?.jobsiteName || comp.cheapestJobsiteName}" şantiyesinde "${cheapestRec?.supplier || '-'}" firmasından ${formatRuble(minUnitPrice)}/${stdUnit} fiyata alınmışken, "${priciestRec?.jobsiteName || comp.priciestJobsiteName}" şantiyesinde "${priciestRec?.supplier || '-'}" firmasından ${formatRuble(maxUnitPrice)}/${stdUnit} fiyata alınmıştır (+%${priceDiffPct} fiyat farkı).`,
+          ? `Материал "${clusterMaterialName}" (${stdUnit}) закупался на объекте "${cheapestRec?.jobsiteName || comp.cheapestJobsiteName}" у "${cheapestRec?.supplier || '-'}" по цене ${formatRuble(minUnitPrice)}/${stdUnit}, а на объекте "${priciestRec?.jobsiteName || comp.priciestJobsiteName}" у "${priciestRec?.supplier || '-'}" по цене ${formatRuble(maxUnitPrice)}/${stdUnit} (+%${priceDiffPct}).`
+          : `Birebir aynı teknik özellikteki "${clusterMaterialName}" malzemesi (${stdUnit} bazında normalize edilmiş elma-elma kıyas) en uygun "${cheapestRec?.jobsiteName || comp.cheapestJobsiteName}" şantiyesinde "${cheapestRec?.supplier || '-'}" firmasından ${formatRuble(minUnitPrice)}/${stdUnit} fiyata alınmışken, "${priciestRec?.jobsiteName || comp.priciestJobsiteName}" şantiyesinde "${priciestRec?.supplier || '-'}" firmasından ${formatRuble(maxUnitPrice)}/${stdUnit} fiyata alınmıştır (+%${priceDiffPct} fiyat farkı).`,
         recommendation: language === 'RU'
           ? `Рекомендуется закупать данный материал через поставщика "${cheapestRec?.supplier || comp.cheapestJobsiteName}" по базовой цене ${formatRuble(minUnitPrice)}/${stdUnit}.`
           : `Sonraki siparişlerde en düşük birim fiyatı veren "${cheapestRec?.supplier || comp.cheapestJobsiteName}" (${formatRuble(minUnitPrice)}/${stdUnit}) referans alınarak alım yapılmalıdır.`

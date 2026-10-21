@@ -335,4 +335,136 @@ const legacyScore = calculateNegotiationEffortScore(8.5, 3.2, 0.4, 2, 5);
 assert.ok(typeof legacyScore === 'number' && legacyScore > 0, 'Legacy calculation must return valid number');
 console.log('✓ Legacy KPI function calculateNegotiationEffortScore returned intact score:', legacyScore);
 
-console.log('\n>>> ALL 13 PRE-APPROVAL AUDIT TESTS PASSED SUCCESSFULLY! <<<\n');
+// ----------------------------------------------------------------------------
+// Test 14: Kereste GOST vs TU vs Kalite Sınıfı (Sort 1 / 1-2 / 2) ve Standart Yazmayan Kayıt Eşleşmesi
+// ----------------------------------------------------------------------------
+console.log('[Test 14] Timber GOST vs TU Separation & Unspecified Standard Compatibility');
+const TIMBER_HISTORY: InvoiceRecord[] = [
+  {
+    id: 'inv_timber_tu',
+    invoiceNumber: 'FT-TIMBER-TU-14479',
+    supplier: 'ООО "ГК АТМОС"',
+    jobsiteId: 'job_01',
+    jobsiteName: 'Şantiye 1',
+    date: '2026-10-14',
+    currency: 'RUB',
+    totalAmount: 138170,
+    items: [
+      {
+        id: 'it_tu_1',
+        materialName: 'Kenarlı Kereste Tahta 50x200x6000 [TU] [Sort-1] [Kavak / Осина]',
+        originalName: '01-09О Доска обрезная ЕВ 50*200*6000 (сорт-1, ТУ) 16шт. в 1м.куб, Осина профилир.',
+        category: 'Ahşap & Kereste',
+        unit: 'm³',
+        quantity: 10,
+        unitPrice: 13817,
+        grossUnitPrice: 13817,
+        totalPrice: 138170
+      }
+    ]
+  },
+  {
+    id: 'inv_timber_gost_s12',
+    invoiceNumber: 'FT-TIMBER-GOST-14672',
+    supplier: 'ООО "ГК АТМОС"',
+    jobsiteId: 'job_01',
+    jobsiteName: 'Şantiye 1',
+    date: '2026-10-18',
+    currency: 'RUB',
+    totalAmount: 213380,
+    items: [
+      {
+        id: 'it_gost_s12',
+        materialName: 'Kenarlı Kereste Tahta 50x200x6000 [GOST] [Sort-1/2]',
+        originalName: '01-102Г Доска обрезная ЕВ 50*200*6000, ГОСТ (сорт 1-2) 16,66шт. в 1м.куб, 60шт/пач., профилир.',
+        category: 'Ahşap & Kereste',
+        unit: 'm³',
+        quantity: 10,
+        unitPrice: 21338,
+        grossUnitPrice: 21338,
+        totalPrice: 213380
+      }
+    ]
+  },
+  {
+    id: 'inv_timber_unspec_std',
+    invoiceNumber: 'FT-TIMBER-UNSPEC-6350',
+    supplier: 'ООО "М.С.К"',
+    jobsiteId: 'job_01',
+    jobsiteName: 'Şantiye 1',
+    date: '2026-09-28',
+    currency: 'RUB',
+    totalAmount: 230000,
+    items: [
+      {
+        id: 'it_unspec_1',
+        materialName: 'Kenarlı Kereste Tahta 50x200x6000 [Sort-1]',
+        originalName: 'Доска обрезная профилированная ЕВ 50*200*6000мм 1 сорт (Хвоя)',
+        category: 'Ahşap & Kereste',
+        unit: 'm³',
+        quantity: 10,
+        unitPrice: 23000,
+        grossUnitPrice: 23000,
+        totalPrice: 230000
+      }
+    ]
+  },
+  {
+    id: 'inv_timber_gost_s1',
+    invoiceNumber: 'FT-TIMBER-GOST-12182',
+    supplier: 'ООО "ГК АТМОС"',
+    jobsiteId: 'job_01',
+    jobsiteName: 'Şantiye 1',
+    date: '2026-08-28',
+    currency: 'RUB',
+    totalAmount: 236090,
+    items: [
+      {
+        id: 'it_gost_s1',
+        materialName: 'Kenarlı Kereste Tahta 50x200x6000 [GOST] [Sort-1]',
+        originalName: '01-14Г Доска обрезная ЕВ 50*200*6000 (сорт-1, ГОСТ) 16шт. в 1м.куб, 60шт/пач. профилир.',
+        category: 'Ahşap & Kereste',
+        unit: 'm³',
+        quantity: 10,
+        unitPrice: 23609,
+        grossUnitPrice: 23609,
+        totalPrice: 236090
+      }
+    ]
+  }
+];
+
+const draftGostSort1 = {
+  materialName: 'Biçilmiş Kereste Doğal Nemli 50x200x6000',
+  originalName: '01-14Г Доска обрезная ЕВ 50*200*6000 (сорт-1, ГОСТ) 16шт. в 1м.куб, 60шт/пач. профилир.',
+  category: 'Ahşap & Kereste',
+  unit: 'm³',
+  quantity: 15,
+  unitPrice: 23660,
+  totalPrice: 354900,
+  currency: 'RUB'
+};
+
+const timberAuditRes = auditSingleLineItem(draftGostSort1, 0, TIMBER_HISTORY);
+assert.strictEqual(timberAuditRes.hasHistoricalMatch, true);
+assert.ok(
+  !timberAuditRes.allHistoricalMatches.some(m => m.invoiceNumber === 'FT-TIMBER-TU-14479'),
+  'GOST Sort-1 timber must NEVER match 13,817 RUB TU timber!'
+);
+assert.ok(
+  !timberAuditRes.allHistoricalMatches.some(m => m.invoiceNumber === 'FT-TIMBER-GOST-14672'),
+  'GOST Sort-1 timber must NEVER match Sort 1-2 timber!'
+);
+assert.ok(
+  timberAuditRes.allHistoricalMatches.some(m => m.invoiceNumber === 'FT-TIMBER-UNSPEC-6350'),
+  'GOST Sort-1 timber MUST match unspecified-standard Sort-1 pine timber (23,000 RUB)'
+);
+assert.ok(
+  timberAuditRes.allHistoricalMatches.some(m => m.invoiceNumber === 'FT-TIMBER-GOST-12182'),
+  'GOST Sort-1 timber MUST match exact GOST Sort-1 pine timber (23,609 RUB)'
+);
+assert.strictEqual(timberAuditRes.minHistoricalPrice, 23000);
+console.log('✓ 23,660 RUB GOST Sort-1 timber never matched 13,817 RUB TU timber; min benchmark is 23,000 RUB!');
+
+console.log('\n>>> ALL 14 PRE-APPROVAL AUDIT TESTS PASSED SUCCESSFULLY! <<<\n');
+

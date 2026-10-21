@@ -6,6 +6,10 @@ import {
   TechnicalSpecs
 } from '../types';
 import { convertMaterialUnit } from './constructionUnitConverter';
+import {
+  extractTechnicalStandardAndGrade,
+  areTechnicalVariantsCompatible
+} from './materialGroupIntegrity';
 export { convertMaterialUnit };
 
 /**
@@ -82,20 +86,32 @@ export function extractTechnicalSpecs(text: string): TechnicalSpecs {
     specs.grade = cleanGrade;
   }
 
-  // 3. Standard: e.g. GOST 34028, ГОСТ 5781, ГОСТ 3282
+  // 3. Standard & Technical Variant: e.g. GOST 34028, ГОСТ, ТУ, Sort 1/2/3
+  const techVariant = extractTechnicalStandardAndGrade(normalized);
   const gostMatch = normalized.match(/(?:ГОСТ|GOST)\s*([0-9]+(?:-[0-9]+)?)/i);
   if (gostMatch && gostMatch[1]) {
     specs.standard = `ГОСТ ${gostMatch[1]}`;
+  } else if (techVariant.standardCode) {
+    specs.standard = techVariant.standardCode;
+  } else if (techVariant.standardType) {
+    specs.standard = techVariant.standardType;
+  }
+  if (!specs.grade && techVariant.qualityGrade) {
+    specs.grade = techVariant.qualityGrade;
   }
 
   // 4. Dimensions / Length: e.g. 4x6m, 4х6 м, 11.7m, 11700, 600x300x200
-  const dimMatch = normalized.match(/(?:размер\s*)?\b(\d{1,4}(?:[.,]\d+)?\s*[xх*×]\s*\d{1,4}(?:[.,]\d+)?(?:\s*[xх*×]\s*\d{1,4}(?:[.,]\d+)?)?)\s*(?:м\b|m\b|мм\b|mm\b)?/i);
-  if (dimMatch && dimMatch[1]) {
-    specs.dimensions = dimMatch[1].replace(/\s+/g, '').toLowerCase().replace(/[х*×]/g, 'x');
+  if (techVariant.crossSectionDims && techVariant.isTimber) {
+    specs.dimensions = techVariant.crossSectionDims;
   } else {
-    const lengthMatch = normalized.match(/\b(11[.,]7\s*м|11700\s*(?:мм)?|12\s*м|6\s*м)\b/i);
-    if (lengthMatch && lengthMatch[1]) {
-      specs.dimensions = lengthMatch[1].replace(/\s+/g, '');
+    const dimMatch = normalized.match(/(?:размер\s*)?\b(\d{1,4}(?:[.,]\d+)?\s*[xх*×]\s*\d{1,4}(?:[.,]\d+)?(?:\s*[xх*×]\s*\d{1,4}(?:[.,]\d+)?)?)\s*(?:м\b|m\b|мм\b|mm\b)?/i);
+    if (dimMatch && dimMatch[1]) {
+      specs.dimensions = dimMatch[1].replace(/\s+/g, '').toLowerCase().replace(/[х*×]/g, 'x');
+    } else {
+      const lengthMatch = normalized.match(/\b(11[.,]7\s*м|11700\s*(?:мм)?|12\s*м|6\s*м)\b/i);
+      if (lengthMatch && lengthMatch[1]) {
+        specs.dimensions = lengthMatch[1].replace(/\s+/g, '');
+      }
     }
   }
 
@@ -150,6 +166,17 @@ export function calculateMatchScore(
   const specsA = lineA.specs || extractTechnicalSpecs(lineA.description);
   const specsB = lineB.specs || extractTechnicalSpecs(lineB.description);
 
+  const techA = extractTechnicalStandardAndGrade(lineA.description || '');
+  const techB = extractTechnicalStandardAndGrade(lineB.description || '');
+  const techCompat = areTechnicalVariantsCompatible(techA, techB);
+  if (!techCompat.compatible) {
+    return {
+      score: 0.0,
+      reason: techCompat.conflictReason || 'Teknik standart / kalite sınıfı uyuşmazlığı',
+      commonName: lineA.description
+    };
+  }
+
   const typeA = detectMaterialType(lineA.description);
   const typeB = detectMaterialType(lineB.description);
 
@@ -170,16 +197,24 @@ export function calculateMatchScore(
   }
 
   // Numeric signature check: different numbers (e.g. 92 mm vs 54 mm vs 400 mm vs 10x150/210) must never match
-  const extractNums = (s: string) =>
-    Array.from(
+  const extractNums = (s: string) => {
+    let cleaned = s.toLowerCase().replace(/(\d),(\d)/g, '$1.$2');
+    if (typeA === 'İnşaat Demiri' && typeB === 'İnşaat Demiri') {
+      cleaned = cleaned
+        .replace(/(?:гост|gost)\s*\d+(?:-\d+)?/gi, ' ')
+        .replace(/[aа]\s*(?:500\s*[cс]?|400|240)/gi, ' ')
+        .replace(/(?:^|[^0-9])11\.7\s*[мm](?![a-zа-яё0-9])/gi, ' ');
+    }
+    return Array.from(
       new Set(
-        (s.toLowerCase().replace(/(\d),(\d)/g, '$1.$2').match(/\d+(?:\.\d+)?/g) || [])
+        (cleaned.match(/\d+(?:\.\d+)?/g) || [])
           .map(n => String(Number(n)))
           .filter(n => n !== 'NaN')
       )
     )
       .sort((a, b) => Number(a) - Number(b))
       .join('|');
+  };
   const numsA = extractNums(lineA.description || '');
   const numsB = extractNums(lineB.description || '');
   if ((numsA || numsB) && numsA !== numsB) {

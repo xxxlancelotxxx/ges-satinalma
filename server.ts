@@ -6,7 +6,7 @@ import { normalizeStandardUnit, getMaterialBenchmarkUnit, convertMaterialUnit, a
 import { normalizeVendorName, getVendorKey, areVendorsEqual, isValidInvoiceNumber, isInvoiceHeaderOrAddressGarbage } from './src/utils/vendorNormalizer';
 import { normalizeCategoryName, CANONICAL_28_CATEGORIES, translateRussianMaterialToTurkish, ensureRussianOriginalName, resolveItemCategory } from './src/utils/categoryClassifier';
 import { analyzeMaterialSegment } from './src/utils/materialSegmentIntelligence';
-import { splitGroupBySpec, getProductTypeLabel, ensureComparisonGroupIntegrity } from './src/utils/materialGroupIntegrity';
+import { splitGroupBySpec, getProductTypeLabel, ensureComparisonGroupIntegrity, extractTechnicalStandardAndGrade, formatTechnicalVariantBadges, extractSpecSignatureForUnit, getSpecConflicts } from './src/utils/materialGroupIntegrity';
 import { checkRecordPermission, getUserAuthorizedJobsiteIds, canonicalizeJobsiteId } from './src/utils/permissions';
 import { comparativeAnalysesStore, materialSynonymsStore, comparativeConfig, updateComparativeConfig, processComparativeAnalysisBatch, learnApprovedSynonyms, recalculateComparativeAnalysis } from './server/comparativeEngine';
 import { prizmaService } from './server/prizmaService';
@@ -23,7 +23,7 @@ import * as XLSX from 'xlsx';
 import { PDFDocument, rgb } from 'pdf-lib';
 import path from 'path';
 import crypto from 'crypto';
-import admin from 'firebase-admin';
+import { initializeApp as initAdminApp, getApps as getAdminApps } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { initializeApp as initFirebaseApp, getApps } from 'firebase/app';
 import { 
@@ -118,8 +118,8 @@ console.error = (...args: any[]) => {
   _origConsoleError(...args);
 };
 
-if (!admin.getApps().length) {
-  admin.initializeApp();
+if (!getAdminApps().length) {
+  initAdminApp();
 }
 
 const PRIMARY_GCS_BUCKET = 'ai-studio-bucket-88134939798-europe-west2';
@@ -3012,7 +3012,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     if (cached) return cached;
   }
   const result = ((): { materialName: string; category?: string } => {
-  let rawName = unwrapSyntheticPrefixes(String(item.materialName || '').trim());
+  let rawName = unwrapSyntheticPrefixes(String(item.materialName || '').trim()).replace(/\s*\(1\.\s*Sınıf\s*GOST\)/gi, '').trim();
   let name = cleanRawMaterialName(rawName) || rawName;
   const rawOrig = unwrapSyntheticPrefixes(String(item.originalName || item.originalMaterialName || '').trim());
   const orig = cleanRawMaterialName(rawOrig) || rawOrig;
@@ -3230,8 +3230,11 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     const d = extractRebarDiameter(primaryText);
     if (d && STANDARD_REBAR_MAP[d]) {
       const checkGradeText = (effectiveOrig || primaryText).toLowerCase();
-      if (/катанка|а240|a240|гладк|düz\s*demir/i.test(checkGradeText) && !/а500|a500|nervür|nervur/i.test(checkGradeText)) {
-        return { materialName: `Düz İnşaat Demiri / Filmaşin A240 (Ø${d}mm)`, category: 'İnşaat Demiri' };
+      if (/катанка|filmaşin|filmasin/i.test(checkGradeText)) {
+        return { materialName: `Filmaşin Tel Çubuk (Катанка Ø${d}mm)`, category: 'İnşaat Demiri' };
+      }
+      if (/а240|a240|гладк|düz\s*demir/i.test(checkGradeText) && !/а500|a500|nervür|nervur/i.test(checkGradeText)) {
+        return { materialName: `Düz İnşaat Demiri A240 (Ø${d}mm)`, category: 'İnşaat Demiri' };
       }
       return { materialName: STANDARD_REBAR_MAP[d], category: 'İnşaat Demiri' };
     }
@@ -3518,9 +3521,15 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
   if (/термопленк/i.test(combined)) {
     return { materialName: 'Yazıcı Fırın Filmi (Термопленка CET / Kyocera Ecosys)', category: 'Bilgi İşlem & IT' };
   }
+  if (/виллафлекс|наплавляем[а-я]*\s+гидроизоляц.*виллафлекс/i.test(combined)) {
+    return {
+      materialName: 'Bitümlü Su Yalıtım Membranı Икопал Виллафлекс ЭПП 3.5 (10 m² Rulo)',
+      category: 'Yalıtım & Alçıpan'
+    };
+  }
   if (
     (combined.includes('пленка') || combined.includes('плёнка') || combined.includes('naylon') || combined.includes('стрейч') || combined.includes('strec')) &&
-    !/хомут|kablo\s*bağı|прокладк|conta|ламинирован|laminasyon|финишпленк|двер|коробк|наличник|kapı|pervaz|перчатк|eldiven/i.test(combined)
+    !/хомут|kablo\s*bağı|прокладк|conta|ламинирован|laminasyon|финишпленк|двер|коробк|наличник|kapı|pervaz|перчатк|eldiven|гидроизоляц|наплавляем|виллафлекс|техноэласт|унифлекс|биполь|линокром|бикрост|ультранап|пленка\s*\/\s*пленка/i.test(combined)
   ) {
     if (/стрейч|стретч|stretch|streç|strec|паллет|23\s*мкм|23\s*mkm|23\s*мкр|23\s*mkr|17\s*мкм|17\s*мкр/i.test(combined)) {
       return { materialName: 'Ambalaj Streç Film 500 mm (Rulo)', category: 'Sarf Malzeme & Hırdavat' };
@@ -3538,7 +3547,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     const isReinforced = /армирован/i.test(combined);
     const mkrMatch = (effectiveOrig || combined).match(/(?:^|[\s(,;/xх*×-])(80|100|120|150|200|250|300)\s*(?:мкм|мкр|микрон|mkr|mkm|mikron)/i);
     const uPriceFilm = Number(item.unitPrice) || 0;
-    const isLightGostFilm = !mkrMatch && /гост\s*10354/i.test(combined) && uPriceFilm > 0 && uPriceFilm < 1500;
+    const isLightGostFilm = !mkrMatch && /гост\s*10354/i.test(combined) && (!uPriceFilm || uPriceFilm < 1500);
     const mkr = mkrMatch ? `${mkrMatch[1]} mikron` : (isLightGostFilm ? '100 mikron GOST 10354' : '200 mikron');
     if (isPackaging) {
       return {
@@ -3931,49 +3940,25 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
 
-  // 3. Timber / Kereste / Брус / Доска (Ölçüsünü ve Ağaç Cinsini [Çam vs Kavak/Осина] Koru, aynı ölçüdeki çam keresteleri birleştir!)
+  // 3. Timber / Kereste / Брус / Доска (Tam kesit/ölçü, Standart [GOST vs TU], Kalite sınıfı [Sort 1/1-2/2/3], Nem/İşlem ve Ağaç Cinsini [Çam vs Kavak/Осина] koru!)
   if (
-    (primaryText.includes('брус') || primaryText.includes('kereste') || primaryText.includes('kalas') || primaryText.includes('доска обрезн') || primaryText.includes('kenarlı kereste')) &&
-    !/брусчатк|cam\s*yun|cam\s*yün|ursa|шлифовальн|магнитн|для\s*досок|yazı\s*tahtası|sehpa|statif|tripod|şemsiye|kilit|vida|саморез|testere|диск/i.test(combined)
+    (/(?:^|[^a-zа-яё0-9])(?:брус|брусок)(?![a-zа-яё0-9])/i.test(primaryText) || primaryText.includes('kereste') || primaryText.includes('kalas') || primaryText.includes('доска обрезн') || primaryText.includes('kenarlı kereste')) &&
+    !/брусчатк|брусков|перемычк|poritep|газобетон|cam\s*yun|cam\s*yün|ursa|шлифовальн|магнитн|для\s*досок|yazı\s*tahtası|sehpa|statif|tripod|şemsiye|kilit|vida|саморез|testere|диск/i.test(combined)
   ) {
-    const isOsina = /осина|(?:^|[^a-zа-яё0-9])(?:09о|01-09о)(?![a-zа-яё0-9])/i.test(combined);
-    const gradeTag = isOsina ? '(Kavak / Осина)' : '(1. Sınıf GOST)';
+    const techProfile = extractTechnicalStandardAndGrade(effectiveOrig, name);
+    const badgeStr = formatTechnicalVariantBadges(techProfile);
+    const suffix = badgeStr ? ` ${badgeStr}` : '';
 
-    // mm cinsinden 3 boyut: 50*200*6000, 100*100*6000, 50*100*6000, 50*150*6100
-    const mmDim = primaryText.match(/\b(\d{2,3})\s*[*xх×]\s*(\d{2,3})\s*[*xх×]\s*(\d{3,4})\b/);
-    if (mmDim) {
-      let d1 = parseInt(mmDim[1], 10);
-      let d2 = parseInt(mmDim[2], 10);
-      let d3 = parseInt(mmDim[3], 10);
-      if ((d3 >= 600 && d3 <= 620) || (d3 >= 6000 && d3 <= 6200)) d3 = 6000;
-      const a = Math.min(d1, d2);
-      const b = Math.max(d1, d2);
-      const dStr = `${a}x${b}x${d3}`;
+    if (techProfile.crossSectionDims && techProfile.crossSectionDims.split('x').length === 3) {
+      const dStr = techProfile.crossSectionDims;
+      const a = parseInt(dStr.split('x')[0], 10) || 50;
       const isBoard = primaryText.includes('доска') || primaryText.includes('tahta') || primaryText.includes('kalas') || a <= 50;
       return {
-        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${dStr} ${gradeTag}`,
+        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${dStr}${suffix}`,
         category: 'Ahşap & Kereste'
       };
     }
-    // cm veya metre karışık yazım: 5*10*600 CM, 5*10*610 CM, 5*20*610 CM, 10*10*600 CM, 50*100*6 MT
-    const cmDim = primaryText.match(/\b(\d{1,3})\s*[*xх×]\s*(\d{1,3})\s*[*xх×]\s*(\d{1,4})\s*(?:cm|см|mt|м|m)(?![a-zа-яё])/i);
-    if (cmDim) {
-      let d1 = parseInt(cmDim[1], 10);
-      let d2 = parseInt(cmDim[2], 10);
-      let d3 = parseInt(cmDim[3], 10);
-      if (d1 <= 25) d1 *= 10;
-      if (d2 <= 30) d2 *= 10;
-      if (d3 <= 10) d3 *= 1000;
-      else if ((d3 >= 500 && d3 <= 650) || (d3 >= 6000 && d3 <= 6200)) d3 = 6000;
-      const a = Math.min(d1, d2);
-      const b = Math.max(d1, d2);
-      const dStr = `${a}x${b}x${d3}`;
-      const isBoard = a <= 50;
-      return {
-        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${dStr} ${gradeTag}`,
-        category: 'Ahşap & Kereste'
-      };
-    }
+
     // 2 boyutlu Брус / Kereste (örn. "KERESTE 100x100 mm")
     const twoDim = primaryText.match(/\b(40|50|100|150|200)\s*[*xх×]\s*(50|100|150|200)\s*(?:мм|mm)(?![a-zа-яё*xх×])/i);
     if (twoDim) {
@@ -3983,11 +3968,14 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       const b = Math.max(d1, d2);
       const isBoard = a <= 50;
       return {
-        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${a}x${b}x6000 ${gradeTag}`,
+        materialName: `${isBoard ? 'Kenarlı Kereste Tahta' : 'Profil Kereste'} ${a}x${b}x6000${suffix}`,
         category: 'Ahşap & Kereste'
       };
     }
-    return { materialName: `İnşaatlık Çam Kereste ${gradeTag}`, category: 'Ahşap & Kereste' };
+    return {
+      materialName: `İnşaatlık Kereste${suffix}`,
+      category: 'Ahşap & Kereste'
+    };
   }
 
   // 3.1 L-KÖŞEBENT DEMİR (Уголок стальной / KOSEBENT SIYAH)
@@ -4117,13 +4105,19 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       const py = meshM[2];
       const wd = meshM[3].replace(',', '.');
       return {
-        materialName: `Çelik Hasır ${px}x${py}x${wd} mm (Вр-1 GOST 23279)`,
+        materialName: `Çelik Hasır ${px}x${py}x${wd} mm`,
         category: 'İnşaat Demiri'
       };
     }
   }
 
   // 3.6 GAZBETON BLOK, GAZBETON LENTO (Перемычка), 1NF TUĞLA & GAZBETON YAPIŞTIRICISI (Rende/Рубанок, Dübel, Mala ve Testere hariç!)
+  if (/(?:^|[^а-яё])черенок/i.test(effectiveOrig || primaryText)) {
+    return {
+      materialName: 'Ahşap Kürek / Alet Sapı (Черенок)',
+      category: 'El Aletleri & Hırdavat'
+    };
+  }
   if (/рубанок|rende\b/i.test(primaryText) && /газобетон|gazbeton|gaz\s*beton|гипсокартон|alçıpan|alcipan|гкл/i.test(primaryText)) {
     const isGypsumRasp = /гипсокартон|alçıpan|alcipan|гкл|кромочн/i.test(primaryText);
     return {
@@ -7252,6 +7246,7 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
           const prizmaCode = String(item.materialCode || '').trim().toUpperCase();
           if (prizmaCode) {
             const codeKey = prizmaCodeKeyMap.get(prizmaCode);
+            const itemSpecSig = extractSpecSignatureForUnit(String(item.originalName || item.materialName || ''), String(item.unit || ''));
             if (codeKey && codeKey !== canonKey && preMaterialMap.has(codeKey)) {
               const codeGroup = preMaterialMap.get(codeKey)!;
               const unitNormForCode = normalizeStandardUnit(item.unit || 'Adet');
@@ -7259,7 +7254,10 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
               const codeRatio = refForCode && refForCode.priceNum > 0 && priceNum > 0
                 ? Math.max(refForCode.priceNum, priceNum) / Math.min(refForCode.priceNum, priceNum)
                 : 1;
-              if (codeRatio <= 2.5) {
+              const refSpecSig = refForCode
+                ? extractSpecSignatureForUnit(String(refForCode.item?.originalName || refForCode.item?.materialName || ''), String(refForCode.unit || ''))
+                : null;
+              if (codeRatio <= 2.5 && (!refSpecSig || getSpecConflicts(refSpecSig, itemSpecSig).length === 0)) {
                 canonKey = codeKey;
                 linkedByPrizmaCode = true;
               }
@@ -7282,7 +7280,11 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
             const ratio = refEntry && refEntry.priceNum > 0 && priceNum > 0
               ? Math.max(refEntry.priceNum, priceNum) / Math.min(refEntry.priceNum, priceNum)
               : 1;
-            if (existingCanonKey === canonKey || ratio <= 2.5) {
+            const itemBridgeSig = extractSpecSignatureForUnit(String(item.originalName || item.materialName || ''), String(item.unit || ''));
+            const refBridgeSig = refEntry
+              ? extractSpecSignatureForUnit(String(refEntry.item?.originalName || refEntry.item?.materialName || ''), String(refEntry.unit || ''))
+              : null;
+            if ((existingCanonKey === canonKey || ratio <= 2.5) && (!refBridgeSig || getSpecConflicts(refBridgeSig, itemBridgeSig).length === 0)) {
               if (!existingGroup.locked && scoreTurkishMaterialName(canonName) > scoreTurkishMaterialName(existingGroup.canonName)) {
                 existingGroup.canonName = canonName;
                 existingGroup.canonCat = canonCat;
@@ -7382,7 +7384,11 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
         const partNames = part.entries.map((e: any) => String(e.item?.materialName || '').trim()).filter(Boolean);
         const ownName = partNames.length > 0 && partNames.every((n: string) => n === partNames[0]) ? partNames[0] : '';
         const partBase = ownName && !part.entries.some((e: any) => String(e.item?.materialName || '').trim() === grp.canonName) ? ownName : grp.canonName;
-        let partName = `${partBase} [${part.label}]`;
+        const missingLabelTokens = part.label
+          .split(', ')
+          .map(s => s.trim())
+          .filter(s => s && !partBase.toLowerCase().includes(s.toLowerCase()));
+        let partName = missingLabelTokens.length > 0 ? `${partBase} [${missingLabelTokens.join(', ')}]` : partBase;
         if (part.label === 'Spesifikasyon Belirtilmemiş') {
           partName = `${grp.canonName.replace(/\s*\(\s*\d+(?:[.,]\d+)?\s*mikron[^)]*\)/i, ' (mikron belirtilmemiş)')} [${part.label}]`;
         }

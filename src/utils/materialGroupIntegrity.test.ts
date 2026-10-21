@@ -87,4 +87,32 @@ console.log('✓ Blok ≠ agrega, SBS astar ≠ bitüm astar');
   console.log('✓ Segment etiketi isimden okunuyor; Leica ≠ alçıpan');
 }
 
+// 10. Kereste GOST vs TU, Sort 1 vs Sort 1-2 vs Sort 2 ve Kavak (Осина) vs Çam ayrımı
+{
+  assert.equal(
+    areSpecSignaturesCompatible(
+      '01-14Г Доска обрезная ЕВ 50*200*6000 (сорт-1, ГОСТ) 16шт. в 1м.куб, 60шт/пач. профилир.',
+      '01-09О Доска обрезная ЕВ 50*200*6000 (сорт-1, ТУ) 16шт. в 1м.куб, Осина профилир.'
+    ),
+    false,
+    'GOST Pine must never be compatible with TU Aspen'
+  );
+  assert.equal(
+    areSpecSignaturesCompatible(
+      '01-14Г Доска обрезная ЕВ 50*200*6000 (сорт-1, ГОСТ)',
+      '01-102Г Доска обрезная ЕВ 50*200*6000, ГОСТ (сорт 1-2)'
+    ),
+    false,
+    'Sort-1 must never be compatible with Sort 1-2'
+  );
+  const splitTimber = split([
+    { o: '01-14Г Доска обрезная ЕВ 50*200*6000 (сорт-1, ГОСТ) 16шт. в 1м.куб', u: 'M3' },
+    { o: '01-09О Доска обрезная ЕВ 50*200*6000 (сорт-1, ТУ) Осина', u: 'M3' },
+    { o: '01-102Г Доска обрезная ЕВ 50*200*6000, ГОСТ (сорт 1-2)', u: 'M3' }
+  ]);
+  assert.equal(splitTimber.length, 3, 'GOST Sort-1, TU Sort-1 Aspen, and GOST Sort 1-2 must split into 3 groups');
+  console.log('✓ Kereste GOST / TU / Sort-1 / Sort 1-2 / Kavak(Осина) kesin olarak ayrıldı');
+}
+
 console.log('>>> ALL GROUP INTEGRITY TESTS PASSED <<<');
+

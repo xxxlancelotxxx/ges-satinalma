@@ -1,6 +1,6 @@
 {
-  "summary":  "Hızlı Ön Onay Fiyat Denetimi ve Şef İndirim & TDF Teklif Merkezi sekmelerindeki yanlış/halüsinasyonlu fiyat eşleştirmelerinin (örn. Fatura 3262'deki 1.477,38 ₽ panç kaleminin 296 ₽ matkap ucu ile eşleşmesi) kök nedenlerini gideren ve tüm modülleri Admin Fiyat Anomali Denetimi'ndeki birebir orijinal Rusça + tüm teknik/sayısal parametre eşleştirme motoruna bağlayan uygulama planı.",
-  "updatedAt":  "2026-10-20T16:05:18.446158765Z",
+  "summary":  "Tüm yapı malzemesi kategorilerinde (Çelik, Kablo, Hasır Çelik, Yalıtım, Membran, Polietilen Film, Kontrplak, Bağlantı Elemanları, El Aletleri ve KKD) 4 denetim panelinin tamamında (Hızlı Ön Onay, Malzeme Karşılaştırma, Anomali Fiyat Artış ve Admin Fiyat Anomali) GOST/TU ayrımı, kalite/mukavemet sınıfı, gövde/kaplama tipi ve rulo/paket hacim-metraj eşitliğini zorunlu kılan Evrensel Elma-Elma Teknik Varyant Mimarisi planı.",
+  "updatedAt":  "2026-10-21T11:27:46.239272162Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

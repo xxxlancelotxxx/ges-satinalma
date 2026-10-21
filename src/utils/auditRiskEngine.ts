@@ -2,6 +2,11 @@ import {
   convertMaterialUnit,
   normalizeStandardUnit
 } from './constructionUnitConverter';
+import {
+  extractTechnicalStandardAndGrade,
+  areTechnicalVariantsCompatible,
+  formatTechnicalVariantBadges
+} from './materialGroupIntegrity';
 
 export const EXCESSIVE_DISCOUNT_THRESHOLD = 35;
 
@@ -222,13 +227,22 @@ export function evaluateDiscountAudit(
         continue;
       }
 
-      // Exact canonical material match only (never substring match!)
+      const itemVariant = extractTechnicalStandardAndGrade(
+        item.originalName || item.originalMaterialName || '',
+        item.description || item.materialName || ''
+      );
+
+      // Exact canonical material match only (never substring match!) + Technical Variant Lock (GOST/TU, Sort 1/2/3, Moisture, Species, Cross-Section)
       const comp = comparisons.find((v: any) => {
         if (!v?.materialName) return false;
         const vName = v.materialName.toLowerCase().trim();
-        const vBase = vName.replace(/\s*\([^)]+\)\s*$/, '').trim();
-        const dBase = desc.replace(/\s*\([^)]+\)\s*$/, '').trim();
-        return vName === desc || (vBase.length >= 6 && vBase === dBase && !/\b\d+/.test(vName.replace(vBase, '')) && !/\b\d+/.test(desc.replace(dBase, '')));
+        const vBase = vName.replace(/\s*\([^)]+\)\s*$/, '').replace(/\s*\[[^\]]+\]/g, '').trim();
+        const dBase = desc.replace(/\s*\([^)]+\)\s*$/, '').replace(/\s*\[[^\]]+\]/g, '').trim();
+        const baseMatch = vName === desc || (vBase.length >= 6 && vBase === dBase && !/\b\d+/.test(vName.replace(vBase, '')) && !/\b\d+/.test(desc.replace(dBase, '')));
+        if (!baseMatch) return false;
+        const vSampleOrig = Array.isArray(v.history) && v.history[0]?.originalName ? v.history[0].originalName : '';
+        const vVariant = extractTechnicalStandardAndGrade(vSampleOrig, v.materialName);
+        return areTechnicalVariantsCompatible(itemVariant, vVariant).compatible;
       });
       if (!comp) continue;
       const hasHistory = Array.isArray(comp.history) && comp.history.length >= 2;
@@ -258,7 +272,7 @@ export function evaluateDiscountAudit(
         let benchmarkMax = 0;
 
         if (hasHistory) {
-          // Sadece kendisi dışındaki ve bu faturadan ÖNCE veya aynı dönemde alınmış emsal faturaları baz al
+          // Sadece kendisi dışındaki, bu faturadan ÖNCE veya aynı dönemde alınmış ve teknik varyantı (GOST/TU, Sort 1/2/3, Nem, Kesit) uyumlu emsal faturaları baz al
           const otherHistory = comp.history.filter((h: any) => {
             const hPrice = Number(h.normalizedUnitPrice || h.unitPrice || 0);
             if (hPrice <= 0) return false;
@@ -268,6 +282,11 @@ export function evaluateDiscountAudit(
               // Kendisinden >15 gün sonra alınmış gelecekteki faturaları geçmiş baz fiyatı yapma
               if (hMs > curDateMs + 15 * 86400000) return false;
             }
+            const hVariant = extractTechnicalStandardAndGrade(
+              h.rawOriginalName || h.originalName || '',
+              h.rawMaterialName || comp.materialName || ''
+            );
+            if (!areTechnicalVariantsCompatible(itemVariant, hVariant).compatible) return false;
             return true;
           });
 
@@ -288,11 +307,14 @@ export function evaluateDiscountAudit(
           if (diff > 35 && (effectivePrice - benchmarkAvg) * (conv.conversionApplied ? conv.convertedQuantity : itemQty) >= 5000) {
             isSuspiciousPrice = true;
             const convNote = conv.conversionApplied ? ` (${itemPrice} ₽/${itemUnit} -> normalize: ${effectivePrice} ₽/${benchmarkUnit} [${conv.formula}])` : '';
+            const badgeStr = formatTechnicalVariantBadges(itemVariant);
+            const rawDisplayMat = item.description || item.materialName || comp.materialName;
+            const displayMat = badgeStr && !rawDisplayMat.includes(badgeStr) ? `${rawDisplayMat} ${badgeStr}` : rawDisplayMat;
             auditFlags.push(
-              `'${item.description || item.materialName}' birim fiyatı (${effectivePrice.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} ₽/${benchmarkUnit}${convNote}) emsal piyasa ortalamasından (${benchmarkAvg.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} ₽/${benchmarkUnit}) %${diff.toFixed(1)} daha yüksek.`
+              `'${displayMat}' birim fiyatı (${effectivePrice.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} ₽/${benchmarkUnit}${convNote}) emsal piyasa ortalamasından (${benchmarkAvg.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} ₽/${benchmarkUnit}) %${diff.toFixed(1)} daha yüksek.`
             );
             benchmarkComparison = {
-              materialName: item.description || item.materialName,
+              materialName: displayMat,
               unit: benchmarkUnit,
               offeredUnitPrice: effectivePrice,
               currentUnitPrice: effectivePrice,

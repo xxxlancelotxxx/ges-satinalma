@@ -1,13 +1,18 @@
-import { extractOriginalBrandAndSeries } from './materialGroupIntegrity';
+import {
+  extractOriginalBrandAndSeries,
+  extractTechnicalStandardAndGrade,
+  areTechnicalVariantsCompatible,
+  TechnicalVariantProfile
+} from './materialGroupIntegrity';
 import { analyzeMaterialSegment } from './materialSegmentIntelligence';
 
 /**
  * Anomali / fiyat artışı paneli için "gerçekten aynı ürün mü?" kapısı.
  *
  * Katalog (catalogKey) iki fatura satırını aynı malzeme grubuna koyar; bu modül
- * o grubun içinde orijinal fatura metnine bakarak farklı marka, farklı model kodu
- * veya farklı varyant (nem dayanımlı, acil durum, ağaç türü…) olan satırları ayırır.
- * Böylece "Knauf'a karşı Volma" gibi marka farkları fiyat artışı diye gösterilmez.
+ * o grubun içinde orijinal fatura metnine bakarak farklı marka, farklı model kodu,
+ * farklı teknik standart (ГОСТ vs ТУ), kalite sınıfı (Сорт 1/2/3), işlem/nem durumu
+ * veya farklı kesit/ölçü olan satırları ayırır.
  */
 
 export interface ProductIdentity {
@@ -22,6 +27,8 @@ export interface ProductIdentity {
   /** Donatı çapı (mm) */
   rebarDiameter?: string;
   variants: Set<string>;
+  /** Teknik standart (GOST/TU), kalite sınıfı (Sort 1/2/3), nem/işlem, ağaç türü ve kesit profili */
+  techVariant: TechnicalVariantProfile;
   isCommodity: boolean;
   /** Ürün adının ilk kelimesinin kökü (лопата → лопат) */
   headRoot?: string;
@@ -51,7 +58,7 @@ const VARIANT_MARKERS: Array<{ key: string; pattern: RegExp }> = [
 ];
 
 // Tek harf + sayı (D600, M10, B5, W8, F150, A500) ve standart/özellik kısaltmaları model kodu değildir
-const SPEC_TOKEN_RE = /^(?:[a-zа-я]\d+(?:[.,]\d+)?[a-zа-я]?|ip\d+|ral\d+|sn\d+|cri\d*|гост\d*|din\d*|ту\d*|сорт\d*|\d+в\d+)$/i;
+const SPEC_TOKEN_RE = /^(?:[a-zа-я]\d+(?:[.,]\d+)?[a-zа-я]?|ip\d+|ral\d+|sn\d+|cri\d*|гост\d*|din\d*|ту\d*|сорт\d*|\d+в\d+|01-\d+[а-яa-z]|09[оo])$/i;
 const UNIT_SUFFIX_RE = /^\d+(?:[.,]\d+)?(?:-\d+(?:[.,]\d+)?)?(?:мм|mm|см|cm|м|m|кг|kg|л|l|мл|ml|в|v|а|a|вт|w|квт|kw|мкр|мкм|шт|м2|м3|т|кв|кн|мпа|ч)$/i;
 
 function normalize(text: string): string {
@@ -132,6 +139,7 @@ export function getProductIdentity(originalName: string, materialName = '', cate
   for (const marker of VARIANT_MARKERS) {
     if (marker.pattern.test(text)) variants.add(marker.key);
   }
+  const techVariant = extractTechnicalStandardAndGrade(originalName, materialName);
   const segment = analyzeMaterialSegment(materialName, originalName, category);
   return {
     text,
@@ -141,6 +149,7 @@ export function getProductIdentity(originalName: string, materialName = '', cate
     grades: extractGrades(text),
     rebarDiameter: extractRebarDiameter(text),
     variants,
+    techVariant,
     isCommodity: brandInfo.isCommodity || segment.comparisonMode === 'COMMODITY_STANDARD',
     ...extractRoots(text),
     length: extractExplicitLength(text)
@@ -173,6 +182,12 @@ function shareAny(a: Set<string>, b: Set<string>): boolean {
 }
 
 export function compareProductIdentities(a: ProductIdentity, b: ProductIdentity): SameProductVerdict {
+  // 0. Teknik Standart (GOST vs TU), Kalite Sınıfı (Sort 1/2/3), Nem/İşlem, Ağaç Türü ve Kesit/Ölçü kilidi
+  const techVerdict = areTechnicalVariantsCompatible(a.techVariant, b.techVariant);
+  if (!techVerdict.compatible) {
+    return { same: false, reason: techVerdict.conflictReason };
+  }
+
   // 1. Varyant farkı (nem dayanımlı / normal, acil durum / normal, kavak / çam…)
   for (const v of a.variants) if (!b.variants.has(v)) return { same: false, reason: `varyant farkı: ${v}` };
   for (const v of b.variants) if (!a.variants.has(v)) return { same: false, reason: `varyant farkı: ${v}` };
@@ -205,7 +220,7 @@ export function compareProductIdentities(a: ProductIdentity, b: ProductIdentity)
     return { same: false, reason: `markalı ⟷ markasız: ${a.dictionaryBrand || b.dictionaryBrand}` };
   }
 
-  // GOST/DIN emtiada (demir, kereste, agrega) üretici kodu kıyası yapılmaz
+  // GOST/DIN emtiada (demir, kereste, agrega) üretici kodu kıyası yapılmaz (ancak yukarıdaki 0. adımda GOST/TU, Sort 1/2/3 ve kesit kontrolü zaten yapıldı!)
   if (a.isCommodity && b.isCommodity) return { same: true };
 
   // 5b. Ürün adı başka bir şey: iki tarafın baş kelimesi de diğer metinde geçmiyor (Вентилятор ⟷ Рукав гофра)
@@ -230,37 +245,42 @@ export function compareProductIdentities(a: ProductIdentity, b: ProductIdentity)
 }
 
 export function isSameProductForPriceAlert(
-  a: { originalName?: string },
-  b: { originalName?: string },
+  a: { originalName?: string; materialName?: string },
+  b: { originalName?: string; materialName?: string },
   materialName: string,
   category?: string
 ): SameProductVerdict {
-  // Orijinal metin yoksa elimizdeki tek kimlik katalog grubudur
-  if (!a?.originalName || !b?.originalName) return { same: true };
+  const origA = a?.originalName || a?.materialName || '';
+  const origB = b?.originalName || b?.materialName || '';
+  if (!origA || !origB) return { same: true };
   return compareProductIdentities(
-    getProductIdentity(a.originalName, materialName, category),
-    getProductIdentity(b.originalName, materialName, category)
+    getProductIdentity(origA, a?.materialName || materialName, category),
+    getProductIdentity(origB, b?.materialName || materialName, category)
   );
 }
 
 /**
  * Bir katalog grubunun satırlarını "aynı ürün" kümelerine ayırır.
- * Her satır, temsilcisiyle (kümenin ilk satırı) aynı ürün olan ilk kümeye girer.
+ * Her satır, kümedeki TÜM mevcut satırlarla uyumlu olduğu ilk kümeye girer
+ * (böylece standart belirtilmemiş bir kayıt GOST ve TU kayıtlarını aynı kümeye köprüleyemez).
  */
-export function clusterSameProductRows<T extends { originalName?: string }>(
+export function clusterSameProductRows<T extends { originalName?: string; materialName?: string }>(
   rows: T[],
   materialName: string,
   category?: string
 ): T[][] {
-  const clusters: Array<{ rep: ProductIdentity | null; rows: T[] }> = [];
+  const clusters: Array<{ identities: ProductIdentity[]; rows: T[] }> = [];
   for (const row of rows) {
-    const identity = row.originalName ? getProductIdentity(row.originalName, materialName, category) : null;
-    const target = clusters.find(c => !identity || !c.rep || compareProductIdentities(c.rep, identity).same);
+    const rawOrig = row.originalName || row.materialName || '';
+    const identity = rawOrig ? getProductIdentity(rawOrig, row.materialName || materialName, category) : null;
+    const target = clusters.find(c =>
+      !identity || c.identities.every(existing => compareProductIdentities(existing, identity).same)
+    );
     if (target) {
       target.rows.push(row);
-      if (!target.rep && identity) target.rep = identity;
+      if (identity) target.identities.push(identity);
     } else {
-      clusters.push({ rep: identity, rows: [row] });
+      clusters.push({ identities: identity ? [identity] : [], rows: [row] });
     }
   }
   return clusters.map(c => c.rows);

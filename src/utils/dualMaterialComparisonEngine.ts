@@ -1,7 +1,14 @@
 import { MaterialComparison } from '../types';
 import { analyzeMaterialSegment, MaterialQualitySegment } from './materialSegmentIntelligence';
-import { extractSpecSignature, getSpecConflicts, extractOriginalBrandAndSeries } from './materialGroupIntegrity';
+import {
+  extractSpecSignature,
+  getSpecConflicts,
+  extractOriginalBrandAndSeries,
+  extractTechnicalStandardAndGrade,
+  formatTechnicalVariantBadges
+} from './materialGroupIntegrity';
 import { normalizeCategoryName } from './categoryClassifier';
+import { clusterSameProductRows } from './sameMaterialGuard';
 
 export type DualComparisonLens = 'MODE_1_APPLE_TO_APPLE' | 'MODE_2_BRAND_EQUIVALENT';
 
@@ -875,7 +882,7 @@ const ORIGINAL_PRODUCT_FAMILY_RULES: Array<{
     titleRu: 'Пиломатериалы: Доска обрезная / Брус / Фанера ФСФ',
     titleTr: 'İnşaatlık Kereste, Kalas & Kalıplık Kontrplak',
     isCommodity: true,
-    pattern: /доска\s*обрезн|брус\s*(?:обрезн|деревян|\d)|фанера\s*(?:фсф|фоф|ламинир|березов)/i
+    pattern: /доска\s*обрезн|(?:^|[^а-яa-z0-9])(?:брус|брусок|пиломатериал|kereste|kalas)(?![а-яa-z0-9])|фанера\s*(?:фсф|фоф|фк|ламинир|березов)/i
   }
 ];
 
@@ -934,8 +941,11 @@ export function buildSmartOriginalSignature(params: {
     canonicalFamilyKey = stripped ? `FAM_${stripped.toUpperCase()}` : `FAM_${(params.category || 'GEN').toUpperCase()}`;
   }
 
+  const techProfile = extractTechnicalStandardAndGrade(rawOrig, fallbackMat);
   const formattedBrandDisplay = isCommodity
-    ? 'GOST / DIN Standart (Marka Bağımsız)'
+    ? (techProfile.standardType === 'TU'
+        ? 'TU Standart (Teknik Şartname)'
+        : 'GOST / DIN Standart (Marka Bağımsız)')
     : brandInfo.subSeries && !brandInfo.brandDisplay.toLowerCase().includes(brandInfo.subSeries.toLowerCase())
       ? `${brandInfo.brandDisplay} • ${brandInfo.subSeries}`
       : brandInfo.brandDisplay;
@@ -948,7 +958,7 @@ export function buildSmartOriginalSignature(params: {
     canonicalFamilyTitleTr,
     canonicalSpecKey: geoSpecs.specKey,
     canonicalSpecLabel: geoSpecs.specLabel,
-    canonicalBrandKey: isCommodity ? 'COMMODITY_GOST' : brandInfo.brandKey,
+    canonicalBrandKey: isCommodity ? (techProfile.standardType === 'TU' ? 'COMMODITY_TU' : 'COMMODITY_GOST') : brandInfo.brandKey,
     canonicalBrandDisplay: formattedBrandDisplay,
     subBrandOrSeries: brandInfo.subSeries,
     qualitySegment: isCommodity ? 'COMMODITY' : brandInfo.tier,
@@ -1039,17 +1049,102 @@ export function buildMode1AppleToAppleComparisons(
     // Check if commodity
     const isGroupCommodity = annotatedHistory.every(x => x.sig.isCommodity);
     if (isGroupCommodity) {
+      // Emtia gruplarında bile GOST vs TU, Sort 1 vs Sort 1-2 vs Sort 2, Kavak vs Çam, Fırın Kurusu vs Doğal Nem ayrı satır olarak listelenir
+      const techClusters = clusterSameProductRows(history, comp.materialName, comp.category);
+      if (techClusters.length > 1) {
+        techClusters.forEach((subHistory, cIdx) => {
+          const sampleOrig = subHistory.find(h => h.originalName)?.originalName || '';
+          const techProf = extractTechnicalStandardAndGrade(sampleOrig, comp.materialName);
+          const badgeStr = formatTechnicalVariantBadges(techProf);
+          const cleanBase = comp.materialName.replace(/\s*\(1\.\s*Sınıf\s*GOST\)/gi, '').trim();
+          const missingBadges = techProf.badges.filter(b => !cleanBase.toLowerCase().includes(b.toLowerCase()));
+          const clusterMatName = missingBadges.length > 0
+            ? `${cleanBase} ${missingBadges.map(b => `[${b}]`).join(' ')}`.trim()
+            : (badgeStr && !cleanBase.includes(badgeStr) ? `${cleanBase} ${badgeStr}`.trim() : cleanBase);
+
+          let totalSpend = 0;
+          let totalNetSpend = 0;
+          let totalQty = 0;
+          subHistory.forEach(h => {
+            const qty = Number(h.normalizedQuantity ?? h.quantity) || 0;
+            const price = Number(h.normalizedUnitPrice ?? h.unitPrice) || 0;
+            const spend = (Number(h.originalUnitPrice ?? price) || 0) * (Number(h.originalQuantity ?? qty) || 1);
+            const netPrice = Number((h as any).originalNetUnitPrice ?? h.unitPriceNet) || 0;
+            totalSpend += spend;
+            totalNetSpend += netPrice * (Number(h.originalQuantity ?? qty) || 1);
+            totalQty += qty;
+          });
+          const unitPrices = subHistory.map(h => Number(h.normalizedUnitPrice ?? h.unitPrice) || 0).filter(p => p > 0);
+          const minUnitPrice = unitPrices.length > 0 ? Math.min(...unitPrices) : 0;
+          const maxUnitPrice = unitPrices.length > 0 ? Math.max(...unitPrices) : 0;
+          const avgUnitPrice = totalQty > 0 ? totalSpend / totalQty : (unitPrices.length > 0 ? unitPrices.reduce((a, b) => a + b, 0) / unitPrices.length : 0);
+          const priceDiffPct = minUnitPrice > 0 && maxUnitPrice > minUnitPrice
+            ? Math.round(((maxUnitPrice - minUnitPrice) / minUnitPrice) * 100)
+            : 0;
+          const cheapestEntry = subHistory.find(h => (Number(h.normalizedUnitPrice ?? h.unitPrice) || 0) === minUnitPrice);
+          const priciestEntry = subHistory.find(h => (Number(h.normalizedUnitPrice ?? h.unitPrice) || 0) === maxUnitPrice);
+          const writings = Array.from(new Set(subHistory.map(h => h.originalName).filter(Boolean))) as string[];
+          const grossStats = computeGrossStats(subHistory);
+          const stdLabel = techProf.standardType === 'TU' ? 'TU Standart (Teknik Şartname)' : 'GOST / DIN Standart (Marka Bağımsız)';
+          const subSig = buildSmartOriginalSignature({
+            originalName: sampleOrig,
+            materialName: clusterMatName,
+            category: comp.category,
+            unit: subHistory[0]?.unit || comp.unit,
+            unitPrice: subHistory[0]?.normalizedUnitPrice ?? subHistory[0]?.unitPrice
+          });
+
+          result.push({
+            ...comp,
+            id: `${comp.id || comp.materialName}__TECH_${cIdx + 1}_${techProf.variantKey || cIdx}`,
+            materialName: clusterMatName,
+            history: subHistory,
+            totalQuantityPurchased: Number(totalQty.toFixed(2)),
+            totalSpend: Math.round(totalSpend),
+            minUnitPrice: Number(minUnitPrice.toFixed(2)),
+            maxUnitPrice: Number(maxUnitPrice.toFixed(2)),
+            averageUnitPrice: Number(avgUnitPrice.toFixed(2)),
+            avgUnitPrice: Number(avgUnitPrice.toFixed(2)),
+            minGrossUnitPrice: grossStats.minGrossUnitPrice,
+            maxGrossUnitPrice: grossStats.maxGrossUnitPrice,
+            avgGrossUnitPrice: grossStats.avgGrossUnitPrice,
+            minNetUnitPrice: grossStats.minNetUnitPrice,
+            maxNetUnitPrice: grossStats.maxNetUnitPrice,
+            avgNetUnitPrice: totalQty > 0 && totalNetSpend > 0 ? Number((totalNetSpend / totalQty).toFixed(2)) : grossStats.avgNetUnitPrice,
+            priceDifferencePercentage: priceDiffPct,
+            cheapestJobsite: cheapestEntry?.jobsiteName || comp.cheapestJobsite,
+            cheapestJobsiteName: cheapestEntry?.jobsiteName || comp.cheapestJobsiteName,
+            priciestJobsite: priciestEntry?.jobsiteName || comp.priciestJobsite,
+            priciestJobsiteName: priciestEntry?.jobsiteName || comp.priciestJobsiteName,
+            smartSignature: subSig,
+            mergedOriginalWritings: writings,
+            detectedBrandDisplay: stdLabel,
+            isBrandSeparatedInMode1: true
+          });
+        });
+        return;
+      }
+
+      const sampleOrig = history.find(h => h.originalName)?.originalName || '';
+      const techProf = extractTechnicalStandardAndGrade(sampleOrig, comp.materialName);
+      const cleanBase = comp.materialName.replace(/\s*\(1\.\s*Sınıf\s*GOST\)/gi, '').trim();
+      const missingBadges = techProf.badges.filter(b => !cleanBase.toLowerCase().includes(b.toLowerCase()));
+      const finalCommodityName = (techProf.isTimber && missingBadges.length > 0)
+        ? `${cleanBase} ${missingBadges.map(b => `[${b}]`).join(' ')}`.trim()
+        : cleanBase;
+      const stdLabel = techProf.standardType === 'TU' ? 'TU Standart (Teknik Şartname)' : 'GOST / DIN Standart (Marka Bağımsız)';
       const writings = Array.from(new Set(annotatedHistory.map(x => x.h.originalName).filter(Boolean))) as string[];
       const grossStats = computeGrossStats(history);
       result.push({
         ...comp,
+        materialName: finalCommodityName,
         history,
         minGrossUnitPrice: comp.minGrossUnitPrice ?? grossStats.minGrossUnitPrice,
         maxGrossUnitPrice: comp.maxGrossUnitPrice ?? grossStats.maxGrossUnitPrice,
         avgGrossUnitPrice: comp.avgGrossUnitPrice ?? grossStats.avgGrossUnitPrice,
         smartSignature: annotatedHistory[0]?.sig,
         mergedOriginalWritings: writings,
-        detectedBrandDisplay: 'GOST / DIN Standart (Marka Bağımsız)',
+        detectedBrandDisplay: stdLabel,
         isBrandSeparatedInMode1: false
       });
       return;

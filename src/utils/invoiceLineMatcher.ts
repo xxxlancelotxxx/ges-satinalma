@@ -1,4 +1,5 @@
 import { buildStrictOriginalMaterialSignature } from './preApprovalAuditEngine';
+import { extractTechnicalStandardAndGrade, areTechnicalVariantsCompatible } from './materialGroupIntegrity';
 
 export interface MatchableInvoiceLine {
   materialName?: string;
@@ -87,6 +88,13 @@ export function lineMatchScore(a: MatchableInvoiceLine, b: MatchableInvoiceLine)
     return artA === artB ? 1.0 : 0.0;
   }
 
+  // 1.5 Teknik standart (GOST vs TU), kalite sınıfı (Sort 1/2/3), nem/işlem, ağaç türü ve tam kesit kontrolü
+  const techA = extractTechnicalStandardAndGrade(a.originalName || '', a.materialName || '');
+  const techB = extractTechnicalStandardAndGrade(b.originalName || '', b.materialName || '');
+  if (!areTechnicalVariantsCompatible(techA, techB).compatible) {
+    return 0.0;
+  }
+
   // 2. Orijinal dil (Rusça) tam imza kontrolü
   const strictA = buildStrictOriginalMaterialSignature({
     originalName: a.originalName,
@@ -99,6 +107,9 @@ export function lineMatchScore(a: MatchableInvoiceLine, b: MatchableInvoiceLine)
     brand: b.brand
   });
   if (strictA && strictB) {
+    if (!areTechnicalVariantsCompatible(strictA.techVariant, strictB.techVariant).compatible) {
+      return 0.0;
+    }
     if (strictA.exactKey === strictB.exactKey) {
       if (strictA.gostKey && strictB.gostKey && strictA.gostKey !== strictB.gostKey) return 0.0;
       return 1.0;

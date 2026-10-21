@@ -332,7 +332,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
 
   const toggleCategoryCollapse = (catName: string) => {
     setCollapsedCategories(prev => {
-      const isCurrentlyCollapsed = prev[catName] === true;
+      const isCurrentlyCollapsed = prev[catName] !== false;
       return {
         ...prev,
         [catName]: !isCurrentlyCollapsed
@@ -3041,7 +3041,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                 onClick={() => {
                   setSelectedCategory(cat);
                   // Ensure this category is expanded in grouped mode
-                  if (collapsedCategories[cat]) {
+                  if (collapsedCategories[cat] !== false) {
                     toggleCategoryCollapse(cat);
                   }
                 }}
@@ -3369,7 +3369,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
           ) : (
             Object.entries(groupedFilteredMaterials).map(([catName, rawList]) => {
               const matList = rawList as MaterialComparison[];
-              const isCatCollapsed = collapsedCategories[catName] === true;
+              const isCatCollapsed = collapsedCategories[catName] !== false;
               const catTotalSpend = matList.reduce((acc, curr) => acc + curr.totalSpend, 0);
               const catMaxGap = Math.max(...matList.map(m => m.priceDifferencePercentage));
 
