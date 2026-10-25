@@ -674,6 +674,8 @@ export interface CheaperHistoricalBenchmark {
   historicalPrizmaDemandId?: number | string;
   historicalPrizmaUrl?: string;
   historicalSource: 'GES_ARCHIVE' | 'PRIZMA_ERP';
+  /** Aynı malzemenin bulunan (kayıttan önceki, belgeyle doğrulanmış) geçmiş alım sayısı */
+  historicalPurchasesCount?: number;
   unitOverpayment: number;
   totalLineOverpayment: number;
   overpaymentPercentage: number;

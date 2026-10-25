@@ -13,21 +13,32 @@
 
 import { InvoiceRecord, InvoiceItem, DiscountRecord } from '../types';
 import { processItem, ProcessItemInput, ProcessedItemResult } from './aiDecisionEngine';
-import { normalizeUnit, normalizeQuantityAndPrice, extractTechnicalSpecs } from './comparativeCalculation';
-import {
-  areSpecSignaturesCompatible,
-  extractTechnicalStandardAndGrade,
-  areTechnicalVariantsCompatible,
-  formatTechnicalVariantBadges,
-  TechnicalVariantProfile
-} from './materialGroupIntegrity';
+import { extractTechnicalSpecs } from './comparativeCalculation';
+import { formatTechnicalVariantBadges } from './materialGroupIntegrity';
 import { comparisonMultiplierForVat } from './vatBasis';
 import {
   buildSmartOriginalSignature,
-  buildMode2CrossBrandFamilies,
   findCheaperEquivalentBrandSuggestion,
   SmartOriginalInvoiceSignature
 } from './dualMaterialComparisonEngine';
+import {
+  buildStrictOriginalMaterialSignature,
+  buildMaterialMatchProfile,
+  compareMaterialProfiles,
+  convertUnitPriceStrict,
+  isPlausibleSameMaterialPriceRatio,
+  isPurchaseAfter,
+  isSamePurchaseCopy,
+  cleanDocumentNumber,
+  vendorKeyForMatching,
+  parsePurchaseDate,
+  amountsReconcile,
+  rebarBarKey,
+  MaterialMatchProfile
+} from './sameMaterialMatcher';
+
+export { buildStrictOriginalMaterialSignature } from './sameMaterialMatcher';
+export type { StrictOriginalMaterialSignature } from './sameMaterialMatcher';
 
 export type PreApprovalStatus =
   | 'ONAYLANABİLİR'
@@ -228,9 +239,7 @@ export function isLineArithmeticConsistent(item: { quantity?: number; unitPrice?
   return Math.abs(expected - total) <= Math.max(1, total * 0.01);
 }
 
-function cleanDocNo(v: string | undefined): string {
-  return String(v || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-}
+const cleanDocNo = (v: string | undefined): string => cleanDocumentNumber(v);
 
 /**
  * Checks whether two sets of technical specs match or conflict.
@@ -277,255 +286,240 @@ export function areTechnicalSpecsCompatible(
 export interface PreApprovalAuditOptions {
   /** Denetlenen faturanın numarası: arşivdeki aynı faturayla kendini kıyaslamayı önler */
   draftInvoiceNumber?: string;
+  /** Denetlenen faturanın tarihi: bundan sonraki alımlar "daha önce alınmış" sayılmaz */
+  draftDate?: string;
   isUrgent?: boolean;
   isUrgentPurchase?: boolean;
   isSingleVendor?: boolean;
   isScopeChange?: boolean;
 }
 
-interface IndexedHistoricalEntry {
+// ============================================================================
+// ORTAK GEÇMİŞ ALIM İNDEKSİ (Ön Onay, İndirim Ön Denetimi ve Yönetici Denetimi aynı kuralları kullanır)
+// ============================================================================
+
+export type HistoricalSourceType = 'GES_ARCHIVE' | 'PRIZMA_ERP';
+
+interface HistoricalPriceEntry {
   inv: InvoiceRecord;
   pastIt: any;
-  invSupplier: string;
-  invJobsiteId: string;
+  profile: MaterialMatchProfile;
+  rebarKey: string;
+  /** %22 KDV dahil, faturada kayıtlı birim fiyat */
+  grossUnitPrice: number;
+  unit: string;
+  quantity: number;
+  date: string;
+  supplier: string;
   cleanInvNo: string;
-  pastSig: ReturnType<typeof buildSmartOriginalSignature>;
-  pastSpecs: ReturnType<typeof extractTechnicalSpecs>;
-  pastProcessed: ReturnType<typeof processItem>;
-  pastGrossUnitPrice: number;
-  orderFeatures: {
-    detectedBrand: string;
-    specTokens: string[];
-    meaningfulTokens: string[];
-    bilingualConcepts: string[];
-  };
-  sourceType: 'GES_ARCHIVE' | 'PRIZMA_ERP';
+  sourceType: HistoricalSourceType;
 }
 
-const HISTORICAL_INDEX_CACHE = new WeakMap<InvoiceRecord[], {
-  entries: IndexedHistoricalEntry[];
-  crossBrandFamilies: ReturnType<typeof buildMode2CrossBrandFamilies>;
-}>();
-
-const BILINGUAL_MATERIAL_CONCEPTS: Array<{ id: string; patterns: RegExp[] }> = [
-  { id: 'CABLE_VVG', patterns: [/ввг/i, /\bvvg\b/i, /\bnyy\b/i] },
-  { id: 'REBAR_STEEL', patterns: [/арматур/i, /inşaat\s*demir/i, /insaat\s*demir/i, /nervürlü\s*demir/i, /nervurlu\s*demir/i] },
-  { id: 'GYPSUM_BOARD', patterns: [/гипсокартон/i, /\bгкл\b/i, /\bgkl\b/i, /alçıpan/i, /alcipan/i] },
-  { id: 'CERAMIC_GLUE', patterns: [/клей\s+для\s+плитк/i, /плиточн\w*\s+клей/i, /seramik\s+yapıştırıcı/i, /seramik\s+yapistirici/i, /\bcm\s*11\b/i, /\bcm\s*17\b/i] },
-  { id: 'FLOOR_GLUE', patterns: [/клей\s+для\s+напольн/i, /zemin\s+yapıştırıcı/i, /\b26a\b/i] },
-  { id: 'LINOLEUM_COVER', patterns: [/напольн\w*\s+покрыт/i, /линолеум/i, /linolyum/i, /pvc\s+zemin/i, /master\s+proxi/i] },
-  { id: 'PU_FOAM', patterns: [/пена\s+монтажн/i, /монтажн\w*\s+пен/i, /poliüretan\s+köpük/i, /montaj\s+köpü/i] },
-  { id: 'MINERAL_WOOL', patterns: [/минват/i, /каменн\w*\s+ват/i, /базальт\w*\s+утеплит/i, /taş\s*yünü/i, /tasyunu/i, /mineral\s*yün/i] },
-  { id: 'XPS_FOAM', patterns: [/пеноплэкс/i, /техноплекс/i, /экструдирован\w*\s+пенополистирол/i, /\bxps\b/i] },
-  { id: 'PRIMER_GRUNT', patterns: [/грунтовк/i, /бетоноконтакт/i, /\bгрунт\b/i, /\bastar\b/i, /betokontakt/i] },
-  { id: 'PUTTY_SHPAKLEVKA', patterns: [/шпатлевк/i, /шпаклевк/i, /\bmacun\b/i, /alçı\s*sıva/i, /ротбанд/i, /rotband/i] },
-  { id: 'PLYWOOD_FANERA', patterns: [/фанер/i, /\bосб\b/i, /\bosb\b/i, /kontrplak/i, /plywood/i] },
-  { id: 'PIPE_PPR', patterns: [/труб\w*.*полипропилен/i, /труб\w*\s+ппр/i, /\bppr\s+boru/i, /pprc\s+boru/i] },
-  { id: 'PIPE_STEEL', patterns: [/труб\w*\s+стальн/i, /труб\w*\s+профильн/i, /труб\w*\s+вгп/i, /çelik\s+boru/i, /kutu\s+profil/i] },
-  { id: 'CEMENT_MIX', patterns: [/цемент/i, /пескобетон/i, /çimento/i, /cimento/i, /\bм300\b/i, /\bm300\b/i, /\bм500\b/i] },
-  { id: 'VALVE_KRAN', patterns: [/кран\s+шаров/i, /задвижк/i, /клапан/i, /küresel\s+vana/i, /\bvana\b/i] },
-  { id: 'SOCKET_SWITCH', patterns: [/розетк/i, /выключател/i, /автоматическ\w*\s+выключател/i, /\bpriz\b/i, /anahtar\s+priz/i, /sigorta\s+otomat/i] },
-  { id: 'LED_LUMINAIRE', patterns: [/светильник/i, /прожектор/i, /led\s+armatür/i, /led\s+projektör/i] },
-  { id: 'SAFETY_GLOVES', patterns: [/перчатк/i, /рукавиц/i, /iş\s*eldiven/i, /\beldiven\b/i] },
-  { id: 'CUTTING_DISC', patterns: [/круг\s+отрезн/i, /диск\s+отрезн/i, /диск\s+алмазн/i, /kesme\s+taşı/i, /kesici\s+disk/i, /elmas\s+disk/i] },
-  { id: 'ELECTRODE_WELD', patterns: [/электрод/i, /проволок\w*\s+сварочн/i, /kaynak\s+elektrod/i, /gazaltı\s+tel/i] },
-  { id: 'BOLT_NUT_ANCHOR', patterns: [/\bболт\b/i, /\bгайк/i, /шпильк\w*\s+резьбов/i, /\bанкер/i, /саморез/i, /дюбел/i, /saplama/i, /civat/i, /somun/i, /dübel/i, /akıllı\s+vida/i] },
-  { id: 'WATERPROOF_MEMBRANE', patterns: [/гидроизоляц/i, /техноэласт/i, /унифлекс/i, /бикрост/i, /su\s+yalıtım/i, /bitümlü\s+membran/i] },
-  { id: 'PAINT_ENAMEL', patterns: [/\bкраск/i, /\bэмаль/i, /водоэмульсион/i, /\bboya\b/i, /iç\s+cephe\s+boya/i, /dış\s+cephe\s+boya/i] },
-];
-
-const BRAND_SYNONYMS_MAP: Record<string, string> = {
-  'кнауф': 'knauf', 'knauf': 'knauf',
-  'церезит': 'ceresit', 'ceresit': 'ceresit',
-  'технониколь': 'technonicol', 'technonicol': 'technonicol', 'tn': 'technonicol',
-  'роквул': 'rockwool', 'rockwool': 'rockwool',
-  'пеноплэкс': 'penoplex', 'penoplex': 'penoplex',
-  'соудал': 'soudal', 'soudal': 'soudal',
-  'макрофлекс': 'makroflex', 'makroflex': 'makroflex',
-  'титан': 'tytan', 'tytan': 'tytan',
-  'иэк': 'iek', 'iek': 'iek',
-  'экф': 'ekf', 'ekf': 'ekf',
-  'шнайдер': 'schneider', 'schneider': 'schneider',
-  'абб': 'abb', 'abb': 'abb',
-  'легран': 'legrand', 'legrand': 'legrand',
-  'дкс': 'dkc', 'dkc': 'dkc',
-  'остендорф': 'ostendorf', 'ostendorf': 'ostendorf',
-  'рехау': 'rehau', 'rehau': 'rehau',
-  'валтек': 'valtec', 'valtec': 'valtec',
-  'грундфос': 'grundfos', 'grundfos': 'grundfos',
-  'вило': 'wilo', 'wilo': 'wilo',
-  'данфосс': 'danfoss', 'danfoss': 'danfoss',
-  'бош': 'bosch', 'bosch': 'bosch',
-  'макита': 'makita', 'makita': 'makita',
-  'деволт': 'dewalt', 'dewalt': 'dewalt',
-  'хилти': 'hilti', 'hilti': 'hilti',
-  'эсаб': 'esab', 'esab': 'esab',
-  'тиккурила': 'tikkurila', 'tikkurila': 'tikkurila',
-  'дюлакс': 'dulux', 'dulux': 'dulux',
-  'капарол': 'caparol', 'caparol': 'caparol',
-  'мастер': 'master', 'master': 'master',
-  'литокол': 'litokol', 'litokol': 'litokol',
-  'мапей': 'mapei', 'mapei': 'mapei',
-  'вебер': 'weber', 'weber': 'weber',
-  'ветонит': 'vetonit', 'vetonit': 'vetonit',
-  'юнис': 'unis', 'unis': 'unis',
-  'бергауф': 'bergauf', 'bergauf': 'bergauf',
-  'волма': 'volma', 'volma': 'volma',
-  'старатели': 'starateli', 'starateli': 'starateli',
-  'основит': 'osnovit', 'osnovit': 'osnovit',
-  'сика': 'sika', 'sika': 'sika',
-  'фишер': 'fischer', 'fischer': 'fischer',
-  'сормат': 'sormat', 'sormat': 'sormat',
-  'зубр': 'zubr', 'zubr': 'zubr',
-  'луга': 'luga', 'lugaa': 'luga',
-  'торекс': 'torex', 'torex': 'torex',
-  'керама': 'kerama', 'kerama': 'kerama',
-  'марацци': 'marazzi', 'marazzi': 'marazzi',
-  'эстима': 'estima', 'estima': 'estima',
-  'церсанит': 'cersanit', 'cersanit': 'cersanit',
-  'грое': 'grohe', 'grohe': 'grohe',
-  'геберит': 'geberit', 'geberit': 'geberit'
-};
-
-const STOP_WORDS_ORDER_INDEPENDENT = new Set([
-  'для', 'или', 'при', 'под', 'над', 'без', 'изделия', 'изделие', 'материал', 'материалы',
-  'строительный', 'строительные', 'товар', 'товары', 'комплект', 'компл', 'упак', 'упаковка',
-  'шт', 'штук', 'пог', 'мп', 'м2', 'м3', 'кг', 'тонн', 'литр', 'рулон', 'лист', 'мешок',
-  've', 'ile', 'için', 'icin', 'malzeme', 'inşaat', 'insaat', 'ürün', 'urun', 'adet', 'paket',
-  'gost', 'гост', 'ту', 'din', 'iso', 'ral', 'тип', 'марка', 'модель', 'цвет', 'размер', 'мм', 'см',
-  'белый', 'серый', 'черный', 'красный', 'синий', 'зеленый', 'коричневый', 'желтый'
-]);
-
-function extractOrderIndependentFeatures(rawText: string, sigBrand?: string) {
-  const lower = String(rawText || '').toLowerCase()
-    .replace(/ё/g, 'е')
-    .replace(/[«»"'`()[\]{}]/g, ' ')
-    .replace(/[,;:/\\|]/g, ' ');
-
-  let detectedBrand = '';
-  if (sigBrand && sigBrand !== 'GENERIC' && sigBrand !== 'UNSPECIFIED') {
-    const cleanSigBrand = sigBrand.toLowerCase();
-    detectedBrand = BRAND_SYNONYMS_MAP[cleanSigBrand] || cleanSigBrand;
-  }
-  if (!detectedBrand) {
-    for (const [rawKey, canonBrand] of Object.entries(BRAND_SYNONYMS_MAP)) {
-      const rx = new RegExp(`(^|\\s|-)${rawKey}(\\s|-|$)`, 'i');
-      if (rx.test(lower)) {
-        detectedBrand = canonBrand;
-        break;
-      }
-    }
-  }
-
-  const specMatches = lower.match(/\b(\d+(?:[.,]\d+)?(?:\s*[xх*×]\s*\d+(?:[.,]\d+)?)+|[dдфømм]\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*(?:мм|mm|см|cm|м|m|кг|kg|л|l|вт|w|а|a|квт|kw)|\b[a-zа-я]{1,4}[-]?\d{1,4}[a-zа-я]?\b)/gi) || [];
-  const specTokens = Array.from(new Set(
-    specMatches
-      .map(s => s.replace(/\s+/g, '').replace(/,/g, '.').replace(/[х×*]/g, 'x').replace(/^(д|ф|ø)/, 'd').replace(/^м(\d)/, 'm$1'))
-      .filter(s => s.length >= 2 && !/^(19|20)\d\d$/.test(s))
-  )).sort();
-
-  const words = lower
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ')
-    .map(w => w.replace(/^[.-]+|[.-]+$/g, ''))
-    .filter(w => w.length >= 3 && !STOP_WORDS_ORDER_INDEPENDENT.has(w) && !/^\d+$/.test(w));
-
-  const meaningfulTokens = Array.from(new Set(words)).sort();
-
-  const bilingualConcepts: string[] = [];
-  for (const c of BILINGUAL_MATERIAL_CONCEPTS) {
-    if (c.patterns.some(p => p.test(lower))) {
-      bilingualConcepts.push(c.id);
-    }
-  }
-
-  return {
-    detectedBrand,
-    specTokens,
-    meaningfulTokens,
-    bilingualConcepts
-  };
+interface HistoricalPriceIndex {
+  entries: HistoricalPriceEntry[];
+  byExactKey: Map<string, HistoricalPriceEntry[]>;
+  byStem: Map<string, HistoricalPriceEntry[]>;
+  byRebarKey: Map<string, HistoricalPriceEntry[]>;
 }
 
-function getOrBuildHistoricalIndex(historicalInvoices: InvoiceRecord[]) {
-  const cached = HISTORICAL_INDEX_CACHE.get(historicalInvoices);
-  if (cached) return cached;
+const HISTORICAL_PRICE_INDEX_CACHE = new WeakMap<InvoiceRecord[], HistoricalPriceIndex>();
 
-  const entries: IndexedHistoricalEntry[] = [];
-  for (const inv of historicalInvoices || []) {
-    if (!inv || inv.isDeleted) continue;
-    if (!Array.isArray(inv.items)) continue;
-    // Kalemleri fatura toplamını tutmayan (okuması doğrulanamamış) arşiv faturaları fiyat referansı olamaz.
-    if ((inv as any).linesReconciled === false || (inv as any).lineCheck === 'mismatch') continue;
-
-    const invSupplier = (inv.supplier || '').trim().toLowerCase();
-    const invJobsiteId = inv.jobsiteId || (inv as any).prizmaJobsite || '';
-    const cleanInvNo = cleanDocNo(inv.invoiceNumber || inv.invoiceNo);
-    const isPrizma = Boolean(
-      (inv as any).sourceCollection === 'prizma_invoices' ||
-      String(inv.id || '').startsWith('prizma_') ||
-      ((inv as any).prizmaProcessId && !inv.uploadedBySupervisorId)
-    );
-
-    for (const pastIt of inv.items) {
-      if (!pastIt || !pastIt.unitPrice || pastIt.unitPrice <= 0) continue;
-      if ((pastIt as any).lineVerified === false || !isLineArithmeticConsistent(pastIt as any)) continue;
-
-      const combinedText = `${pastIt.originalName || ''} ${pastIt.materialName || ''}`.trim();
-      if (!combinedText) continue;
-
-      const pastSig = buildSmartOriginalSignature({
-        originalName: pastIt.originalName,
-        materialName: pastIt.materialName,
-        category: pastIt.category,
-        unit: pastIt.unit,
-        unitPrice: pastIt.unitPrice
-      });
-
-      const pastSpecs = extractTechnicalSpecs(`${pastIt.materialName || ''} ${pastIt.originalName || ''} ${(pastIt as any).dimensions || ''} ${(pastIt as any).diameter || ''}`);
-      if ((pastIt as any).diameter && !pastSpecs.diameter) pastSpecs.diameter = (pastIt as any).diameter;
-      if ((pastIt as any).grade && !pastSpecs.grade) pastSpecs.grade = (pastIt as any).grade;
-      if ((pastIt as any).dimensions && !pastSpecs.dimensions) pastSpecs.dimensions = (pastIt as any).dimensions;
-
-      const pastProcessed = processItem({
-        materialName: pastIt.materialName || pastIt.originalName || '',
-        originalName: pastIt.originalName,
-        category: pastIt.category || inv.category || 'Diğer Malzeme',
-        unit: pastIt.unit || 'Adet',
-        unitPrice: pastIt.unitPrice,
-        brand: (pastIt as any).brand
-      });
-
-      const pastGrossUnitPrice = comparisonGrossUnitPrice(pastIt as any);
-      const orderFeatures = extractOrderIndependentFeatures(combinedText, pastSig.canonicalBrandKey);
-
-      entries.push({
-        inv,
-        pastIt,
-        invSupplier,
-        invJobsiteId,
-        cleanInvNo,
-        pastSig,
-        pastSpecs,
-        pastProcessed,
-        pastGrossUnitPrice,
-        orderFeatures,
-        sourceType: isPrizma ? 'PRIZMA_ERP' : 'GES_ARCHIVE'
-      });
-    }
-  }
-
-  const crossBrandFamilies = buildMode2CrossBrandFamilies([]);
-  const built = { entries, crossBrandFamilies };
-  HISTORICAL_INDEX_CACHE.set(historicalInvoices, built);
-  return built;
+function isPrizmaInvoice(inv: any): boolean {
+  return Boolean(
+    inv?.sourceCollection === 'prizma_invoices' ||
+    String(inv?.id || '').startsWith('prizma_') ||
+    (inv?.prizmaProcessId && !inv?.uploadedBySupervisorId)
+  );
 }
 
 /**
- * Audits a single line item against all historical approved invoices and Prizma ERP records.
- * Handles vendor-independent brand placement (beginning/middle/end of line),
- * bilingual (Russian/Turkish) descriptions, and strict no-substitute (muadil olmaz) rules.
+ * Fatura kalemleri belgeyle doğrulanamamışsa (okuma hatası şüphesi) o faturanın fiyatları referans olamaz.
+ * İndirim kaydından senkronlanan faturalarda kalemler fatura toplamını vermiyorsa kalem fiyatları
+ * ödenen fiyat değildir (ilk teklif veya dağıtılmış tutar) ve referans alınmaz.
+ */
+export function isTrustedPriceSourceInvoice(inv: any): boolean {
+  if (!inv || inv.isDeleted || !Array.isArray(inv.items) || inv.items.length === 0) return false;
+  if (inv.linesReconciled === false) return false;
+  const lineCheckStatus = typeof inv.lineCheck === 'string' ? inv.lineCheck : inv.lineCheck?.status;
+  if (lineCheckStatus === 'mismatch') return false;
+  const isDiscountCopy = /^inv_(?:sync|cmp)_/.test(String(inv.id || '')) || Boolean(inv.discountId);
+  if (isDiscountCopy) {
+    const total = Number(inv.totalAmount) || 0;
+    const linesGross = inv.items.reduce((s: number, it: any) => s + (Number(it?.quantity) || 0) * comparisonGrossUnitPrice(it), 0);
+    if (!amountsReconcile(linesGross, total)) return false;
+  }
+  return true;
+}
+
+/** İndirim kaydının kalem fiyatları gerçekten ödenen (son anlaşılan) fiyat mı? */
+export function discountLinesArePaidPrices(disc: any): boolean {
+  const items = Array.isArray(disc?.items) ? disc.items : [];
+  if (items.length === 0) return false;
+  const agreed = Number(disc.agreedPrice) || 0;
+  const sum = items.reduce((s: number, it: any) => s + (Number(it?.quantity) || 0) * comparisonGrossUnitPrice(it), 0);
+  return amountsReconcile(sum, agreed);
+}
+
+function isTrustedPriceLine(item: any): boolean {
+  if (!item) return false;
+  if (item.lineVerified === false) return false;
+  return isLineArithmeticConsistent(item);
+}
+
+function pushTo<K>(map: Map<K, HistoricalPriceEntry[]>, key: K, entry: HistoricalPriceEntry) {
+  const list = map.get(key);
+  if (list) list.push(entry);
+  else map.set(key, [entry]);
+}
+
+function getOrBuildHistoricalPriceIndex(historicalInvoices: InvoiceRecord[]): HistoricalPriceIndex {
+  const cached = HISTORICAL_PRICE_INDEX_CACHE.get(historicalInvoices);
+  if (cached) return cached;
+
+  const index: HistoricalPriceIndex = { entries: [], byExactKey: new Map(), byStem: new Map(), byRebarKey: new Map() };
+  const seenPurchases = new Set<string>();
+
+  for (const inv of historicalInvoices || []) {
+    if (!isTrustedPriceSourceInvoice(inv)) continue;
+    const sourceType: HistoricalSourceType = isPrizmaInvoice(inv) ? 'PRIZMA_ERP' : 'GES_ARCHIVE';
+    const supplier = String(inv.supplier || (inv as any).vendorName || '').trim();
+    const date = inv.date || (inv as any).createdAt || '';
+    const cleanInvNo = cleanDocumentNumber(inv.invoiceNumber || inv.invoiceNo);
+
+    for (const pastIt of inv.items) {
+      if (!isTrustedPriceLine(pastIt)) continue;
+      const grossUnitPrice = comparisonGrossUnitPrice(pastIt as any);
+      if (!(grossUnitPrice > 0)) continue;
+      const profile = buildMaterialMatchProfile({
+        originalName: pastIt.originalName,
+        materialName: pastIt.materialName,
+        brand: (pastIt as any).brand,
+        category: pastIt.category || inv.category
+      });
+      if (!profile) continue;
+
+      const quantity = Number(pastIt.quantity) || 0;
+      // Aynı alım hem GES Arşivinde hem Prizma ERP'de (veya indirim kopyasında) olabilir: tek kez say
+      const purchaseKey = `${vendorKeyForMatching(supplier)}|${parsePurchaseDate(date) ?? date}|${profile.sig.exactKey}|${quantity}|${grossUnitPrice.toFixed(2)}`;
+      const docKey = cleanInvNo ? `${cleanInvNo}|${profile.sig.exactKey}|${quantity}|${grossUnitPrice.toFixed(2)}` : '';
+      if (seenPurchases.has(purchaseKey) || (docKey && seenPurchases.has(docKey))) continue;
+      seenPurchases.add(purchaseKey);
+      if (docKey) seenPurchases.add(docKey);
+
+      const entry: HistoricalPriceEntry = {
+        inv,
+        pastIt,
+        profile,
+        rebarKey: rebarBarKey(profile),
+        grossUnitPrice,
+        unit: pastIt.unit || 'adet',
+        quantity,
+        date,
+        supplier,
+        cleanInvNo,
+        sourceType
+      };
+      index.entries.push(entry);
+      pushTo(index.byExactKey, profile.sig.exactKey, entry);
+      for (const stem of profile.sig.stems) pushTo(index.byStem, stem, entry);
+      if (entry.rebarKey) pushTo(index.byRebarKey, entry.rebarKey, entry);
+    }
+  }
+
+  HISTORICAL_PRICE_INDEX_CACHE.set(historicalInvoices, index);
+  return index;
+}
+
+export interface SameMaterialHistoryContext {
+  supplier?: string;
+  jobsiteId?: string;
+  /** Kıyaslanan kaydın tarihi: bundan SONRA yapılmış alımlar "daha önce alınmış" sayılmaz */
+  date?: string;
+  invoiceNo?: string;
+  excludeInvoiceId?: string;
+  excludeDiscountId?: string;
+}
+
+export interface SameMaterialHistoryMatch {
+  entry: HistoricalPriceEntry;
+  /** Taslak satırın biriminde, %22 KDV dahil gerçek fiyat (yalnızca kesin metrik dönüşüm) */
+  comparablePrice: number;
+  /** Taslak birimine çevrilmiş miktar */
+  comparableQuantity: number;
+  exact: boolean;
+}
+
+/**
+ * Bir satır için aynı malzemenin geçmiş gerçek alım fiyatlarını bulur. Tek ortak kural:
+ * aynı malzeme (compareMaterialProfiles), aynı/kesin çevrilebilir birim, kayıttan önce yapılmış alım,
+ * aynı faturanın kopyası değil, makul fiyat oranı (≤3x).
+ */
+export function findSameMaterialHistory(
+  item: { originalName?: string; materialName?: string; brand?: string; category?: string; unit?: string; quantity?: number },
+  currentUnitPrice: number,
+  context: SameMaterialHistoryContext,
+  historicalInvoices: InvoiceRecord[]
+): SameMaterialHistoryMatch[] {
+  if (!Array.isArray(historicalInvoices) || historicalInvoices.length === 0) return [];
+  const profile = buildMaterialMatchProfile(item);
+  if (!profile) return [];
+  const index = getOrBuildHistoricalPriceIndex(historicalInvoices);
+
+  // Aday havuzu: birebir aynı metin + aynı ürün adını paylaşan kayıtlar + aynı donatı çapı/sınıfı
+  const candidates = new Set<HistoricalPriceEntry>(index.byExactKey.get(profile.sig.exactKey) || []);
+  const rebarKey = rebarBarKey(profile);
+  if (rebarKey) for (const e of index.byRebarKey.get(rebarKey) || []) candidates.add(e);
+  const rarestStem = [...profile.sig.stems]
+    .map(s => index.byStem.get(s) || [])
+    .sort((a, b) => a.length - b.length)[0];
+  for (const e of rarestStem || []) candidates.add(e);
+  // En nadir kök ortak değilse diğer köklerden de aday ekle (yazım farkı ön elemesi compareMaterialProfiles'ta)
+  for (const s of profile.sig.stems) {
+    const list = index.byStem.get(s);
+    if (list && list.length <= 400) for (const e of list) candidates.add(e);
+  }
+
+  const cleanCtxNo = cleanDocumentNumber(context.invoiceNo);
+  const excludeInvId = context.excludeInvoiceId || (context.excludeDiscountId ? `inv_sync_${context.excludeDiscountId}` : '');
+  const excludeDiscId = context.excludeDiscountId || '';
+  const currentQty = Number(item.quantity) || 0;
+  const matches: SameMaterialHistoryMatch[] = [];
+
+  for (const cand of candidates) {
+    // Kendi kopyasıyla kıyas yapılmaz
+    if (excludeInvId && cand.inv.id === excludeInvId) continue;
+    if (excludeDiscId && (cand.inv as any).discountId === excludeDiscId) continue;
+    if (cleanCtxNo && cand.cleanInvNo && cand.cleanInvNo === cleanCtxNo) continue;
+    if (isSamePurchaseCopy({ supplier: context.supplier, date: context.date, quantity: currentQty }, cand)) continue;
+    // Sonraki alım "daha önce alınmış" referansı olamaz
+    if (isPurchaseAfter(cand.date, context.date)) continue;
+
+    const verdict = compareMaterialProfiles(profile, cand.profile);
+    if (!verdict.same) continue;
+
+    const comparablePrice = convertUnitPriceStrict(cand.grossUnitPrice, cand.unit, item.unit);
+    if (comparablePrice === null || !(comparablePrice > 0)) continue;
+    if (currentUnitPrice > 0 && !isPlausibleSameMaterialPriceRatio(currentUnitPrice, comparablePrice)) continue;
+
+    const comparableQuantity = comparablePrice !== cand.grossUnitPrice && comparablePrice > 0
+      ? Number(((cand.quantity * cand.grossUnitPrice) / comparablePrice).toFixed(3))
+      : cand.quantity;
+    matches.push({ entry: cand, comparablePrice: Number(comparablePrice.toFixed(2)), comparableQuantity, exact: verdict.exact });
+  }
+
+  return matches.sort((a, b) => a.comparablePrice - b.comparablePrice);
+}
+
+function historicalSupplierLabel(entry: HistoricalPriceEntry): string {
+  const base = String(entry.supplier || (entry.sourceType === 'PRIZMA_ERP' ? 'Prizma Tedarikçisi' : 'Geçmiş Tedarikçi'))
+    .replace(/\s*\(Prizma ERP\)\s*$/, '')
+    .trim();
+  return entry.sourceType === 'PRIZMA_ERP' ? `${base} (Prizma ERP)` : base;
+}
+
+/**
+ * Audits a single line item against historical approved invoices and Prizma ERP records
+ * using the shared same-material matcher (sameMaterialMatcher.ts).
  */
 export function auditSingleLineItem(
   draftItem: LineAuditResult['draftItem'],
@@ -533,7 +527,6 @@ export function auditSingleLineItem(
   historicalInvoices: InvoiceRecord[],
   options?: PreApprovalAuditOptions
 ): LineAuditResult {
-  // 1. Process item through Central AI Decision Engine
   const processed = processItem({
     materialName: draftItem.materialName,
     originalName: draftItem.originalName,
@@ -553,7 +546,8 @@ export function auditSingleLineItem(
   if (draftItem.grade && !draftSpecs.grade) draftSpecs.grade = draftItem.grade;
   if (draftItem.dimensions && !draftSpecs.dimensions) draftSpecs.dimensions = draftItem.dimensions;
 
-  // Taslak satırın kıyas fiyatı: faturadaki KDV dahil birim fiyat (%22 tabanı), yalnızca para birimi çevrilir.
+  // Taslak satırın kıyas fiyatı: geçmiş kayıtlarla aynı taban (%22 KDV dahil birim fiyat, comparisonGrossUnitPrice);
+  // KDV bilgisi yoksa faturadaki birim fiyat olduğu gibi alınır. Yalnızca para birimi çevrilir.
   // Taslakta unitPrice faturadaki KDV dahil fiyattır; yalnızca %20'lik faturalar %22 tabanına taşınır.
   const draftBasisPrice = Number(draftItem.vatPercentage) === 20 && Number(draftItem.unitPriceNet) > 0
     ? comparisonGrossUnitPrice({ unitPriceNet: draftItem.unitPriceNet, vatPercentage: 20 })
@@ -564,7 +558,8 @@ export function auditSingleLineItem(
     false
   );
 
-  const draftSupplier = (draftItem.supplier || '').trim().toLowerCase();
+  const draftSupplier = (draftItem.supplier || '').trim();
+  const draftSupplierKey = vendorKeyForMatching(draftSupplier);
   const draftJobsiteId = draftItem.jobsiteId || '';
 
   const draftSig = buildSmartOriginalSignature({
@@ -577,16 +572,11 @@ export function auditSingleLineItem(
 
   const crossBrandEconomySuggestion = undefined;
 
-  // 2. Scan historical invoices using the Strict Original-Language (Russian-first) O(1) Hash-Bucket Index
-  // Every word stem in the original language, brand, standard (GOST/TU), and ALL numbers (dimensions, diameter, thickness, density, model) must match 100%.
-  const candidateHistoricalMatches: HistoricalPricePoint[] = [];
-  const draftDocNo = cleanDocNo(options?.draftInvoiceNumber);
   const strictSig = buildStrictOriginalMaterialSignature({
     originalName: draftItem.originalName,
     materialName: draftItem.materialName,
     brand: draftItem.brand
   });
-
   if (strictSig?.techVariant) {
     const badgeStr = formatTechnicalVariantBadges(strictSig.techVariant);
     if (badgeStr && !processed.canonicalName.includes(badgeStr)) {
@@ -594,102 +584,52 @@ export function auditSingleLineItem(
     }
   }
 
-  if (strictSig) {
-    const strictBuckets = getOrBuildStrictOriginalIndex(historicalInvoices);
-    const bucketCandidates = strictBuckets.get(strictSig.exactKey) || [];
-    const draftUnitNorm = normalizeUnit(draftItem.unit || 'adet');
+  const sameMaterialMatches = findSameMaterialHistory(
+    draftItem,
+    normalizedDraftUnitPrice,
+    {
+      supplier: draftItem.supplier,
+      jobsiteId: draftItem.jobsiteId,
+      date: options?.draftDate,
+      invoiceNo: options?.draftInvoiceNumber
+    },
+    historicalInvoices
+  );
 
-    for (const cand of bucketCandidates) {
-      const { inv, pastIt, sig: candSig, grossUnitPrice: pastGrossUnitPrice, normalizedUnit: candUnitNorm, cleanInvNo, invSupplierLower, sourceType } = cand;
+  const candidateHistoricalMatches: HistoricalPricePoint[] = [];
+  for (const m of sameMaterialMatches) {
+    const { entry } = m;
+    const inv = entry.inv;
+    const normalizedPastUnitPrice = normalizePriceForComparison(m.comparablePrice, (inv as any).currency || 'RUB', false);
+    if (!(normalizedPastUnitPrice > 0)) continue;
 
-      // Never compare the draft invoice against its own archived copy
-      if (draftDocNo && cleanInvNo === draftDocNo) {
-        continue;
-      }
+    const candSupplierKey = vendorKeyForMatching(entry.supplier);
+    const isSameSupplier = Boolean(draftSupplierKey && candSupplierKey && draftSupplierKey === candSupplierKey);
+    const invJobsiteId = inv.jobsiteId || '';
+    const isSameJobsite = Boolean(draftJobsiteId && invJobsiteId && draftJobsiteId === invJobsiteId);
+    const level: ComparisonLevel = isSameSupplier
+      ? 'LEVEL_2_SAME_SUPPLIER'
+      : (!isSameJobsite ? 'LEVEL_4_OTHER_JOBSITES' : 'LEVEL_3_OTHER_SUPPLIERS');
 
-      // 0. Technical Variant & Standard Lock (GOST vs TU, Sort 1/2/3, Moisture, Surface Treatment, Wood Species, Cross-section)
-      const techCompat = areTechnicalVariantsCompatible(strictSig.techVariant, candSig.techVariant);
-      if (!techCompat.compatible) {
-        continue;
-      }
-
-      // If both specify a brand or GOST / TU / DIN / ISO standard, they must be 100% identical
-      if (strictSig.brand && candSig.brand && strictSig.brand !== candSig.brand) {
-        continue;
-      }
-      if (strictSig.gostKey && candSig.gostKey && strictSig.gostKey !== candSig.gostKey) {
-        continue;
-      }
-
-      // Unit conversion check (KDV dahil %22 tabanındaki fiyat üzerinden)
-      const sameUnit = candUnitNorm === draftUnitNorm;
-      let comparablePastPrice = pastGrossUnitPrice;
-      let convertedQuantity = Number(pastIt.quantity) || 1;
-
-      if (!sameUnit) {
-        const unitConversion = normalizeQuantityAndPrice(
-          pastIt.quantity || 1,
-          pastGrossUnitPrice,
-          pastIt.unit || 'adet',
-          draftItem.unit || 'adet',
-          strictSig.rawOriginalText,
-          draftItem.category || pastIt.category || ''
-        );
-        if (!unitConversion.conversionApplied || unitConversion.normalizedUnitPrice <= 0) continue;
-        comparablePastPrice = Number(unitConversion.normalizedUnitPrice.toFixed(2));
-        convertedQuantity = Number((unitConversion.normalizedQty || pastIt.quantity || 1).toFixed(3));
-      }
-
-      const normalizedPastUnitPrice = normalizePriceForComparison(
-        comparablePastPrice,
-        (inv as any).currency || 'RUB',
-        false
-      );
-
-      if (normalizedPastUnitPrice <= 0) continue;
-
-      // Sanity ratio guard: prevent extreme pack-vs-piece OCR unit errors (>10x difference) from polluting benchmark
-      const priceRatio = normalizedDraftUnitPrice > 0
-        ? Math.max(normalizedDraftUnitPrice / normalizedPastUnitPrice, normalizedPastUnitPrice / normalizedDraftUnitPrice)
-        : 1;
-      if (priceRatio > 10) continue;
-
-      // Determine Comparison Level
-      let level: ComparisonLevel = 'LEVEL_1_SAME_VARIANT';
-      const isSameSupplier = draftSupplier && invSupplierLower && (draftSupplier.includes(invSupplierLower) || invSupplierLower.includes(draftSupplier));
-      const invJobsiteId = inv.jobsiteId || '';
-      const isSameJobsite = draftJobsiteId && invJobsiteId && draftJobsiteId === invJobsiteId;
-
-      if (isSameSupplier) {
-        level = 'LEVEL_2_SAME_SUPPLIER';
-      } else if (!isSameJobsite) {
-        level = 'LEVEL_4_OTHER_JOBSITES';
-      } else {
-        level = 'LEVEL_3_OTHER_SUPPLIERS';
-      }
-
-      candidateHistoricalMatches.push({
-        invoiceId: inv.id || '',
-        invoiceNumber: inv.invoiceNumber || inv.invoiceNo || (sourceType === 'PRIZMA_ERP' ? 'PRIZMA-ERP' : 'FT-GECMIS'),
-        date: inv.date || (inv as any).createdAt || '',
-        supplier: sourceType === 'PRIZMA_ERP'
-          ? `${String(inv.supplier || 'Prizma Tedarikçisi').replace(/\s*\(Prizma ERP\)\s*$/, '')} (Prizma ERP)`
-          : (inv.supplier || 'Geçmiş Tedarikçi'),
-        jobsiteId: invJobsiteId,
-        jobsiteName: inv.jobsiteName || (inv as any).prizmaJobsite || 'Bilinmeyen Şantiye',
-        rawMaterialName: candSig.rawOriginalText,
-        canonicalName: processed.canonicalName,
-        rawUnitPrice: pastGrossUnitPrice,
-        normalizedUnitPrice: normalizedPastUnitPrice,
-        unit: draftItem.unit,
-        quantity: convertedQuantity,
-        currency: 'RUB',
-        isVatIncluded: true,
-        matchScore: 1.0,
-        comparisonLevel: level,
-        specs: draftSpecs
-      });
-    }
+    candidateHistoricalMatches.push({
+      invoiceId: inv.id || '',
+      invoiceNumber: inv.invoiceNumber || inv.invoiceNo || (entry.sourceType === 'PRIZMA_ERP' ? 'PRIZMA-ERP' : 'FT-GECMIS'),
+      date: entry.date,
+      supplier: historicalSupplierLabel(entry),
+      jobsiteId: invJobsiteId,
+      jobsiteName: inv.jobsiteName || (inv as any).prizmaJobsite || 'Bilinmeyen Şantiye',
+      rawMaterialName: entry.profile.sig.rawOriginalText,
+      canonicalName: processed.canonicalName,
+      rawUnitPrice: entry.grossUnitPrice,
+      normalizedUnitPrice: normalizedPastUnitPrice,
+      unit: draftItem.unit,
+      quantity: m.comparableQuantity,
+      currency: 'RUB',
+      isVatIncluded: true,
+      matchScore: m.exact ? 1.0 : 0.95,
+      comparisonLevel: level,
+      specs: draftSpecs
+    });
   }
 
   // 3. Analyze Historical Matches
@@ -713,7 +653,7 @@ export function auditSingleLineItem(
       potentialSavings: 0,
       status: 'KARŞILAŞTIRILABİLİR KAYIT YOK',
       statusColor: 'slate',
-      decisionReasoning: 'Bu malzeme (orijinal Rusça tanımı, markası ve tüm ölçü/teknik özellikleri birebir aynı) için sistemde geçmiş onaylı alım kaydı bulunamadı.',
+      decisionReasoning: 'Bu malzemenin aynısı (aynı marka, model ve tüm ölçü/teknik özellikler, aynı birim) için sistemde belgeyle doğrulanmış geçmiş alım kaydı bulunamadı. Farklı marka veya özellikteki malzemelerle kıyaslama yapılmaz.',
       isSingleVendor: !!options?.isSingleVendor,
       isUrgentPurchase: !!options?.isUrgentPurchase,
       isLowConfidence: false,
@@ -747,7 +687,7 @@ export function auditSingleLineItem(
   const percentagePriceDiff = isCheaperPastPurchaseAvailable ? rawPctDiff : 0;
   const potentialSavings = isCheaperPastPurchaseAvailable ? Math.round(rawPriceDiff * (draftItem.quantity || 1)) : 0;
 
-  // Confidence assessment (always 1.0 for strict original-language match)
+  // Eşleşmeler ortak eşleştiriciden geçti (aynı marka/model/özellik); güven düşük değildir
   const isLowConfidence = false;
 
   // Determine Line Status
@@ -759,11 +699,11 @@ export function auditSingleLineItem(
     if (percentagePriceDiff >= 15 || potentialSavings >= 100000) {
       status = 'YÖNETİCİ İNCELEMESİ GEREKLİ';
       statusColor = 'rose';
-      decisionReasoning = `⚠️ Yüksek Fiyat Artışı (%${percentagePriceDiff}): Birebir aynı malzeme (${bestMatch.rawMaterialName}) daha önce ${bestMatch.date} tarihinde ${bestMatch.supplier} firmasından (Fatura No: ${bestMatch.invoiceNumber}) ${minHistoricalPrice.toLocaleString('tr-TR')} RUB birim fiyatla alınmıştı. Toplam ${potentialSavings.toLocaleString('tr-TR')} RUB ek maliyet riski bulunmaktadır.`;
+      decisionReasoning = `⚠️ Yüksek Fiyat Artışı (%${percentagePriceDiff}): Aynı malzeme (${bestMatch.rawMaterialName}) daha önce ${bestMatch.date} tarihinde ${bestMatch.supplier} firmasından (Fatura No: ${bestMatch.invoiceNumber}) ${minHistoricalPrice.toLocaleString('tr-TR')} RUB birim fiyatla alınmıştı. Toplam ${potentialSavings.toLocaleString('tr-TR')} RUB ek maliyet riski bulunmaktadır.`;
     } else {
       status = 'İNDİRİM TALEP EDİLMELİ';
       statusColor = 'amber';
-      decisionReasoning = `Birebir aynı malzeme (${bestMatch.rawMaterialName}) daha önce daha düşük fiyata alınmış (${bestMatch.date} / ${bestMatch.supplier} / Fatura No: ${bestMatch.invoiceNumber} - ${minHistoricalPrice.toLocaleString('tr-TR')} RUB). Satınalmacının tedarikçiden en az %${percentagePriceDiff} indirim talep etmesi önerilir.`;
+      decisionReasoning = `Aynı malzeme (${bestMatch.rawMaterialName}) daha önce daha düşük fiyata alınmış (${bestMatch.date} / ${bestMatch.supplier} / Fatura No: ${bestMatch.invoiceNumber} - ${minHistoricalPrice.toLocaleString('tr-TR')} RUB). Satınalmacının tedarikçiden en az %${percentagePriceDiff} indirim talep etmesi önerilir.`;
     }
   } else {
     status = 'ONAYLANABİLİR';
@@ -848,7 +788,11 @@ export function auditEntireInvoice(
       },
       index,
       historicalInvoices,
-      { ...options, draftInvoiceNumber: options?.draftInvoiceNumber || draftInvoice.invoiceNumber }
+      {
+        ...options,
+        draftInvoiceNumber: options?.draftInvoiceNumber || draftInvoice.invoiceNumber,
+        draftDate: options?.draftDate || draftInvoice.date
+      }
     );
   });
 
@@ -923,294 +867,12 @@ export function auditEntireInvoice(
 }
 
 // ============================================================================
-// STRICT ORIGINAL-LANGUAGE (RUSSIAN-FIRST) O(1) HASH-BUCKET BENCHMARK ENGINE
+// KAYDETME ÖNCESİ / YÖNETİCİ DENETİMİ: DAHA UCUZ GEÇMİŞ ALIM
 // ============================================================================
 
-const STRICT_STOP_WORDS = new Set([
-  'для', 'или', 'при', 'под', 'над', 'без', 'из', 'по', 'на', 'от', 'до', 'со', 'во', 'в', 'с', 'к', 'у', 'о',
-  'шт', 'штук', 'компл', 'комплект', 'упак', 'уп', 'пог', 'мп', 'м2', 'м3', 'куб', 'кв', 'кор', 'коробка',
-  'мм', 'см', 'м', 'кг', 'г', 'гр', 'т', 'тн', 'тонн', 'л', 'мл', 'рул', 'рулон', 'пл', 'меш', 'мешок', 'лист',
-  'марка', 'марки', 'тип', 'типа', 'вид', 'сорт', 'класс', 'класса',
-  'плотн', 'плотность', 'плотностью', 'размер', 'размером', 'длина', 'длиной', 'ширина', 'шириной', 'толщина', 'толщиной',
-  'диаметр', 'диаметром', 'сечение', 'сечением', 'вес', 'объем', 'цвет', 'арт', 'артикул', 'код', 'ф', 'd', 'д', 'ø', 'х', 'x'
-]);
-
-const STRICT_RUSSIAN_ABBREV_MAP: Record<string, string> = {
-  'бум': 'бумажн',
-  'прозр': 'прозрачн',
-  'бел': 'бел',
-  'чер': 'черн',
-  'цел': 'целлюлозн',
-  'оцинк': 'оцинкован',
-  'пневматич': 'пневматическ',
-  'метал': 'металлическ',
-  'сл': 'слойн',
-  'техн': 'техническ',
-  'унив': 'универсальн',
-  'проф': 'профессиональн'
-};
-
-function isFreightOrServiceLineText(text?: string): boolean {
-  const t = String(text || '').trim();
-  if (!t) return false;
-  return /^(?:доставка|транспортн\w*\s+услуг|услуг\w*\s+доставк|перевозк|автоуслуг|разгрузк|погрузк|аренда|услуга\s+по|nakliye\b)/i.test(t);
-}
-
-function stemOriginalRussianWord(w: string): string {
-  if (STRICT_RUSSIAN_ABBREV_MAP[w]) return STRICT_RUSSIAN_ABBREV_MAP[w];
-  if (w === 'гкл' || w.startsWith('гипсокартон')) return 'гипсокартон';
-  if (w === 'гклв') return 'гклв';
-  if (w === 'гвл' || w.startsWith('гипсоволокн')) return 'гипсоволокн';
-  if (BRAND_SYNONYMS_MAP[w]) return BRAND_SYNONYMS_MAP[w];
-  if (w === 'свеза' || w === 'sveza') return 'sveza';
-  if (w === 'леика' || w === 'лейка' || w === 'leica') return 'leica';
-  if (w === 'корда' || w === 'korda') return 'korda';
-  if (w === 'сантал' || w === 'santal') return 'santal';
-  if (w.length <= 3) return w;
-  const stripped = w.replace(
-    /(?:ый|ий|ой|ая|яя|ое|ее|ые|ие|ого|его|ому|ему|ым|им|ом|ем|ую|юю|ами|ями|ах|ях|ов|ев|ей|ью|ии|ия|ие|ка|ки|ку|ке|а|я|о|е|ы|и|у|ю)$/,
-    ''
-  );
-  return STRICT_RUSSIAN_ABBREV_MAP[stripped] || (stripped.length >= 2 ? stripped : w);
-}
-
-export interface StrictOriginalMaterialSignature {
-  rawOriginalText: string;
-  hasCyrillic: boolean;
-  brand: string;
-  numericSig: string;
-  gostKey: string;
-  stems: string[];
-  exactKey: string;
-  techVariant: TechnicalVariantProfile;
-}
-
-const STRICT_SIGNATURE_CACHE = new Map<string, StrictOriginalMaterialSignature | null>();
-
 /**
- * Extracts a strict, order-independent fingerprint strictly from the original language
- * (Russian `originalName` whenever Cyrillic is present, never polluted by Turkish translations).
- * Every number (dimensions, thickness, diameter, density, weight, pack size, model number),
- * brand, standard (GOST vs TU), quality grade (Sort 1/2/3), and Russian word stem must match.
- */
-export function buildStrictOriginalMaterialSignature(item: {
-  originalName?: string;
-  materialName?: string;
-  brand?: string;
-}): StrictOriginalMaterialSignature | null {
-  const orig = String(item.originalName || '').trim();
-  const mat = String(item.materialName || '').trim();
-  const brandHint = String(item.brand || '').trim();
-  const cacheKey = `${orig}\u0000${mat}\u0000${brandHint}`;
-
-  if (STRICT_SIGNATURE_CACHE.has(cacheKey)) {
-    return STRICT_SIGNATURE_CACHE.get(cacheKey)!;
-  }
-
-  const hasCyrOrig = /[а-яА-ЯёЁ]/.test(orig);
-  const hasCyrMat = /[а-яА-ЯёЁ]/.test(mat);
-
-  // Always prefer the original Russian text; never concatenate translated Turkish text when Russian exists
-  let raw = hasCyrOrig ? orig : (hasCyrMat ? mat : (orig || mat));
-  if (!raw || isFreightOrServiceLineText(raw) || isFreightOrServiceLineText(mat)) {
-    STRICT_SIGNATURE_CACHE.set(cacheKey, null);
-    return null;
-  }
-
-  // Extract technical variant profile (GOST vs TU, Sort 1/2/3, moisture, surface treatment, wood species, cross-section) BEFORE stripping SKU prefixes like 01-09О / 01-14Г
-  const techVariant = extractTechnicalStandardAndGrade(orig, mat);
-
-  // Fast, non-backtracking strip of Prizma jobsite prefixes and trailing bracketed translations
-  if (raw.includes('/') || raw.includes('\\')) {
-    raw = raw.replace(/^[^\n]{1,60}?(?:ФАКТ|FAKT|ПЛАН|PLAN|АВАНС|AVANS|STF|BTF|СЧЕТ|SCHET)\s*[/|\\-]\s*/i, '');
-  }
-  if (raw.endsWith(']')) {
-    raw = raw.replace(/\[[^\]]+\]$/g, '');
-  }
-  raw = raw.trim();
-
-  if (!raw || isFreightOrServiceLineText(raw)) {
-    STRICT_SIGNATURE_CACHE.set(cacheKey, null);
-    return null;
-  }
-
-  let s = raw.toLowerCase().replace(/ё/g, 'е');
-  // Strip vendor-internal 1C accounting/warehouse nomenclature prefixes (e.g. "00029058 ", "у0-00029058 ", "01-09о ", "01-102г ") when followed by Cyrillic text
-  s = s
-    .replace(/^(?:[а-яa-z]{1,3}\d?[-/])?\d{5,12}\s+(?=[а-яa-z])/i, '')
-    .replace(/^\d{1,3}-\d{1,3}[а-яa-z]?\s+(?=[а-я])/i, '')
-    .trim();
-  // Normalize decimal commas between digits (e.g. 12,5 -> 12.5) and dotted brand names (e.g. D.BOR -> dbor)
-  s = s
-    .replace(/(\d),(\d)/g, '$1.$2')
-    .replace(/\b(?:d\.bor|д\.бор)\b/gi, 'dbor');
-
-  // Extract GOST / TU / DIN / ISO standards into gostKey
-  const gostMatches: string[] = [];
-  s = s.replace(/(?:^|[^а-яa-z0-9])(гост|ту|din|iso)\s*(?:р\s*)?(\d+(?:[.-]\d+)*)/gi, (_, std, num) => {
-    const mainNum = String(num).split(/[.-]/)[0];
-    gostMatches.push(`${String(std).toLowerCase()}:${mainNum}`);
-    return ' ';
-  });
-
-  // Extract all numbers (dimensions, thickness, diameter, density, weight, volume, pack count, model numbers)
-  const rawNums = s.match(/\d+(?:\.\d+)?/g) || [];
-  const normNums = rawNums
-    .map(n => String(Number(n)))
-    .filter(n => n !== 'NaN');
-  const numericSig = normNums
-    .slice()
-    .sort((a, b) => Number(a) - Number(b))
-    .join('|');
-
-  // Extract word tokens from original text
-  const cleanTokens = s
-    .replace(/\d+(?:\.\d+)?/g, ' ')
-    .replace(/[^а-яa-z]+/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-
-  // Extract brand in O(1) via token lookup
-  let brand = '';
-  if (brandHint && brandHint !== 'GENERIC' && brandHint !== 'UNSPECIFIED') {
-    const cleanB = brandHint.toLowerCase().replace(/\b(?:d\.bor|д\.бор)\b/gi, 'dbor');
-    brand = BRAND_SYNONYMS_MAP[cleanB] || cleanB;
-  }
-  if (!brand) {
-    for (const tok of cleanTokens) {
-      if (tok === 'dbor') {
-        brand = 'dbor';
-        break;
-      }
-      const mapped = BRAND_SYNONYMS_MAP[tok];
-      if (mapped) {
-        brand = mapped;
-        break;
-      }
-    }
-  }
-
-  const wordStems: string[] = [];
-  for (const tok of cleanTokens) {
-    if (STRICT_STOP_WORDS.has(tok)) continue;
-    // Standart kelimeleri (гост/gost/ту/tu) techVariant tarafından yönetilir;
-    // böylece standart belirtilmeyen kayıtlar aynı kovaya düşüp hem GOST hem TU ile eşleşebilir,
-    // ancak GOST ile TU birbirleriyle asla eşleşmez.
-    if (tok === 'гост' || tok === 'gost' || tok === 'ту' || tok === 'tu') continue;
-    const stem = stemOriginalRussianWord(tok);
-    if (stem && stem.length >= 2 && !STRICT_STOP_WORDS.has(stem) && stem !== 'гост' && stem !== 'ту') {
-      wordStems.push(stem);
-    }
-  }
-
-  const uniqueStems = Array.from(new Set(wordStems)).sort();
-  if (uniqueStems.length === 0 && !techVariant.isTimber) {
-    STRICT_SIGNATURE_CACHE.set(cacheKey, null);
-    return null;
-  }
-
-  // Kereste kalemlerinde kova anahtarı tam kesit/ölçüye göre oluşturulur (örn. TIMBER::50x100x6000);
-  // kova içindeki adaylar areTechnicalVariantsCompatible ile GOST/TU, Sort 1/1-2/2/3, Nem, Yüzey ve Ağaç Türü bazında kesin filtrelenir.
-  const exactKey = (techVariant.isTimber && techVariant.crossSectionDims)
-    ? `TIMBER::${techVariant.crossSectionDims}`
-    : `${numericSig || '_'}::${uniqueStems.join('|')}`;
-
-  const result: StrictOriginalMaterialSignature = {
-    rawOriginalText: raw,
-    hasCyrillic: hasCyrOrig || hasCyrMat,
-    brand,
-    numericSig,
-    gostKey: gostMatches.sort().join(','),
-    stems: uniqueStems,
-    exactKey,
-    techVariant
-  };
-
-  if (STRICT_SIGNATURE_CACHE.size < 25000) {
-    STRICT_SIGNATURE_CACHE.set(cacheKey, result);
-  }
-  return result;
-}
-
-interface StrictIndexedHistoricalItem {
-  inv: InvoiceRecord;
-  pastIt: any;
-  sig: StrictOriginalMaterialSignature;
-  grossUnitPrice: number;
-  normalizedUnit: string;
-  cleanInvNo: string;
-  invSupplierLower: string;
-  sourceType: 'GES_ARCHIVE' | 'PRIZMA_ERP';
-}
-
-const STRICT_ORIGINAL_INDEX_CACHE = new WeakMap<
-  InvoiceRecord[],
-  Map<string, StrictIndexedHistoricalItem[]>
->();
-
-function getOrBuildStrictOriginalIndex(historicalInvoices: InvoiceRecord[]): Map<string, StrictIndexedHistoricalItem[]> {
-  const cached = STRICT_ORIGINAL_INDEX_CACHE.get(historicalInvoices);
-  if (cached) return cached;
-
-  const buckets = new Map<string, StrictIndexedHistoricalItem[]>();
-
-  for (const inv of historicalInvoices || []) {
-    if (!inv || inv.isDeleted) continue;
-    if (!Array.isArray(inv.items)) continue;
-    if ((inv as any).linesReconciled === false || (inv as any).lineCheck === 'mismatch') continue;
-
-    const cleanInvNo = cleanDocNo(inv.invoiceNumber || inv.invoiceNo);
-    const invSupplierLower = String(inv.supplier || (inv as any).vendorName || '').trim().toLowerCase();
-    const isPrizma = Boolean(
-      (inv as any).sourceCollection === 'prizma_invoices' ||
-      String(inv.id || '').startsWith('prizma_') ||
-      ((inv as any).prizmaProcessId && !inv.uploadedBySupervisorId)
-    );
-
-    for (const pastIt of inv.items) {
-      if (!pastIt) continue;
-      if ((pastIt as any).lineVerified === false || !isLineArithmeticConsistent(pastIt as any)) continue;
-
-      const grossUnitPrice = comparisonGrossUnitPrice(pastIt as any);
-      if (!grossUnitPrice || grossUnitPrice <= 0) continue;
-
-      const sig = buildStrictOriginalMaterialSignature({
-        originalName: pastIt.originalName,
-        materialName: pastIt.materialName,
-        brand: (pastIt as any).brand
-      });
-      if (!sig) continue;
-
-      const entry: StrictIndexedHistoricalItem = {
-        inv,
-        pastIt,
-        sig,
-        grossUnitPrice,
-        normalizedUnit: normalizeUnit(pastIt.unit || 'adet'),
-        cleanInvNo,
-        invSupplierLower,
-        sourceType: isPrizma ? 'PRIZMA_ERP' : 'GES_ARCHIVE'
-      };
-
-      const list = buckets.get(sig.exactKey);
-      if (list) {
-        list.push(entry);
-      } else {
-        buckets.set(sig.exactKey, [entry]);
-      }
-    }
-  }
-
-  STRICT_ORIGINAL_INDEX_CACHE.set(historicalInvoices, buckets);
-  return buckets;
-}
-
-/**
- * Given a draft invoice or discount record's line items, checks in O(1) time via the
- * Strict Original-Language (Russian-first) Hash-Bucket Index whether the 100% identical material
- * (identical Russian words, brand, model, dimensions, thickness, diameter, density, and standard)
- * was purchased at a cheaper unit price (at least 1% difference) across the system.
+ * Bir taslak faturanın veya indirim kaydının kalemleri için aynı malzemenin (aynı marka, model ve
+ * teknik özellik) daha önce en az %1 daha ucuza alınıp alınmadığını ortak eşleştiriciyle kontrol eder.
  */
 export function findCheaperHistoricalBenchmarksForItems(
   items: any[],
@@ -1228,75 +890,34 @@ export function findCheaperHistoricalBenchmarksForItems(
     return [];
   }
 
-  const buckets = getOrBuildStrictOriginalIndex(historicalInvoices);
   const results: import('../types').CheaperHistoricalBenchmark[] = [];
-  const cleanContextInvNo = cleanDocNo(context.invoiceNo);
-  const excludeInvId = context.excludeInvoiceId || (context.excludeDiscountId ? `inv_sync_${context.excludeDiscountId}` : '');
-  const excludeDiscId = context.excludeDiscountId || '';
 
   items.forEach((rawIt, idx) => {
     if (!rawIt) return;
+    // Belgeyle doğrulanamayan satırda fiyat farkı iddia edilmez
+    if (!isTrustedPriceLine(rawIt)) return;
     const currentUnitPrice = comparisonGrossUnitPrice(rawIt);
     const qty = Number(rawIt.quantity) || 1;
     if (currentUnitPrice <= 0 || qty <= 0) return;
 
-    const sig = buildStrictOriginalMaterialSignature({
-      originalName: rawIt.originalName,
-      materialName: rawIt.materialName,
-      brand: rawIt.brand
-    });
-    if (!sig) return;
-
-    const candidates = buckets.get(sig.exactKey);
-    if (!candidates || candidates.length === 0) return;
-
-    const draftUnitNorm = normalizeUnit(rawIt.unit || 'adet');
-    const validMatches: Array<{ entry: StrictIndexedHistoricalItem; comparablePrice: number }> = [];
-
-    for (const cand of candidates) {
-      // Never compare a discount/invoice record against its own synced invoice copy
-      if (excludeInvId && cand.inv.id === excludeInvId) continue;
-      if (excludeDiscId && ((cand.inv as any).discountId === excludeDiscId || cand.inv.id === `inv_sync_${excludeDiscId}`)) continue;
-      if (cleanContextInvNo && cand.cleanInvNo === cleanContextInvNo) continue;
-
-      // 0. Technical Variant & Standard Lock (GOST vs TU, Sort 1/2/3, Moisture, Surface Treatment, Wood Species, Cross-section)
-      const techCompat = areTechnicalVariantsCompatible(sig.techVariant, cand.sig.techVariant);
-      if (!techCompat.compatible) continue;
-
-      // If both specify a brand or GOST / TU / DIN standard, they must be 100% identical
-      if (sig.brand && cand.sig.brand && sig.brand !== cand.sig.brand) continue;
-      if (sig.gostKey && cand.sig.gostKey && sig.gostKey !== cand.sig.gostKey) continue;
-
-      // Unit check: must be identical unit or mathematically convertible
-      let comparablePrice = cand.grossUnitPrice;
-      if (cand.normalizedUnit !== draftUnitNorm) {
-        const conv = normalizeQuantityAndPrice(
-          cand.pastIt.quantity || 1,
-          cand.grossUnitPrice,
-          cand.pastIt.unit || 'adet',
-          rawIt.unit || 'adet',
-          sig.rawOriginalText,
-          rawIt.category || cand.pastIt.category || ''
-        );
-        if (!conv.conversionApplied || conv.normalizedUnitPrice <= 0) continue;
-        comparablePrice = Number(conv.normalizedUnitPrice.toFixed(2));
-      }
-
-      if (comparablePrice <= 0) continue;
-
-      // Sanity ratio guard against extreme pack-vs-piece OCR unit errors (>10x)
-      const ratio = Math.max(currentUnitPrice / comparablePrice, comparablePrice / currentUnitPrice);
-      if (ratio > 10) continue;
-
-      validMatches.push({ entry: cand, comparablePrice });
-    }
-
+    const validMatches = findSameMaterialHistory(
+      rawIt,
+      currentUnitPrice,
+      {
+        supplier: context.supplier,
+        jobsiteId: context.jobsiteId,
+        date: context.orderDate,
+        invoiceNo: context.invoiceNo,
+        excludeInvoiceId: context.excludeInvoiceId,
+        excludeDiscountId: context.excludeDiscountId
+      },
+      historicalInvoices
+    );
     if (validMatches.length === 0) return;
 
-    validMatches.sort((a, b) => a.comparablePrice - b.comparablePrice);
     const cheapest = validMatches[0];
 
-    // User confirmed rule: show when price difference is at least 1% (>= 1.0%)
+    // Kullanıcı kuralı: en az %1 fark varsa göster
     if (currentUnitPrice < cheapest.comparablePrice * 1.01) return;
 
     const unitOverpayment = Number((currentUnitPrice - cheapest.comparablePrice).toFixed(2));
@@ -1310,7 +931,7 @@ export function findCheaperHistoricalBenchmarksForItems(
 
     const bestInv = cheapest.entry.inv;
     const isPrizma = cheapest.entry.sourceType === 'PRIZMA_ERP';
-    const rawSupplier = String(bestInv.supplier || (bestInv as any).vendorName || 'Geçmiş Tedarikçi')
+    const rawSupplier = String(cheapest.entry.supplier || 'Geçmiş Tedarikçi')
       .replace(/\s*\(Prizma ERP\)\s*$/, '')
       .trim();
 
@@ -1325,13 +946,14 @@ export function findCheaperHistoricalBenchmarksForItems(
       (prizmaDemandId ? `/api/prizma/invoice-file/${prizmaDemandId}?type=schet` : undefined) ||
       (lineCheckFileId ? `/api/prizma/file/${lineCheckFileId}` : undefined);
     const historicalPrizmaUrl = (bestInv as any).prizmaBtfUrl || (bestInv as any).prizmaUrl || undefined;
+    const sig = buildStrictOriginalMaterialSignature(rawIt);
 
     results.push({
       lineIndex: idx,
-      materialName: rawIt.materialName || sig.rawOriginalText,
-      originalName: sig.rawOriginalText,
-      historicalOriginalName: cheapest.entry.sig.rawOriginalText,
-      brand: rawIt.brand || (sig.brand ? sig.brand.toUpperCase() : undefined),
+      materialName: rawIt.materialName || sig?.rawOriginalText || '',
+      originalName: sig?.rawOriginalText || rawIt.originalName,
+      historicalOriginalName: cheapest.entry.profile.sig.rawOriginalText,
+      brand: rawIt.brand || (sig?.brand ? sig.brand.toUpperCase() : undefined),
       unit: rawIt.unit || 'Adet',
       quantity: qty,
       currentUnitPrice: Number(currentUnitPrice.toFixed(2)),
@@ -1339,17 +961,20 @@ export function findCheaperHistoricalBenchmarksForItems(
       historicalAvgUnitPrice: avgPrice,
       historicalSupplier: rawSupplier,
       historicalJobsiteName: bestInv.jobsiteName || (bestInv as any).prizmaJobsite || 'Merkez / Şantiye',
-      historicalDate: bestInv.date || (bestInv as any).createdAt || '-',
+      historicalDate: cheapest.entry.date || '-',
       historicalInvoiceNo: bestInv.invoiceNumber || bestInv.invoiceNo || '-',
       historicalInvoiceId: bestInv.id,
       historicalFileUrl,
       historicalPrizmaDemandId: prizmaDemandId,
       historicalPrizmaUrl,
       historicalSource: isPrizma ? 'PRIZMA_ERP' : 'GES_ARCHIVE',
+      historicalPurchasesCount: validMatches.length,
       unitOverpayment,
       totalLineOverpayment,
       overpaymentPercentage,
-      matchReason: `Orijinal Rusça metni, markası, modeli ve tüm ölçü/teknik özellikleri birebir aynı olan bu malzeme ${rawSupplier} firmasından ${cheapest.comparablePrice.toLocaleString('tr-TR')} ₽ birim fiyata alınmıştır.`
+      matchReason: cheapest.exact
+        ? `Orijinal Rusça tanımı, markası, modeli ve tüm ölçü/teknik özellikleri birebir aynı olan bu malzeme ${rawSupplier} firmasından ${cheapest.comparablePrice.toLocaleString('tr-TR')} ₽ birim fiyata alınmıştır.`
+        : `Aynı marka, model ve teknik özellikteki bu malzeme (faturada farklı yazımla: "${cheapest.entry.profile.sig.rawOriginalText}") ${rawSupplier} firmasından ${cheapest.comparablePrice.toLocaleString('tr-TR')} ₽ birim fiyata alınmıştır.`
     });
   });
 
@@ -1357,7 +982,7 @@ export function findCheaperHistoricalBenchmarksForItems(
 }
 
 /**
- * Scans all DiscountRecord entries in milliseconds using the O(1) Strict Original-Language Index
+ * Scans all DiscountRecord entries with the shared same-material matcher
  * to build the Admin-only "İndirimli Kayıtta Farklı Faturalar" invoice-level anomaly list.
  */
 export function scanDiscountRecordsForHistoricalAnomalies(
@@ -1373,6 +998,8 @@ export function scanDiscountRecordsForHistoricalAnomalies(
   for (const disc of discounts) {
     if (!disc || disc.isDeleted) continue;
     if (!Array.isArray(disc.items) || disc.items.length === 0) continue;
+    // Kalemler son anlaşılan tutarı vermiyorsa (ilk teklif fiyatları ya da dağıtılmış tutar) ödenen fiyat bilinmez: iddia yok
+    if (!discountLinesArePaidPrices(disc)) continue;
 
     // Always evaluate with the strict original-language (Russian) 100% exact matcher
     const affectedLines = findCheaperHistoricalBenchmarksForItems(
@@ -1453,13 +1080,9 @@ export function scanDirectInvoicesForHistoricalAnomalies(
     if (!inv || inv.isDeleted) continue;
     if (!Array.isArray(inv.items) || inv.items.length === 0) continue;
 
-    // Exclude Prizma ERP invoices
-    const isPrizma = Boolean(
-      (inv as any).sourceCollection === 'prizma_invoices' ||
-      String(inv.id || '').startsWith('prizma_') ||
-      ((inv as any).prizmaProcessId && !inv.uploadedBySupervisorId)
-    );
-    if (isPrizma) continue;
+    // Prizma ERP faturaları ve kalemleri belgeyle doğrulanamamış faturalar hariç
+    if (isPrizmaInvoice(inv)) continue;
+    if (!isTrustedPriceSourceInvoice(inv)) continue;
 
     // Exclude invoices that were synced from the Discount Center
     if (String(inv.id || '').startsWith('inv_sync_')) continue;
