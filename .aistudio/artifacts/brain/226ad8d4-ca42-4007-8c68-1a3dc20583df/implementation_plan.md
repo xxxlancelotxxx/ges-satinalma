@@ -1,84 +1,110 @@
-# Tüm Malzeme Kategorilerinde Evrensel "Elma-Elma" Teknik Varyant, Standart ve Kalite Sınıfı Mimarisi
+# İndirim Alınmayan Faturalar (Doğrudan Fatura Girişleri) Denetim & Baskı Raporu Planı
 
-Satınalma denetiminde yalnızca kerestede değil; çelik, kablo, çelik hasır, yalıtım, su yalıtım membranı, polietilen film, kontrplak, bağlantı elemanları, el aletleri ve iş güvenliği ekipmanlarının tamamında farklı standart (`ГОСТ` vs `ТУ`), farklı kalite/mukavemet sınıfı, farklı kaplama/gövde yapısı veya farklı rulo/paket hacmi (`m²`/`m³`) taşıyan ürünlerin birbirleriyle kıyaslanarak hatalı fiyat farkı üretmesini kalıcı olarak engelleyen merkezi teknik doğrulama mimarisidir.
+## 1. Amaç ve Kapsam
+Bu geliştirme, **Performans ve İndirim Raporu** ekranına, **AI Otomatik Fatura Okuma -> Sistemde Kayıtlı Faturalar & Malzeme Kalemleri** arşivinde yer alan ancak **Şef İndirim & TDF Teklif Merkezi** üzerinden indirim/pazarlık kaydı girilmemiş olan **İndirimsiz Doğrudan Faturaları** tespit eden, şef ve şantiye bazında karneleyen ve şeflere gönderilmek üzere **Excel (.xlsx)**, **PDF (Yazdırılabilir Kurumsal Rapor)** ve **HTML** formatlarında dışa aktaran yeni bir denetim modülü kazandırır.
 
----
-
-## Kullanıcı Onayları ve Kritik Kararlar
-
-> [!IMPORTANT]
-> Aşağıdaki üç temel karar doğrultusunda sistemdeki **4 panelin tamamı** (*Hızlı Ön Onay Fiyat Denetimi*, *Malzeme Karşılaştırma*, *Anomali Fiyat Artış Paneli* ve *Admin Fiyat Anomali Denetimi*) aynı ortak teknik uyumluluk motoru üzerinden çalışacaktır:
-
-- **Karar 1 — Tüm Kategorilerde `GOST` vs `TU` Ayrımı ve Belirsiz Kayıt Esnekliği**: Kablo (`ВВГнг`), çelik hasır (`Сетка сварная`), boru/profil, polietilen film (`Пленка ГОСТ 10354` vs `Техническая ТУ`) ve diğer tüm yapı malzemelerinde `GOST` ve `TU` birbirinden kesin olarak ayrılır; standart belirtilmemiş geçmiş kayıtlar ise diğer tüm teknik, kalite ve ölçü kriterleri uyuştuğu sürece her ikisiyle eşleşebilir.
-- **Karar 2 — Kategori Bazlı Teknik ve Kalite Sınıfı Kilidi**:
-  - **Çelik & Metal**: Çelik kalitesi (`Ст3` vs `09Г2С` vs `А500С` vs `Вр-1`), yüzey kaplaması (`Galvanizli / Оцинк.` vs `Siyah / Черн.`) ve üretim tipi (`Sıcak Çekme г/к` vs `Soğuk Çekme х/к`).
-  - **Yalıtım & Membran**: Ürün serisi ve alt kodu (`40 RN Стандарт ПРОФ` vs `34 RN Стены и крыши`, `Техноэласт` vs `Унифлекс` vs `Ультранап`), taşıyıcı/kaplama tipi (`ЭПП` vs `ТКП` vs `ХПП` vs `ЭКП`) ve yoğunluk sınıfı.
-  - **Kontrplak, Levha & Polietilen Film**: Kontrplak tutkal/yüzey sınıfı (`ФСФ` vs `ФК` vs `Ламинированная ФОФ`), yüzey kalitesi (`Сорт 1/1`, `1/2`, `2/2`, `3/4`, `4/4`) ve polietilen film hammadde sınıfı (`Birincil ГОСТ 10354` vs `Teknik / Geri Dönüşüm ТУ`).
-  - **Hırdavat, Bağlantı Elemanı, El Aleti & KKD**: Cıvata/somun/saplama mukavemet sınıfı (`к.п. 4.8 / 5.8` vs `8.8` vs `10.9` vs `12.9`), kaplama (`Galvanizli` vs `Oksit/Siyah` vs `Paslanmaz A2/A4`) ve el aleti/tabanca gövde-mekanizma tipi (`Metal Gövde / Ayarlı / Teflon` vs `Plastik Gövde / Ayarsız`).
-- **Karar 3 — Rulo ve Paket Birimlerde Metraj ve Hacim (`m²` / `m³`) Eşitliği**: Birimi `Rulo`, `Paket`, `Ambalaj` veya `Plaka` olan alımlarda paket içi hacim/alan (`1,22 m³/упак.` vs `0,585 m³/упак.`, `3x100m = 300 m²` vs `3x50m = 150 m²`, `10 m²` vs `15 m²`) birebir aynı olmak zorundadır; farklı paket büyüklükleri asla aynı birim fiyat üzerinden kıyaslanmaz.
+Temel hedef; satınalma şeflerine indirim almadan doğrudan sisteme işledikleri faturaları somut liste ve tutarlarla iletmek, kaçırılan potansiyel indirim tutarını göstermek ve her bir fatura için **"Neden İndirim Alınmadı?"** sorusuna yazılı savunma/açıklama talep ederek pazarlık baskısı oluşturmaktır.
 
 ---
 
-## 1. Genel Bakış ve Temel Kavram
-
-- **Ne Yapar**: Fatura veya teklif kalemlerindeki orijinal Rusça ve Türkçe teknik açıklamaları çok boyutlu bir **Evrensel Teknik Varyant İmzası**na dönüştürür. İki satırın kıyaslanabilmesi için malzeme ailesi, kesit/boyut, standart (`GOST`/`TU`), kalite/mukavemet sınıfı, yüzey/gövde tipi ve paket/rulo metrajının birbiriyle çelişmemesi şartını koşar.
-- **Kullanıcı Değeri**: Satınalma şefleri ve yöneticiler fatura denetlerken yüksek standartlı (`ГОСТ`, `09Г2С`, `Metal Gövde`, `1,22 m³ Paket`, `ФСФ Сорт 1/1`) bir malzemenin daha ucuz olan düşük standartlı (`ТУ`, `Ст3`, `Plastik Gövde`, `0,585 m³ Paket`, `ФК Сорт 4/4`) bir malzemeyle kıyaslanmasından kaynaklanan sahte fiyat artışı uyarılarıyla karşılaşmaz.
-
----
-
-## 2. Kullanıcı Deneyimi ve Görsel Tasarım
-
-- **Kullanıcı Akışı**:
-  1. **Hızlı Ön Onay Fiyat Denetimi**: Kullanıcı yeni bir fatura yüklediğinde her kalemin teknik varyant rozetleri (`[GOST]`, `[TU]`, `[09Г2С]`, `[Galvanizli]`, `[к.п. 8.8]`, `[Metal Gövde / Ayarlı]`, `[1.22 m³/Paket]`) otomatik çıkarılır ve yalnızca aynı standart/kalitedeki geçmiş alımlarla kıyaslanır.
-  2. **Malzeme Karşılaştırma**: Aynı malzeme ailesinin farklı standart, kalite sınıfı, kaplama veya paket hacmine sahip versiyonları kendi teknik rozetleriyle ayrı tablo satırları olarak listelenir.
-  3. **Anomali Fiyat Artış Paneli & Admin Fiyat Anomali Denetimi**: Yalnızca tüm teknik ve kalite boyutları birebir örtüşen alımlar arasında gerçek fiyat farkı varsa alarm üretilir; çoklu ürün adı yazılmış belirsiz/karma satırlar (`Ультранап / Техноэласт ЭПП`) tekil referans olarak kullanılmaz.
-- **Görsel Kimlik ve Tablo Düzeni**:
-  - *Tipografi ve Sayısal Hizalama*: Tüm birim fiyatlar, metrajlar ve sapma yüzdeleri `tabular-nums` (`font-mono`) ile dikey hizalı gösterilir.
-  - *Net Varyant Etiketlemesi*: Malzeme başlıklarının yanında teknik varyant bilgisi (`[GOST]`, `[TU]`, `[09Г2С]`, `[Galvanizli]`, `[1.22 m³/Paket]`, `[Metal / Ayarlı]`) okunaklı ve tek satırda gösterilir.
-  - *Yüksek Yoğunluklu Kurumsal Tablo Yapısı*: Düz yüzeyler, ince ayırıcı çizgiler ve anlamlı durum renkleri (Yeşil: Uygun/Normal, Kehribar: İnceleme, Kırmızı: Gerçek Anomali) korunur.
+## 2. Onaylanan Kullanıcı Kararları
+1. **Raporlama ve Gruplama Yapısı**: Hem **Şef Bazlı Özet Karne** (şefin toplam fatura adedi, indirimli fatura adedi, indirimsiz fatura adedi/oranı, indirimsiz toplam fatura hacmi ve hedef orana göre kaçırılan potansiyel indirim tutarı) hem de **Detaylı Fatura Listesi** (şef, şantiye, tedarikçi firma, fatura numarası, fatura tarihi, kalem sayısı, toplam tutar, tahmini kayıp tutarı ve şef savunma alanı) bir arada sunulacaktır.
+2. **Çıktı Sütunları ve Denetim Alanları**: Ekranda ve indirilen **Excel, PDF, HTML** raporlarında; ayarlanabilir hedef indirim oranına (varsayılan `%5`, kullanıcı tarafından `%3`, `%5`, `%10` vb. değiştirilebilir) göre hesaplanan **Tahmini Kayıp İndirim Tutarı** sütunu ve şeflerin doldurması veya yönetimin not düşmesi için **Neden İndirim Alınmadı? (Şef Savunma / Açıklama)** sütunu yer alacaktır.
 
 ---
 
-## 3. Temel Ürün Kararları ve Teknik Gerekçeler
+## 3. Mimari ve Veri Akış Şeması
 
-- **Karar 1 — Tüm Kategorileri Kapsayan Evrensel Teknik Varyant Profili**
-  - *Seçilen Yaklaşım*: Mevcut standart ve kalite ayrıştırıcısını tüm inşaat malzeme ailelerini (Çelik, Kablo, Hasır, Yalıtım, Membran, Film, Kontrplak, Bağlantı Elemanı, El Aleti/KKD) kapsayacak şekilde genişletmek.
-  - *Neden*: Fiyatı %30 ile %250 arasında değiştiren teknik nitelikler her kategoride farklı terimlerle (`ГОСТ 10354` vs `техническая`, `40 RN` vs `34 RN`, `метал.` vs `пластик`, `оцинк.` vs `оксид`, `09Г2С` vs `Ст3`) ifade edilmektedir.
-- **Karar 2 — Rulo/Paket Birimlerde Paket İçi Metraj ve Hacim (`m²`/`m³`) Kilidi**
-  - *Seçilen Yaklaşım*: Birimi `рул`, `упак`, `пач`, `лист`, `шт` olan yalıtım, membran ve film kalemlerinde metin içindeki paket hacmini (`1,22 м3/упак` vs `0,585 м3/упак`), rulo açılımını (`3х100м` vs `3х50м`) ve model kodunu (`40 RN` vs `34 RN`) imzaya dahil etmek.
-  - *Neden*: Bir ruloda `1,22 m³` malzeme varken diğerinde `0,585 m³` malzeme olduğunda rulo fiyatları doğal olarak 2 kat farklıdır; bunları aynı rulo gibi kıyaslamak hatalı anomali üretir.
-- **Karar 3 — Çoklu/Alternatif Yazımlı (`A / B`) Fatura Satırlarının Korunması**
-  - *Seçilen Yaklaşım*: Fatura satırında iki farklı ürün serisi eğik çizgiyle birlikte yazılmışsa (`Ультранап / Техноэласт ЭПП`), bu satırın hangi seriye ait olduğu belirsiz olduğundan tekil `Техноэласт ЭПП` satırlarına karşı ucuz/pahalı referans olmasını engellemek.
-  - *Neden*: Tedarikçilerin karma/alternatif açıklamaları elma-elma kıyaslamayı bozmamalıdır.
-
----
-
-## 4. Teknik Mimari ve Veri Akışı
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                   FATURA & TEKLİF KALEMİ (Rusça + Türkçe)                   │
-└──────────────────────────────────────┬──────────────────────────────────────┘
-                                       │
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│               EVRENSEL TEKNİK VARYANT & KALİTE ÇIKARICI MOTOR               │
-│  • Standart: GOST (ve GOST No) ⟷ TU (ve TU No) ⟷ DIN/ISO (Belirsiz Esnek)   │
-│  • Çelik & Tel: Ст3 ⟷ 09Г2С ⟷ А500С ⟷ Вр-1 | Galvanizli ⟷ Siyah | г/к ⟷ х/к │
-│  • Yalıtım & Membran: Seri/Model (40 RN ⟷ 34 RN) | ЭПП ⟷ ТКП | Yoğunluk     │
-│  • Rulo/Paket Hacmi: m³/Paket (1.22 ⟷ 0.585) | Rulo Metrajı (3x100m ⟷ 3x50m)│
-│  • Levha & Film: ФСФ ⟷ ФК ⟷ Ламинир. | Сорт 1/1..4/4 | Первичная ⟷ Технич.  │
-│  • Hırdavat & El Aleti: к.п. 5.8 ⟷ 8.8 ⟷ 10.9 | Metal/Ayarlı ⟷ Plastik      │
-└───────────┬──────────────────┬────────────────────┬─────────────────────────┘
-            │                  │                    │
-            ▼                  ▼                    ▼
-┌───────────────────┐ ┌──────────────────┐ ┌──────────────────┐ ┌───────────────────┐
-│     PANEL 1       │ │     PANEL 2      │ │     PANEL 3      │ │      PANEL 4      │
-│  Hızlı Ön Onay    │ │     Malzeme      │ │  Anomali Fiyat   │ │   Admin Fiyat     │
-│  Fiyat Denetimi   │ │  Karşılaştırma   │ │   Artış Paneli   │ │ Anomali Denetimi  │
-└───────────────────┘ └──────────────────┘ └──────────────────┘ └───────────────────┘
+```text
++-----------------------------------------------------------------------------------+
+|                        VERİ KAYNAKLARI (CANLI FIRESTORE)                          |
++-----------------------------------------+-----------------------------------------+
+                                          |
+                  +-----------------------+-----------------------+
+                  v                                               v
+  [Sistemde Kayıtlı Faturalar]                    [Şef İndirim & TDF Kayıtları]
+  (GES Arşivi Fatura & Kalemleri)                 (Pazarlık / TDF İndirim Kayıtları)
+                  |                                               |
+                  +-----------------------+-----------------------+
+                                          |
+                                          v
++-----------------------------------------------------------------------------------+
+|                İNDİRİMSİZ FATURA EŞLEŞTİRME & AYIKLAMA MOTORU                     |
+|  1. Silinmiş (Çöp Kutusu) ve Prizma ERP referans kayıtlarını hariç tut            |
+|  2. İndirim Merkezinden senkronize edilen (inv_sync_ / discountId) kayıtları ele  |
+|  3. Normalize edilmiş Fatura No veya (Tedarikçi + Tarih + Tutar) eşleşmesini ele  |
+|  => KALANLAR: İndirim Alınmadan Doğrudan Girilen Faturalar                        |
++-----------------------------------------------------------------------------------+
+                                          |
+                                          v
++-----------------------------------------------------------------------------------+
+|            PERFORMANS VE İNDİRİM RAPORU -> İNDİRİMSİZ FATURA DENETİMİ             |
+|                                                                                   |
+|  +-----------------------------------------------------------------------------+  |
+|  | A. Filtre & Kontrol Barı                                                    |  |
+|  | - Şef Seçimi | Şantiye Seçimi | Tedarikçi / Fatura No Arama | Tarih Aralığı |  |
+|  | - Hedef İndirim Oranı Seçici (%3, %5, %7, %10)                              |  |
+|  | - Tek Tıkla İndir: [Excel (.xlsx)]  [PDF Raporu]  [HTML Dosyası]            |  |
+|  +-----------------------------------------------------------------------------+  |
+|  | B. Üst KPI & Şef Bazlı İndirimsiz Fatura Karnesi                            |  |
+|  | - Toplam İndirimsiz Fatura Adedi & Hacmi (RUB / TRY / USD / EUR)            |  |
+|  | - Şef Karnesi Tablosu: Şef | Şantiye | Toplam Fatura | İndirimsiz Adet (%)  |  |
+|  |   | İndirimsiz Tutar | Kaçırılan Potansiyel İndirim | "Sadece Bu Şefi İndir"|  |
+|  +-----------------------------------------------------------------------------+  |
+|  | C. Detaylı İndirimsiz Faturalar & Kalem Denetim Tablosu                     |  |
+|  | - Sütunlar: Tarih | Şef & Şantiye | Tedarikçi Firma | Fatura No | Kalemler  |  |
+|  |   | Fatura Tutarı | Tahmini Kayıp (%X) | Neden İndirim Alınmadı? (Savunma)  |  |
+|  | - Satır genleştiğinde faturadaki malzeme kalemlerini ve birim fiyatları gör |  |
+|  +-----------------------------------------------------------------------------+  |
++-----------------------------------------------------------------------------------+
 ```
 
-### Etkileşim ve Durum Eşlemesi
-- **Teknik Rozet Üretimi**: Çıkarılan tüm ayırt edici nitelikler (`[GOST]`, `[TU]`, `[09Г2С]`, `[Galvanizli]`, `[к.п. 8.8]`, `[Metal / Ayarlı]`, `[40 RN • 1.22 m³/Paket]`) standart rozet formatında malzeme adına ve küme başlığına eklenir.
-- **Çapraz Panel Tutarlılığı**: Sunucu tarafındaki malzeme gruplama motoru ile istemci tarafındaki 4 denetim paneli birebir aynı uyumluluk fonksiyonunu çağırarak hiçbir panelde farklı kalite veya standarttaki iki malzemenin aynı kümede yer almamasını garanti eder.
+---
+
+## 4. Kullanıcı Deneyimi (UX) ve Görsel Tasarım
+
+### A. Sekme ve Görünüm Geçişi
+- **Performans ve İndirim Raporu** ekranının üst kısmına belirgin bir görünüm seçici eklenecektir:
+  1. **Genel Performans & İndirim Analizi** (Mevcut görünüm)
+  2. **İndirim Alınmayan Faturalar Denetimi (Baskı & Sorgu Raporu)** (Yeni görünüm — üzerinde tespit edilen indirimsiz fatura sayısı rozeti ile)
+
+### B. Üst Özet Kartları ve Şef Bazlı Özet Karne
+- **4 Kritik Denetim Kartı**:
+  - **İndirimsiz Fatura Sayısı**: Toplam fatura içindeki payı (`%`) ile birlikte.
+  - **İndirimsiz Toplam Fatura Hacmi**: İndirim alınmadan doğrudan onaylanan faturaların toplam tutarı.
+  - **Kaçırılan Potansiyel İndirim (Tahmini Kayıp)**: Seçili hedef indirim oranına (örn. `%5`) göre masada bırakılan toplam tutar.
+  - **En Çok İndirimsiz Fatura Giren Şef**: Odaklanılması gereken ilk sorumluyu gösteren uyarı kartı.
+- **Şef Bazlı İndirimsiz Fatura Karnesi Tablosu**:
+  - Her satınalma şefi için: *Şef Adı*, *Şantiyesi*, *Toplam Fatura Sayısı*, *İndirimli Fatura Sayısı*, *İndirimsiz Fatura Sayısı*, *İndirimsiz Giriş Oranı (%)*, *İndirimsiz Fatura Toplamı* ve *Tahmini Kayıp İndirim Tutarı*.
+  - Her şef satırının sağında **"Bu Şefin Sorgu Raporunu İndir (Excel / PDF / HTML)"** hızlı aksiyon butonları yer alacak; böylece yöneticiler tek tıkla ilgili şefe sadece kendi indirimsiz faturalarını içeren dosyayı gönderebilecektir.
+
+### C. Detaylı İndirimsiz Fatura Listesi ve Kalem İnceleme
+- **Filtreleme**: Satınalma Şefi, Şantiye, Tedarikçi Firma / Fatura No arama kutusu, Başlangıç–Bitiş Fatura Tarihi ve Para Birimi filtresi.
+- **Tablo Sütunları**:
+  1. **Sıra No**
+  2. **Fatura Tarihi & Kayıt Tarihi**
+  3. **Satınalma Şefi & Şantiye**
+  4. **Tedarikçi Firma**
+  5. **Fatura Numarası** (Orijinal PDF/Görsel varsa tek tıkla görüntüleme ikonu ile)
+  6. **Kalem Sayısı & Özeti** (Tıklandığında alt satırda faturanın tüm malzeme kalemlerini, miktar ve birim fiyatlarını açar)
+  7. **Fatura Toplam Tutarı** (`tabular-nums` hizalı)
+  8. **Tahmini Kayıp İndirim (`%Hedef`)** (Kırmızı vurgu ile)
+  9. **Neden İndirim Alınmadı? (Şef Savunma / Açıklama)**: Ekrandan da anlık not yazılabilir, çıktılarda ise şefin doldurması için belirgin kutucuklu sütun olarak yer alır.
+
+---
+
+## 5. Kurumsal Dışa Aktarım (Excel, PDF ve HTML) Tasarımı
+
+### 1. Kurumsal Excel (`.xlsx`) Çıktısı
+- **1. Sayfa — "Şef Özet Karnesi"**:
+  - Kurumsal lacivert/kırmızı başlık bloğu, rapor tarihi, seçili filtre özeti ve hedef indirim oranı bilgisi.
+  - Şef bazlı toplam fatura, indirimli fatura, indirimsiz fatura adedi, indirimsiz tutar ve kaçırılan potansiyel indirim tablosu.
+- **2. Sayfa — "İndirimsiz Faturalar Sorgu Listesi"**:
+  - Sütunlar: `Sıra No`, `Fatura Tarihi`, `Satınalma Şefi`, `Şantiye`, `Tedarikçi Firma`, `Fatura No`, `Kalem Sayısı`, `Ana Kalemler Özeti`, `Fatura Tutarı`, `Para Birimi`, `Hedef İndirim (%)`, `Tahmini Kayıp İndirim Tutarı`, `NEDEN İNDİRİM ALINMADI? (ŞEF SAVUNMA / AÇIKLAMA)`.
+  - Savunma sütunu sarı/açık turuncu vurgu rengiyle ve geniş sütun genişliğiyle (`45px`) biçimlendirilir; böylece şef Excel dosyasını açıp doğrudan her faturanın karşısına açıklamasını yazıp geri gönderebilir.
+
+### 2. Kurumsal PDF & HTML Rapor Çıktısı
+- Üst kısımda **"İNDİRİM ALINMAYAN FATURALAR DENETİM VE SAVUNMA FORMU"** başlığı ve resmi uyarı notu (*"Aşağıda listelenen faturalar Şef İndirim & TDF Teklif Merkezi üzerinden herhangi bir pazarlık/indirim kaydı olmaksızın doğrudan sisteme işlenmiştir. Her bir fatura için neden indirim alınmadığını ve rekabetçi teklif toplanmama gerekçesini ilgili sütuna işleyerek yönetime iletiniz."*).
+- Üstte **Şef Bazlı Özet Karne**, altında **Detaylı Fatura Tablosu** ve en altta **Satınalma Şefi İmza / Teslim Tarihi** ile **Satınalma Müdürü Onay** blokları yer alır.
+- **HTML İndir** butonu tek dosya halinde tüm stilleri gömülü `.html` dosyası indirir (WhatsApp, e-posta veya Telegram üzerinden şefe doğrudan gönderilebilir).
+- **PDF İndir / Yazdır** butonu yatay (`Landscape A4`) formatta, sayfa taşması olmadan temiz baskı/PDF penceresi açar.

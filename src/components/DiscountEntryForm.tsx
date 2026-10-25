@@ -2634,29 +2634,65 @@ export const DiscountEntryForm: React.FC<Props> = ({
       const finalUrl = await resolveFileUrl(finalOfferFile, finalDocName);
 
       const generatedStageDocs: StageDocument[] = [];
+      let generatedInitialOffersComparison: any[] | undefined = undefined;
 
-      // If multiple initial offers were staged, record all of them in stageDocuments!
-      if (schematicAnalysis && schematicAnalysis.initialDocs.length > 1) {
-        schematicAnalysis.initialDocs.forEach((initDoc, idx) => {
-          const isLowestBase = initDoc.id === schematicAnalysis.baselineDoc?.id;
+      // If multiple initial offers were staged, record all of them in stageDocuments & initialOffersComparison!
+      if (schematicAnalysis && schematicAnalysis.initialDocs.length >= 1) {
+        const sortedInitDocs = [...schematicAnalysis.initialDocs].sort((a, b) => (Number(a.totalAmount) || 0) - (Number(b.totalAmount) || 0));
+        const lowestBaseAmt = Number(schematicAnalysis.baselineDoc?.totalAmount || sortedInitDocs[0]?.totalAmount || calcOffer) || 0;
+
+        generatedInitialOffersComparison = sortedInitDocs.map((initDoc, idx) => {
+          const isLowestBase = initDoc.id === schematicAnalysis.baselineDoc?.id || (idx === 0 && !schematicAnalysis.baselineDoc);
+          const docAmt = Number(initDoc.totalAmount) || 0;
+          const diff = isLowestBase ? 0 : Math.max(0, Number((docAmt - lowestBaseAmt).toFixed(2)));
+          const diffPct = isLowestBase || lowestBaseAmt <= 0 ? 0 : Number(((diff / lowestBaseAmt) * 100).toFixed(2));
+          const resolvedSup = String(initDoc.supplier || (isLowestBase ? vendorName : `Alternatif Tedarikçi #${idx + 1}`)).trim();
+          return {
+            documentId: initDoc.id,
+            supplier: resolvedSup,
+            amount: docAmt,
+            isLowest: isLowestBase,
+            documentNumber: initDoc.invoiceNumber || undefined,
+            date: initDoc.date || orderDate,
+            fileName: initDoc.fileName,
+            fileUrl: initDoc.fileUrl || (isLowestBase ? firstUrl.url : undefined),
+            driveFileId: initDoc.fileId || (isLowestBase ? firstUrl.fileId : undefined),
+            isVatIncluded: initDoc.isVatIncluded !== false,
+            itemsCount: initDoc.itemsCount || initDoc.items?.length || undefined,
+            priceDiffFromLowest: diff,
+            priceDiffPercentage: diffPct
+          };
+        });
+
+        sortedInitDocs.forEach((initDoc, idx) => {
+          const isLowestBase = initDoc.id === schematicAnalysis.baselineDoc?.id || (idx === 0 && !schematicAnalysis.baselineDoc);
+          const resolvedSup = String(initDoc.supplier || (isLowestBase ? vendorName : `Alternatif Tedarikçi #${idx + 1}`)).trim();
           generatedStageDocs.push({
             stageNumber: 1,
-            title: isLowestBase ? `1. İlk Teklif (Baz Alınan En Düşük Teklif)` : `1. İlk Teklif (Alternatif #${idx + 1})`,
+            title: isLowestBase ? `1. İlk Teklif (Baz Alınan En Düşük Teklif — ${resolvedSup})` : `1. İlk Teklif (Alternatif #${idx + 1} — ${resolvedSup})`,
+            supplier: resolvedSup,
+            documentNumber: initDoc.invoiceNumber || undefined,
+            isLowestInitial: isLowestBase,
+            isVatIncluded: initDoc.isVatIncluded !== false,
             fileName: initDoc.fileName,
-            fileUrl: initDoc.fileUrl || firstUrl.url,
-            driveFileId: initDoc.fileId || firstUrl.fileId,
+            fileUrl: initDoc.fileUrl || (isLowestBase ? firstUrl.url : undefined),
+            driveFileId: initDoc.fileId || (isLowestBase ? firstUrl.fileId : undefined),
             amount: initDoc.totalAmount,
-            date: initDoc.date
+            date: initDoc.date || orderDate
           });
         });
       } else {
         generatedStageDocs.push({
           stageNumber: 1,
           title: '1. İlk Teklif / Fatura',
+          supplier: String(vendorName).trim(),
+          documentNumber: generatedInvoiceNo,
+          isLowestInitial: true,
           fileName: firstDocName,
           fileUrl: firstUrl.url,
           driveFileId: firstUrl.fileId,
-          amount: calcOffer
+          amount: calcOffer,
+          date: orderDate
         });
       }
 
@@ -2723,6 +2759,9 @@ export const DiscountEntryForm: React.FC<Props> = ({
         items: extractedItems.length > 0 ? extractedItems as any : undefined,
         negotiationRounds: validRounds.length > 0 ? validRounds : undefined,
         stageDocuments: generatedStageDocs,
+        ...(generatedInitialOffersComparison && generatedInitialOffersComparison.length > 0 ? {
+          initialOffersComparison: generatedInitialOffersComparison
+        } : {}),
         crossNegotiationApplied: isHighValue ? finalCrossNegotiation : false,
         finalNegotiationDate: finalNegotiationDate || orderDate,
         ...(schematicAnalysis ? {
@@ -2731,9 +2770,9 @@ export const DiscountEntryForm: React.FC<Props> = ({
           realMarketSavings: calcAmt,
           marketReferencePrice: calcBaseline,
           realSavingsPercentage: calcPct,
-          isSingleVendor: schematicAnalysis.uniqueVendorsCount <= 1,
+          isSingleVendor: schematicAnalysis.uniqueVendorsCount <= 1 && schematicAnalysis.initialDocs.length <= 1,
           isAboveBestOffer: schematicAnalysis.isAboveBestOfferCount > 0,
-          competitorCount: Math.max(0, schematicAnalysis.uniqueVendorsCount - 1),
+          competitorCount: Math.max(0, Math.max(schematicAnalysis.uniqueVendorsCount, schematicAnalysis.initialDocs.length) - 1),
           canonicalMaterials: schematicAnalysis.canonicalMaterials
         } : {}),
         ...(cheaperPreviewMatches.length > 0 ? {
@@ -3691,40 +3730,107 @@ export const DiscountEntryForm: React.FC<Props> = ({
                   </div>
                 )}
 
-                {/* If multiple initial offers exist, show comparison pills */}
-                {schematicAnalysis.initialDocs.length > 1 && (
-                  <div className="bg-slate-950/80 p-3.5 rounded-2xl border border-slate-800 space-y-2">
-                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-                      Yüklenen İlk Teklifler Havuzu (TDF Kuralı: En Düşük İlk Teklif Baz Alındı):
-                    </span>
-                    <div className="flex flex-wrap gap-2">
-                      {schematicAnalysis.initialDocs.map((initDoc, iIdx) => {
-                        const isLowest = initDoc.id === schematicAnalysis.baselineDoc?.id;
-                        return (
-                          <div
-                            key={initDoc.id}
-                            className={`px-3 py-2 rounded-xl border text-xs flex items-center space-x-2 ${
-                              isLowest
-                                ? 'bg-amber-500/15 border-amber-400 text-amber-200 font-bold'
-                                : 'bg-slate-900 border-slate-800 text-slate-400'
-                            }`}
-                          >
-                            <span>{initDoc.supplier || `İlk Teklif #${iIdx + 1}`} ({initDoc.fileName}):</span>
-                            <span className="font-mono font-black text-white">{formatRuble(initDoc.totalAmount)}</span>
-                            {initDoc.isVatIncluded === false && (
-                              <span className="text-[10px] text-amber-300">(+%20 НДС Dahil)</span>
-                            )}
-                            {isLowest && (
-                              <span className="bg-amber-400 text-slate-950 text-[10px] font-black px-1.5 py-0.5 rounded">
-                                DIP FİYAT BAZ ALINDI
-                              </span>
-                            )}
-                          </div>
-                        );
-                      })}
+                {/* If multiple initial offers exist, show detailed competing initial offers table & selection rationale */}
+                {schematicAnalysis.initialDocs.length > 1 && (() => {
+                  const sortedInits = [...schematicAnalysis.initialDocs].sort((a, b) => (Number(a.totalAmount) || 0) - (Number(b.totalAmount) || 0));
+                  const baseInit = schematicAnalysis.baselineDoc || sortedInits[0];
+                  const baseAmt = Number(baseInit?.totalAmount || 0);
+                  const baseSup = baseInit?.supplier || vendorName || 'En Uygun Tedarikçi';
+                  const secondInit = sortedInits.find(d => d.id !== baseInit?.id) || sortedInits[1];
+                  const secondDiff = secondInit ? Math.max(0, (Number(secondInit.totalAmount) || 0) - baseAmt) : 0;
+                  const secondPct = secondInit && baseAmt > 0 ? Number(((secondDiff / baseAmt) * 100).toFixed(2)) : 0;
+
+                  return (
+                    <div className="bg-slate-950/90 p-4 rounded-2xl border border-amber-500/40 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="flex items-center space-x-2">
+                          <span className="px-2.5 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black uppercase">
+                            1. Aşama Rekabet Havuzu ({sortedInits.length} İlk Teklif)
+                          </span>
+                          <span className="text-xs font-extrabold text-amber-200">
+                            İlk Gelen Rakip Teklifler Kıyaslaması ve Baz Seçim Kanıtı
+                          </span>
+                        </div>
+                        <span className="text-[11px] font-mono text-emerald-300 bg-emerald-950/80 border border-emerald-500/40 px-2.5 py-0.5 rounded-lg">
+                          En Uygun İlk Teklif (Baz): {formatRuble(baseAmt)}
+                        </span>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-100 leading-relaxed">
+                        <strong className="text-amber-300">📌 Seçim &amp; Baz Alma Gerekçesi: </strong>
+                        İlk aşamada toplam <strong>{sortedInits.length}</strong> farklı ilk teklif ({sortedInits.map((d, i) => `${d.supplier || `Teklif #${i + 1}`}: ${formatRuble(d.totalAmount)}`).join(' • ')}) alınmıştır. Bu teklifler arasında en uygun fiyat <strong>{formatRuble(baseAmt)}</strong> ile <strong>{baseSup}</strong> firmasına ait olduğu için{secondInit && secondDiff > 0 ? ` (en yakın rakip ${secondInit.supplier || 'diğer firma'} teklifinden +${formatRuble(secondDiff)} / +%${secondPct} daha uygun)` : ''} pazarlık başlangıç bazı (dip fiyat) olarak bu teklif seçilmiştir.
+                      </div>
+
+                      <div className="overflow-x-auto rounded-xl border border-slate-800">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-900 border-b border-slate-800 text-[10px] text-slate-400 uppercase">
+                              <th className="py-2 px-3">Sıra / Durum</th>
+                              <th className="py-2 px-3">Teklif Veren Firma</th>
+                              <th className="py-2 px-3">Belge No &amp; Dosya</th>
+                              <th className="py-2 px-3 text-right">İlk Teklif Tutarı</th>
+                              <th className="py-2 px-3 text-right">En Uygun Teklife Göre Fark</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800/70 font-mono">
+                            {sortedInits.map((initDoc, iIdx) => {
+                              const isLowest = initDoc.id === baseInit?.id;
+                              const diff = isLowest ? 0 : Math.max(0, (Number(initDoc.totalAmount) || 0) - baseAmt);
+                              const diffPct = isLowest || baseAmt <= 0 ? 0 : Number(((diff / baseAmt) * 100).toFixed(2));
+                              return (
+                                <tr key={initDoc.id} className={isLowest ? 'bg-amber-500/10' : 'bg-slate-950/60'}>
+                                  <td className="py-2 px-3 font-sans">
+                                    {isLowest ? (
+                                      <span className="inline-flex items-center px-2 py-0.5 rounded bg-amber-400 text-slate-950 text-[10px] font-black">
+                                        ★ #1 EN UYGUN (BAZ ALINDI)
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 text-[10px] font-bold">
+                                        #{iIdx + 1} Rakip İlk Teklif
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="py-2 px-3 font-sans font-bold text-white">
+                                    {initDoc.supplier || `Alternatif Tedarikçi #${iIdx + 1}`}
+                                  </td>
+                                  <td className="py-2 px-3 text-slate-300 font-sans">
+                                    <div className="flex items-center space-x-2">
+                                      {initDoc.invoiceNumber && (
+                                        <span className="font-mono text-[11px] bg-slate-800 px-1.5 py-0.2 rounded border border-slate-700 text-amber-300">
+                                          No: {initDoc.invoiceNumber}
+                                        </span>
+                                      )}
+                                      <span className="truncate max-w-[180px] text-slate-400" title={initDoc.fileName}>
+                                        {initDoc.fileName}
+                                      </span>
+                                    </div>
+                                  </td>
+                                  <td className="py-2 px-3 text-right font-black text-white">
+                                    {formatRuble(initDoc.totalAmount)}
+                                    {initDoc.isVatIncluded === false && (
+                                      <span className="block text-[9px] text-amber-300 font-sans">(+%20 НДС Dahil)</span>
+                                    )}
+                                  </td>
+                                  <td className="py-2 px-3 text-right">
+                                    {isLowest ? (
+                                      <span className="text-emerald-400 font-sans font-black text-[11px]">
+                                        ✓ Baz Alınan Dip Fiyat
+                                      </span>
+                                    ) : (
+                                      <span className="text-rose-400 font-bold">
+                                        +{formatRuble(diff)} (+%{diffPct} daha yüksek)
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* Visual Schematic Cards (İlk Teklif -> 1. Tur -> 2. Tur -> Nihai Fatura) */}
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3.5">
@@ -5005,6 +5111,10 @@ export const DiscountEntryForm: React.FC<Props> = ({
             setDetailItemSearch('');
             setEditingDiscountRecord(rec);
           }}
+          onUpdateDiscount={onUpdateDiscount ? async (id, updatedFields) => {
+            await onUpdateDiscount(id, updatedFields);
+            setSelectedDetailDiscount(prev => prev && prev.id === id ? { ...prev, ...updatedFields } : prev);
+          } : undefined}
           onDeleteDiscount={onDeleteDiscount ? async (id) => {
             if (onDeleteDiscount) {
               await onDeleteDiscount(id);

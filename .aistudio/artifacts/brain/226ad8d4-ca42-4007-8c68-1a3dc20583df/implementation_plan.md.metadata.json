@@ -1,6 +1,6 @@
 {
-  "summary":  "Tüm yapı malzemesi kategorilerinde (Çelik, Kablo, Hasır Çelik, Yalıtım, Membran, Polietilen Film, Kontrplak, Bağlantı Elemanları, El Aletleri ve KKD) 4 denetim panelinin tamamında (Hızlı Ön Onay, Malzeme Karşılaştırma, Anomali Fiyat Artış ve Admin Fiyat Anomali) GOST/TU ayrımı, kalite/mukavemet sınıfı, gövde/kaplama tipi ve rulo/paket hacim-metraj eşitliğini zorunlu kılan Evrensel Elma-Elma Teknik Varyant Mimarisi planı.",
-  "updatedAt":  "2026-10-21T11:27:46.239272162Z",
+  "summary":  "Performans ve İndirim Raporu sekmesine eklenecek \"İndirim Alınmayan Faturalar (Doğrudan Fatura Girişleri) Denetim & Baskı Raporu\" modülünün mimari, kullanıcı deneyimi ve Excel/PDF/HTML dışa aktarım uygulama planı.",
+  "updatedAt":  "2026-10-24T10:58:31.907543183Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

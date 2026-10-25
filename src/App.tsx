@@ -784,6 +784,7 @@ function AppContent() {
                 onOpenNewDiscountModal={() => setShowQuickDiscountModal(true)}
                 onUpdateDiscount={handleUpdateDiscount}
                 onDeleteDiscount={handleDeleteDiscount}
+                onUpdateInvoice={handleUpdateInvoice}
               />
             )}
 

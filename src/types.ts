@@ -116,6 +116,10 @@ export interface StageDocument {
   stageNumber: number;
   title: string;
   amount: number;
+  supplier?: string;
+  documentNumber?: string;
+  isLowestInitial?: boolean;
+  isVatIncluded?: boolean;
   fileUrl?: string;
   fileName?: string;
   driveFileId?: string;
@@ -164,6 +168,7 @@ export interface DiscountRecord {
   items?: InvoiceItem[];
   negotiationRounds?: NegotiationRound[];
   stageDocuments?: StageDocument[];
+  initialOffersComparison?: InitialOfferDetail[];
   negotiationCount?: number;
   crossNegotiationApplied?: boolean;
   firstOfferFileUrl?: string;
@@ -535,6 +540,13 @@ export interface InitialOfferDetail {
   documentNumber?: string;
   date?: string;
   fileName?: string;
+  fileUrl?: string;
+  driveFileId?: string;
+  isVatIncluded?: boolean;
+  itemsCount?: number;
+  priceDiffFromLowest?: number;
+  priceDiffPercentage?: number;
+  notes?: string;
 }
 
 export interface ComparativeAnalysisSummary {

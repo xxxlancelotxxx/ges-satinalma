@@ -61,11 +61,13 @@ import {
   FileText,
   Scale,
   Snowflake,
-  ExternalLink
+  ExternalLink,
+  Hash,
+  Filter
 } from 'lucide-react';
 import { SearchableFilterDropdown } from './SearchableFilterDropdown';
 import { DateRangeFilterDropdown } from './DateRangeFilterDropdown';
-import { DateFilterState, matchesDateFilter } from '../utils/filterHelpers';
+import { DateFilterState, matchesDateFilter, getDateFilterDisplayLabel } from '../utils/filterHelpers';
 import { normalizeVendorName, areVendorsEqual, extractCanonicalVendors } from '../utils/vendorNormalizer';
 import {
   ResponsiveContainer,
@@ -85,6 +87,8 @@ import { ExecutiveVendorDiversityReport } from './ExecutiveVendorDiversityReport
 import { ExecutivePriceAndDiscountAudit } from './ExecutivePriceAndDiscountAudit';
 import { MonthlyExecutiveReportModal } from './MonthlyExecutiveReportModal';
 import { InvoiceDetailModal } from './InvoiceDetailModal';
+import { UndiscountedInvoicesAuditReport } from './UndiscountedInvoicesAuditReport';
+import { extractUndiscountedInvoicesData } from '../utils/undiscountedInvoiceExporter';
 
 interface Props {
   performances: SupervisorPerformance[];
@@ -98,6 +102,7 @@ interface Props {
   onOpenNewDiscountModal: () => void;
   onUpdateDiscount?: (id: string, record: Partial<DiscountRecord>) => Promise<void> | void;
   onDeleteDiscount?: (id: string) => Promise<void> | void;
+  onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => Promise<void> | void;
 }
 
 const REPORT_PIN = '3255';
@@ -114,7 +119,8 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
   prizmaInvoices = [],
   onOpenNewDiscountModal,
   onUpdateDiscount,
-  onDeleteDiscount
+  onDeleteDiscount,
+  onUpdateInvoice
 }) => {
   const { t } = useLanguage();
   const { user } = useAuth();
@@ -145,13 +151,21 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
   const [invoiceNoFilter, setInvoiceNoFilter] = useState<string>('');
   const [dateFilter, setDateFilter] = useState<DateFilterState>({ preset: 'all' });
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [activeViewMode, setActiveViewMode] = useState<'matrix' | 'cards' | 'personnel' | 'chart' | 'logs' | 'diversity' | 'audit' | 'historical_anomalies'>('matrix');
+  const [activeViewMode, setActiveViewMode] = useState<'matrix' | 'cards' | 'personnel' | 'chart' | 'logs' | 'diversity' | 'audit' | 'historical_anomalies' | 'undiscounted_invoices'>('matrix');
   const [selectedHistoricalAnomaly, setSelectedHistoricalAnomaly] = useState<DiscountHistoricalAnomalyRecord | null>(null);
   const [viewingHistoricalInvoice, setViewingHistoricalInvoice] = useState<InvoiceRecord | null>(null);
   const [historicalAnomalySearch, setHistoricalAnomalySearch] = useState<string>('');
   const [anomalySourceFilter, setAnomalySourceFilter] = useState<'ALL' | 'DISCOUNT_CENTER' | 'DIRECT_INVOICE'>('ALL');
   const [showAnomalyReportModal, setShowAnomalyReportModal] = useState<boolean>(false);
   const [isExportingAnomalyReport, setIsExportingAnomalyReport] = useState<boolean>(false);
+
+  // Admin Price Anomaly Filters
+  const [anomalyInvoiceNoFilter, setAnomalyInvoiceNoFilter] = useState<string>('');
+  const [anomalyDateFilter, setAnomalyDateFilter] = useState<DateFilterState>({ preset: 'all' });
+  const [anomalyVendorFilter, setAnomalyVendorFilter] = useState<string>('ALL');
+  const [anomalyJobsiteFilter, setAnomalyJobsiteFilter] = useState<string>('ALL');
+  const [anomalySupervisorFilter, setAnomalySupervisorFilter] = useState<string>('ALL');
+  const [anomalyMinDiffFilter, setAnomalyMinDiffFilter] = useState<number>(0);
 
   const canonicalVendors = useMemo(() => {
     return extractCanonicalVendors((discounts || []).map(d => ({ vendorName: d.vendorName })));
@@ -685,16 +699,28 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
     });
   }, [invoices, selectedSupervisorId, selectedJobsiteId, selectedVendor, invoiceNoFilter, dateFilter, searchTerm]);
 
-  // Cached Admin Price Anomaly lists by source
+  // Count of Undiscounted Direct Invoices (from AI Otomatik Fatura Okuma excluding Şef İndirim & TDF Teklif Merkezi)
+  const undiscountedInvoicesCount = useMemo(() => {
+    const res = extractUndiscountedInvoicesData({
+      invoices: invoices || [],
+      discounts: discounts || [],
+      supervisors: supervisors || [],
+      jobsites: jobsites || [],
+      targetDiscountPct: 5
+    });
+    return res.allUndiscountedRows.length;
+  }, [invoices, discounts, supervisors, jobsites]);
+
+  // Cached Admin Price Anomaly lists by source (scanned across all records so it's always complete and up-to-date)
   const discountCenterAnomalies = useMemo(() => {
     if (!isAdminOnlyUnlocked) return [];
-    return scanDiscountRecordsForHistoricalAnomalies(filteredDiscounts, combinedInvoicePool);
-  }, [isAdminOnlyUnlocked, filteredDiscounts, combinedInvoicePool]);
+    return scanDiscountRecordsForHistoricalAnomalies(discounts || [], combinedInvoicePool);
+  }, [isAdminOnlyUnlocked, discounts, combinedInvoicePool]);
 
   const directInvoiceAnomalies = useMemo(() => {
     if (!isAdminOnlyUnlocked) return [];
-    return scanDirectInvoicesForHistoricalAnomalies(filteredDirectInvoices, discounts || [], combinedInvoicePool);
-  }, [isAdminOnlyUnlocked, filteredDirectInvoices, discounts, combinedInvoicePool]);
+    return scanDirectInvoicesForHistoricalAnomalies(invoices || [], discounts || [], combinedInvoicePool);
+  }, [isAdminOnlyUnlocked, invoices, discounts, combinedInvoicePool]);
 
   const allHistoricalAnomalies = useMemo(() => {
     return [...discountCenterAnomalies, ...directInvoiceAnomalies].sort(
@@ -708,22 +734,137 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
     return allHistoricalAnomalies;
   }, [anomalySourceFilter, discountCenterAnomalies, directInvoiceAnomalies, allHistoricalAnomalies]);
 
-  const filteredHistoricalAnomalies = useMemo(() => {
-    const q = historicalAnomalySearch.toLowerCase().trim();
-    if (!q) return sourceFilteredAnomalies;
-    return sourceFilteredAnomalies.filter(a =>
-      a.invoiceNo.toLowerCase().includes(q) ||
-      a.vendorName.toLowerCase().includes(q) ||
-      a.supervisorName.toLowerCase().includes(q) ||
-      a.jobsiteName.toLowerCase().includes(q) ||
-      a.affectedLines.some(l =>
-        l.materialName.toLowerCase().includes(q) ||
-        (l.originalName || '').toLowerCase().includes(q) ||
-        (l.historicalOriginalName || '').toLowerCase().includes(q) ||
-        l.historicalSupplier.toLowerCase().includes(q)
-      )
+  // Unique filter option lists extracted directly from all detected anomalies
+  const anomalyUniqueVendors = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const a of allHistoricalAnomalies) {
+      const v = a.vendorName || 'Bilinmeyen Tedarikçi';
+      map.set(v, (map.get(v) || 0) + 1);
+    }
+    return Array.from(map.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+  }, [allHistoricalAnomalies]);
+
+  const anomalyUniqueJobsites = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const a of allHistoricalAnomalies) {
+      const j = a.jobsiteName || 'Belirtilmemiş Şantiye';
+      map.set(j, (map.get(j) || 0) + 1);
+    }
+    return Array.from(map.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+  }, [allHistoricalAnomalies]);
+
+  const anomalyUniqueSupervisors = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; count: number }>();
+    for (const a of allHistoricalAnomalies) {
+      const id = a.supervisorId || a.supervisorName || 'unknown';
+      const name = a.supervisorName || 'Atanmamış';
+      const cur = map.get(id);
+      if (cur) {
+        cur.count++;
+      } else {
+        map.set(id, { id, name, count: 1 });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => b.count - a.count);
+  }, [allHistoricalAnomalies]);
+
+  const isAnyAnomalyFilterActive = useMemo(() => {
+    return (
+      Boolean(anomalyInvoiceNoFilter.trim()) ||
+      Boolean(anomalyDateFilter.preset && anomalyDateFilter.preset !== 'all') ||
+      anomalyVendorFilter !== 'ALL' ||
+      anomalyJobsiteFilter !== 'ALL' ||
+      anomalySupervisorFilter !== 'ALL' ||
+      anomalyMinDiffFilter > 0 ||
+      Boolean(historicalAnomalySearch.trim())
     );
-  }, [sourceFilteredAnomalies, historicalAnomalySearch]);
+  }, [
+    anomalyInvoiceNoFilter,
+    anomalyDateFilter,
+    anomalyVendorFilter,
+    anomalyJobsiteFilter,
+    anomalySupervisorFilter,
+    anomalyMinDiffFilter,
+    historicalAnomalySearch
+  ]);
+
+  const handleResetAnomalyFilters = () => {
+    setAnomalyInvoiceNoFilter('');
+    setAnomalyDateFilter({ preset: 'all' });
+    setAnomalyVendorFilter('ALL');
+    setAnomalyJobsiteFilter('ALL');
+    setAnomalySupervisorFilter('ALL');
+    setAnomalyMinDiffFilter(0);
+    setHistoricalAnomalySearch('');
+  };
+
+  const filteredHistoricalAnomalies = useMemo(() => {
+    return sourceFilteredAnomalies.filter(a => {
+      // 1. Invoice No Filter
+      if (anomalyInvoiceNoFilter.trim()) {
+        const targetNo = anomalyInvoiceNoFilter.toLowerCase().trim();
+        const curNo = String(a.invoiceNo || '').toLowerCase();
+        if (!curNo.includes(targetNo)) return false;
+      }
+
+      // 2. Date Filter
+      if (anomalyDateFilter.preset && anomalyDateFilter.preset !== 'all') {
+        if (!matchesDateFilter(a.orderDate || a.notifiedAt, anomalyDateFilter)) return false;
+      }
+
+      // 3. Vendor Filter
+      if (anomalyVendorFilter !== 'ALL') {
+        if (!areVendorsEqual(a.vendorName, anomalyVendorFilter)) return false;
+      }
+
+      // 4. Jobsite Filter
+      if (anomalyJobsiteFilter !== 'ALL') {
+        if (a.jobsiteName !== anomalyJobsiteFilter) return false;
+      }
+
+      // 5. Supervisor Filter
+      if (anomalySupervisorFilter !== 'ALL') {
+        if (a.supervisorId !== anomalySupervisorFilter && a.supervisorName !== anomalySupervisorFilter) return false;
+      }
+
+      // 6. Min Potential Extra Savings / Diff Filter
+      if (anomalyMinDiffFilter > 0) {
+        if (a.totalPotentialExtraSavings < anomalyMinDiffFilter) return false;
+      }
+
+      // 7. Free text Search
+      const q = historicalAnomalySearch.toLowerCase().trim();
+      if (q) {
+        const matchesMain =
+          a.invoiceNo.toLowerCase().includes(q) ||
+          a.vendorName.toLowerCase().includes(q) ||
+          a.supervisorName.toLowerCase().includes(q) ||
+          a.jobsiteName.toLowerCase().includes(q);
+        const matchesLine = a.affectedLines.some(l =>
+          l.materialName.toLowerCase().includes(q) ||
+          (l.originalName || '').toLowerCase().includes(q) ||
+          (l.historicalOriginalName || '').toLowerCase().includes(q) ||
+          l.historicalSupplier.toLowerCase().includes(q)
+        );
+        if (!matchesMain && !matchesLine) return false;
+      }
+
+      return true;
+    });
+  }, [
+    sourceFilteredAnomalies,
+    anomalyInvoiceNoFilter,
+    anomalyDateFilter,
+    anomalyVendorFilter,
+    anomalyJobsiteFilter,
+    anomalySupervisorFilter,
+    anomalyMinDiffFilter,
+    historicalAnomalySearch
+  ]);
 
   // Chart Data: Supervisor comparison
   const supervisorChartData = useMemo(() => {
@@ -996,6 +1137,27 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
 
           {/* Action Toolbar */}
           <div className="flex flex-wrap items-center gap-2.5">
+            {/* İndirim Alınmayan Faturalar (Doğrudan Fatura Girişleri) Sorgu & Baskı Raporu */}
+            {isEffectiveUnlocked && (
+              <button
+                onClick={() => setActiveViewMode('undiscounted_invoices')}
+                className={`font-bold px-3.5 py-2.5 rounded-xl transition-all flex items-center space-x-2 text-xs sm:text-sm cursor-pointer shadow-md ${
+                  activeViewMode === 'undiscounted_invoices'
+                    ? 'bg-gradient-to-r from-rose-600 to-amber-600 text-white ring-2 ring-amber-300 font-black'
+                    : 'bg-rose-500/25 text-amber-200 border border-rose-400/50 hover:bg-rose-500/35'
+                }`}
+                title="AI Otomatik Fatura Okuma'da kayıtlı olup Şef İndirim & TDF Teklif Merkezi'nden indirim alınmayan faturaları listele ve Excel/PDF/HTML indir"
+              >
+                <ShieldAlert className="w-4 h-4 text-amber-300" />
+                <span>İndirim Alınmayan Faturalar 🎯</span>
+                {undiscountedInvoicesCount > 0 && (
+                  <span className="px-1.5 py-0.5 text-[10px] font-mono font-black rounded-md bg-rose-950/70 text-amber-300 border border-amber-400/30">
+                    {undiscountedInvoicesCount}
+                  </span>
+                )}
+              </button>
+            )}
+
             {/* Executive Only: Fiyat Kıyaslaması & İndirim Doğrulama (Yöntem 1 & Yöntem 2 Mix) */}
             {isEffectiveUnlocked && (
               <button
@@ -1229,6 +1391,24 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
               <FileSpreadsheet className="w-4 h-4" />
               <span>İndirim Günlüğü ({filteredDiscounts.length})</span>
             </button>
+            {isEffectiveUnlocked && (
+              <button
+                onClick={() => setActiveViewMode('undiscounted_invoices')}
+                className={`flex items-center space-x-1.5 px-3.5 py-2 rounded-xl transition-all cursor-pointer ${
+                  activeViewMode === 'undiscounted_invoices'
+                    ? 'bg-gradient-to-r from-rose-600 to-amber-600 text-white font-black shadow-md'
+                    : 'text-rose-900 bg-rose-50 hover:bg-rose-100 border border-rose-300/60'
+                }`}
+              >
+                <FileText className="w-4 h-4 text-rose-600" />
+                <span>İndirim Alınmayan Faturalar (Sorgu & Baskı) 🎯</span>
+                {undiscountedInvoicesCount > 0 && (
+                  <span className="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-black rounded-md bg-rose-900 text-white">
+                    {undiscountedInvoicesCount}
+                  </span>
+                )}
+              </button>
+            )}
             {isEffectiveUnlocked && (
               <button
                 onClick={() => setActiveViewMode('audit')}
@@ -1944,17 +2124,49 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
           />
         )}
 
+        {/* View Mode 7B: İndirim Alınmayan Faturalar (Şef İndirim & TDF Merkezi Harici Doğrudan Faturalar) Sorgu ve Savunma Raporu */}
+        {activeViewMode === 'undiscounted_invoices' && isEffectiveUnlocked && (
+          <UndiscountedInvoicesAuditReport
+            invoices={invoices}
+            discounts={discounts}
+            supervisors={supervisors}
+            jobsites={jobsites}
+            generatedBy={user?.displayName || 'Satınalma Yönetimi'}
+            onUpdateInvoice={onUpdateInvoice}
+          />
+        )}
+
         {/* View Mode 8: Admin Özel - İndirimli Kayıtta & Doğrudan Yüklenenlerde Farklı Faturalar */}
         {activeViewMode === 'historical_anomalies' && isAdminOnlyUnlocked && (() => {
           const filteredAnomalies = filteredHistoricalAnomalies;
           const totalOverpaymentSum = filteredAnomalies.reduce((s, a) => s + a.totalPotentialExtraSavings, 0);
           const totalAffectedLinesCount = filteredAnomalies.reduce((s, a) => s + a.affectedLines.length, 0);
-          const activeFilterLabel =
-            anomalySourceFilter === 'DISCOUNT_CENTER'
-              ? 'Şef İndirim & Teklif Merkezi'
-              : anomalySourceFilter === 'DIRECT_INVOICE'
-              ? 'AI Otomatik Fatura Okuma (Doğrudan Yüklenenler)'
-              : 'Tümü (Şef İndirim Merkezi + AI Otomatik Fatura Okuma)';
+          const activeFilterLabel = (() => {
+            const base =
+              anomalySourceFilter === 'DISCOUNT_CENTER'
+                ? 'Şef İndirim & Teklif Merkezi'
+                : anomalySourceFilter === 'DIRECT_INVOICE'
+                ? 'AI Otomatik Fatura Okuma (Doğrudan Yüklenenler)'
+                : 'Tümü (Şef İndirim Merkezi + AI Otomatik Fatura Okuma)';
+            const extras: string[] = [];
+            if (anomalyInvoiceNoFilter.trim()) extras.push(`Fatura: #${anomalyInvoiceNoFilter.trim()}`);
+            if (anomalyVendorFilter !== 'ALL') extras.push(`Tedarikçi: ${anomalyVendorFilter}`);
+            if (anomalyJobsiteFilter !== 'ALL') extras.push(`Şantiye: ${anomalyJobsiteFilter}`);
+            if (anomalySupervisorFilter !== 'ALL') {
+              const sup = anomalyUniqueSupervisors.find(x => x.id === anomalySupervisorFilter);
+              extras.push(`Şef: ${sup?.name || anomalySupervisorFilter}`);
+            }
+            if (anomalyDateFilter.preset && anomalyDateFilter.preset !== 'all') {
+              extras.push(`Tarih: ${getDateFilterDisplayLabel(anomalyDateFilter)}`);
+            }
+            if (anomalyMinDiffFilter > 0) {
+              extras.push(`Min Fark: ≥ ${anomalyMinDiffFilter.toLocaleString('tr-TR')} ₽`);
+            }
+            if (historicalAnomalySearch.trim()) {
+              extras.push(`Arama: "${historicalAnomalySearch.trim()}"`);
+            }
+            return extras.length > 0 ? `${base} · ${extras.join(' · ')}` : base;
+          })();
 
           return (
             <div className="p-6 space-y-6">
@@ -2059,29 +2271,207 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Search Bar */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="relative max-w-md w-full">
-                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={historicalAnomalySearch}
-                    onChange={(e) => setHistoricalAnomalySearch(e.target.value)}
-                    placeholder="Fatura no, tedarikçi, şef, şantiye veya Rusça/Türkçe malzeme ara..."
-                    className="w-full pl-10 pr-8 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 focus:bg-white focus:ring-2 focus:ring-rose-500 focus:outline-none"
+              {/* Dedicated Admin Anomaly Multi-Filter Toolbar (Fatura No, Tedarikçi, Tarih, Şantiye, Şef, Min Fark) */}
+              <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {/* Fatura No Filtresi */}
+                  <div className="relative">
+                    <label className="block text-[11px] font-bold text-slate-600 mb-1 flex items-center gap-1">
+                      <Hash className="w-3 h-3 text-slate-400" />
+                      <span>Fatura Numarası</span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={anomalyInvoiceNoFilter}
+                        onChange={(e) => setAnomalyInvoiceNoFilter(e.target.value)}
+                        placeholder="Fatura no ara (örn. 041598)..."
+                        className="w-full pl-3 pr-7 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-rose-500 focus:outline-none"
+                      />
+                      {anomalyInvoiceNoFilter && (
+                        <button
+                          type="button"
+                          onClick={() => setAnomalyInvoiceNoFilter('')}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Tedarikçi Filtresi */}
+                  <SearchableFilterDropdown
+                    label="Alınan Tedarikçi"
+                    selectedKey={anomalyVendorFilter === 'ALL' ? 'all' : anomalyVendorFilter}
+                    options={[
+                      { key: 'all', label: 'Tüm Tedarikçiler', count: anomalyUniqueVendors.length },
+                      ...anomalyUniqueVendors.map(v => ({
+                        key: v.name,
+                        label: v.name,
+                        count: v.count
+                      }))
+                    ]}
+                    onSelect={(key) => setAnomalyVendorFilter(key === 'all' ? 'ALL' : key)}
+                    placeholder="Tedarikçi ara..."
                   />
-                  {historicalAnomalySearch && (
-                    <button
-                      onClick={() => setHistoricalAnomalySearch('')}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  )}
+
+                  {/* Tarih Aralığı Filtresi */}
+                  <DateRangeFilterDropdown
+                    value={anomalyDateFilter}
+                    onChange={setAnomalyDateFilter}
+                  />
+
+                  {/* Şantiye Filtresi */}
+                  <SearchableFilterDropdown
+                    label="Şantiye"
+                    selectedKey={anomalyJobsiteFilter === 'ALL' ? 'all' : anomalyJobsiteFilter}
+                    options={[
+                      { key: 'all', label: 'Tüm Şantiyeler', count: anomalyUniqueJobsites.length },
+                      ...anomalyUniqueJobsites.map(j => ({
+                        key: j.name,
+                        label: j.name,
+                        count: j.count
+                      }))
+                    ]}
+                    onSelect={(key) => setAnomalyJobsiteFilter(key === 'all' ? 'ALL' : key)}
+                    placeholder="Şantiye ara..."
+                  />
                 </div>
-                <div className="text-xs font-semibold text-slate-500">
-                  Detaylı karşılaştırma ve referans fatura belgesi için listedeki herhangi bir faturaya tıklayın.
+
+                {/* Sub-row: Satınalma Şefi, Min Fark Tutarı Quick Chips, Free Search & Reset */}
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pt-2 border-t border-slate-100">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {/* Satınalma Şefi Dropdown */}
+                    <div className="w-56">
+                      <SearchableFilterDropdown
+                        label="Satınalma Şefi"
+                        selectedKey={anomalySupervisorFilter === 'ALL' ? 'all' : anomalySupervisorFilter}
+                        options={[
+                          { key: 'all', label: 'Tüm Şefler', count: anomalyUniqueSupervisors.length },
+                          ...anomalyUniqueSupervisors.map(s => ({
+                            key: s.id,
+                            label: s.name,
+                            count: s.count
+                          }))
+                        ]}
+                        onSelect={(key) => setAnomalySupervisorFilter(key === 'all' ? 'ALL' : key)}
+                        placeholder="Şef ara..."
+                      />
+                    </div>
+
+                    {/* Min Fark Tutarı Hızlı Butonları */}
+                    <div className="flex items-center gap-1 bg-slate-50 p-1 rounded-xl border border-slate-200 text-xs">
+                      <span className="text-[10px] font-bold text-slate-500 px-2 uppercase">Fark:</span>
+                      {[
+                        { label: 'Tümü', val: 0 },
+                        { label: '≥ 5.000 ₽', val: 5000 },
+                        { label: '≥ 25.000 ₽', val: 25000 },
+                        { label: '≥ 100.000 ₽', val: 100000 }
+                      ].map(chip => (
+                        <button
+                          key={chip.val}
+                          type="button"
+                          onClick={() => setAnomalyMinDiffFilter(chip.val)}
+                          className={`px-2 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                            anomalyMinDiffFilter === chip.val
+                              ? 'bg-rose-600 text-white shadow-2xs'
+                              : 'bg-white text-slate-700 hover:bg-slate-200/80 border border-slate-200'
+                          }`}
+                        >
+                          {chip.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Free Text Search & Clear Button */}
+                  <div className="flex items-center gap-2 flex-1 lg:max-w-md">
+                    <div className="relative flex-1">
+                      <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={historicalAnomalySearch}
+                        onChange={(e) => setHistoricalAnomalySearch(e.target.value)}
+                        placeholder="Malzeme adı, referans firma veya detay ara..."
+                        className="w-full pl-9 pr-8 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 focus:bg-white focus:ring-2 focus:ring-rose-500 focus:outline-none"
+                      />
+                      {historicalAnomalySearch && (
+                        <button
+                          type="button"
+                          onClick={() => setHistoricalAnomalySearch('')}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+
+                    {isAnyAnomalyFilterActive && (
+                      <button
+                        type="button"
+                        onClick={handleResetAnomalyFilters}
+                        className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-300 rounded-xl text-xs font-bold transition-all flex items-center space-x-1 cursor-pointer shrink-0 shadow-2xs"
+                        title="Tüm filtreleri temizle"
+                      >
+                        <X className="w-3.5 h-3.5 text-rose-600" />
+                        <span>Temizle</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
+
+                {/* Active Filters Summary Pill row */}
+                {isAnyAnomalyFilterActive && (
+                  <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-100 text-xs">
+                    <span className="text-[11px] font-bold text-slate-500">Aktif Filtreler:</span>
+                    {anomalyInvoiceNoFilter.trim() && (
+                      <span className="px-2 py-0.5 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-800 font-mono text-[11px] font-bold flex items-center gap-1">
+                        Fatura #{anomalyInvoiceNoFilter.trim()}
+                        <X className="w-3 h-3 cursor-pointer text-indigo-500 hover:text-indigo-800" onClick={() => setAnomalyInvoiceNoFilter('')} />
+                      </span>
+                    )}
+                    {anomalyVendorFilter !== 'ALL' && (
+                      <span className="px-2 py-0.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[11px] font-bold flex items-center gap-1">
+                        Tedarikçi: {anomalyVendorFilter}
+                        <X className="w-3 h-3 cursor-pointer text-amber-500 hover:text-amber-800" onClick={() => setAnomalyVendorFilter('ALL')} />
+                      </span>
+                    )}
+                    {anomalyDateFilter.preset && anomalyDateFilter.preset !== 'all' && (
+                      <span className="px-2 py-0.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-[11px] font-bold flex items-center gap-1">
+                        Tarih: {getDateFilterDisplayLabel(anomalyDateFilter)}
+                        <X className="w-3 h-3 cursor-pointer text-emerald-500 hover:text-emerald-800" onClick={() => setAnomalyDateFilter({ preset: 'all' })} />
+                      </span>
+                    )}
+                    {anomalyJobsiteFilter !== 'ALL' && (
+                      <span className="px-2 py-0.5 rounded-lg bg-cyan-50 border border-cyan-200 text-cyan-900 text-[11px] font-bold flex items-center gap-1">
+                        Şantiye: {anomalyJobsiteFilter}
+                        <X className="w-3 h-3 cursor-pointer text-cyan-500 hover:text-cyan-800" onClick={() => setAnomalyJobsiteFilter('ALL')} />
+                      </span>
+                    )}
+                    {anomalySupervisorFilter !== 'ALL' && (
+                      <span className="px-2 py-0.5 rounded-lg bg-purple-50 border border-purple-200 text-purple-900 text-[11px] font-bold flex items-center gap-1">
+                        Şef: {anomalyUniqueSupervisors.find(s => s.id === anomalySupervisorFilter)?.name || anomalySupervisorFilter}
+                        <X className="w-3 h-3 cursor-pointer text-purple-500 hover:text-purple-800" onClick={() => setAnomalySupervisorFilter('ALL')} />
+                      </span>
+                    )}
+                    {anomalyMinDiffFilter > 0 && (
+                      <span className="px-2 py-0.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-900 font-mono text-[11px] font-bold flex items-center gap-1">
+                        Fark ≥ {anomalyMinDiffFilter.toLocaleString('tr-TR')} ₽
+                        <X className="w-3 h-3 cursor-pointer text-rose-500 hover:text-rose-800" onClick={() => setAnomalyMinDiffFilter(0)} />
+                      </span>
+                    )}
+                    {historicalAnomalySearch.trim() && (
+                      <span className="px-2 py-0.5 rounded-lg bg-slate-100 border border-slate-300 text-slate-800 text-[11px] font-bold flex items-center gap-1">
+                        Arama: "{historicalAnomalySearch.trim()}"
+                        <X className="w-3 h-3 cursor-pointer text-slate-500 hover:text-slate-800" onClick={() => setHistoricalAnomalySearch('')} />
+                      </span>
+                    )}
+                    <span className="text-[11px] text-slate-500 font-medium ml-auto">
+                      {filteredAnomalies.length} fatura listelendi
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Invoice-Level Anomaly Table */}

@@ -5652,6 +5652,174 @@ app.get('/api/discounts', async (req, res) => {
     }
 
     const cleanVendor = normalizeVendorName(dsc.vendorName || dsc.supplier);
+
+    // Known archive OCR metadata for historical stage-1 competing initial offer documents
+    const ARCHIVE_INITIAL_OFFER_META: Record<string, { supplier: string; documentNumber?: string; date?: string; amount?: number }> = {
+      '5cd8ff1b5b7f2669bc9febc04ee06501b976717689c9f2e6a48a5fd8c49f518d.pdf': {
+        supplier: 'ООО "ТОРГОВЫЙ ДОМ БМЗ"',
+        documentNumber: 'NU-3364',
+        date: '2026-10-19',
+        amount: 35663200
+      },
+      '4d0f7afc91393f1a001a24ee55e6ca5108e03f12ad115bbb139497fbc59a3da5.pdf': {
+        supplier: 'ООО "ТОРГОВЫЙ ДОМ ТУЛА-СТАЛЬ"',
+        documentNumber: 'СЭТ.П-40070025',
+        date: '2026-10-19',
+        amount: 35263999.58
+      },
+      '246031b889a965fe9f2ca3b27af7f77714c32eec2a738dc2d1377c88f2a1532e.pdf': {
+        supplier: 'ООО "РОКА"',
+        documentNumber: '1687',
+        date: '2026-10-15',
+        amount: 1978040
+      }
+    };
+
+    const getArchiveMetaByUrl = (fileUrl?: string) => {
+      if (!fileUrl || typeof fileUrl !== 'string') return undefined;
+      const base = decodeURIComponent(fileUrl.split('/').pop() || '');
+      return ARCHIVE_INITIAL_OFFER_META[base];
+    };
+
+    // Enrich stageDocuments with supplier & documentNumber for stage 1 offers
+    const rawStageDocs = Array.isArray(dsc.stageDocuments) ? dsc.stageDocuments : [];
+    const enrichedStageDocs = rawStageDocs.map((stg: any) => {
+      const isStage1 = stg.stageNumber === 1 || String(stg.title || '').includes('1. İlk');
+      if (!isStage1) return stg;
+      const archMeta = getArchiveMetaByUrl(stg.fileUrl);
+      const isBaseMatch = Math.abs((Number(stg.amount) || 0) - (Number(dsc.offerPrice) || 0)) < 1;
+      const resolvedSupplier = normalizeVendorName(
+        stg.supplier || archMeta?.supplier || (isBaseMatch ? cleanVendor : '')
+      ) || stg.supplier || archMeta?.supplier || (isBaseMatch ? cleanVendor : 'Alternatif Tedarikçi');
+      return {
+        ...stg,
+        supplier: resolvedSupplier,
+        documentNumber: stg.documentNumber || archMeta?.documentNumber || (isBaseMatch ? dsc.invoiceNo : undefined),
+        date: stg.date || archMeta?.date || dsc.orderDate,
+        isLowestInitial: stg.isLowestInitial !== undefined ? stg.isLowestInitial : isBaseMatch
+      };
+    });
+
+    // Synthesize initialOffersComparison from dsc.initialOffersComparison, comparative_analyses, and stageDocuments
+    const candidateInitialOffers: any[] = [];
+    const pushInitialCandidate = (cand: any) => {
+      const amt = Number(cand?.amount ?? cand?.totalAmount) || 0;
+      if (amt <= 0) return;
+      const archMeta = getArchiveMetaByUrl(cand?.fileUrl);
+      const supRaw = cand?.supplier || archMeta?.supplier || '';
+      const normSup = normalizeVendorName(supRaw) || supRaw || cleanVendor || 'Tedarikçi';
+      const fUrl = cand?.fileUrl || undefined;
+      const fName = cand?.fileName || undefined;
+      const docNo = cand?.documentNumber || archMeta?.documentNumber || undefined;
+      const dt = cand?.date || archMeta?.date || dsc.orderDate;
+
+      const existingIdx = candidateInitialOffers.findIndex((ex) => {
+        const sameAmt = Math.abs(ex.amount - amt) < 1;
+        if (!sameAmt) return false;
+        if (fUrl && ex.fileUrl && fUrl === ex.fileUrl) return true;
+        if (fName && ex.fileName && fName === ex.fileName) return true;
+        if (normSup && ex.supplier && areVendorsEqual(normSup, ex.supplier)) return true;
+        return false;
+      });
+
+      if (existingIdx >= 0) {
+        const prev = candidateInitialOffers[existingIdx];
+        candidateInitialOffers[existingIdx] = {
+          ...prev,
+          supplier: (prev.supplier && prev.supplier !== 'Alternatif Tedarikçi') ? prev.supplier : normSup,
+          documentNumber: prev.documentNumber || docNo,
+          date: prev.date || dt,
+          fileName: prev.fileName || fName,
+          fileUrl: prev.fileUrl || fUrl,
+          notes: prev.notes || cand?.notes
+        };
+      } else {
+        candidateInitialOffers.push({
+          documentId: cand?.documentId || cand?.id || `init_${candidateInitialOffers.length + 1}`,
+          supplier: normSup,
+          amount: amt,
+          isLowest: Boolean(cand?.isLowest || cand?.isLowestInitial),
+          documentNumber: docNo,
+          date: dt,
+          fileName: fName,
+          fileUrl: fUrl,
+          isVatIncluded: cand?.isVatIncluded !== false,
+          notes: cand?.notes
+        });
+      }
+    };
+
+    if (Array.isArray(dsc.initialOffersComparison)) {
+      dsc.initialOffersComparison.forEach(pushInitialCandidate);
+    }
+    if (comp) {
+      if (Array.isArray(comp.initialOffersComparison)) {
+        comp.initialOffersComparison.forEach(pushInitialCandidate);
+      }
+      if (Array.isArray(comp.summary?.initialOffersList)) {
+        comp.summary.initialOffersList.forEach(pushInitialCandidate);
+      }
+      if (Array.isArray(comp.documents)) {
+        comp.documents
+          .filter((docItem: any) =>
+            docItem &&
+            !docItem.isExcluded &&
+            (docItem.role === 'FIRST_OFFER' || docItem.role === 'COMPETITOR_FIRST_OFFER' || docItem.role === 'INITIAL_OFFER')
+          )
+          .forEach((docItem: any) => {
+            pushInitialCandidate({
+              documentId: docItem.id,
+              supplier: docItem.supplier,
+              amount: docItem.totalAmount ?? docItem.amount,
+              documentNumber: docItem.documentNumber,
+              date: docItem.date,
+              fileName: docItem.fileName,
+              fileUrl: docItem.fileUrl
+            });
+          });
+      }
+    }
+    enrichedStageDocs
+      .filter((stg: any) => stg.stageNumber === 1 || String(stg.title || '').includes('1. İlk'))
+      .forEach((stg: any) => {
+        pushInitialCandidate({
+          supplier: stg.supplier,
+          amount: stg.amount,
+          documentNumber: stg.documentNumber,
+          date: stg.date,
+          fileName: stg.fileName,
+          fileUrl: stg.fileUrl,
+          isLowest: stg.isLowestInitial
+        });
+      });
+
+    // If still empty or missing baseline offer, ensure baseline offer is included
+    if (candidateInitialOffers.length === 0 && Number(dsc.offerPrice) > 0) {
+      const archMeta = getArchiveMetaByUrl(cleanFirst);
+      pushInitialCandidate({
+        supplier: archMeta?.supplier || cleanVendor,
+        amount: Number(dsc.offerPrice),
+        documentNumber: archMeta?.documentNumber || dsc.invoiceNo,
+        date: archMeta?.date || dsc.orderDate,
+        fileName: dsc.firstOfferFileName,
+        fileUrl: cleanFirst,
+        isLowest: true
+      });
+    }
+
+    candidateInitialOffers.sort((a, b) => a.amount - b.amount);
+    const lowestAmt = candidateInitialOffers.length > 0 ? candidateInitialOffers[0].amount : (Number(dsc.offerPrice) || 0);
+    const initialOffersComparison = candidateInitialOffers.map((item, idx) => {
+      const diff = idx === 0 ? 0 : Math.max(0, Number((item.amount - lowestAmt).toFixed(2)));
+      const diffPct = idx === 0 || lowestAmt <= 0 ? 0 : Number(((diff / lowestAmt) * 100).toFixed(2));
+      return {
+        ...item,
+        isLowest: idx === 0,
+        priceDiffFromLowest: diff,
+        priceDiffPercentage: diffPct
+      };
+    });
+
     const rawCat = dsc.category;
     const itemStrings = (dsc.items || []).map((it: any) => `${it.materialName || ''} ${it.originalName || ''} ${it.category || ''}`).join(' ');
     const normCategory = normalizeCategoryName(rawCat, `${itemStrings} ${dsc.description || ''} ${dsc.notes || ''} ${cleanVendor}`);
@@ -5677,6 +5845,8 @@ app.get('/api/discounts', async (req, res) => {
       supplier: cleanVendor,
       firstOfferFileUrl: cleanFirst,
       finalOfferFileUrl: cleanFinal,
+      ...(enrichedStageDocs.length > 0 ? { stageDocuments: enrichedStageDocs } : {}),
+      ...(initialOffersComparison.length > 0 ? { initialOffersComparison } : {}),
       ...(compId ? { comparativeAnalysisId: compId } : {}),
       ...(canonicalMaterials ? { canonicalMaterials } : {}),
       ...(realMarketSavings !== undefined ? { realMarketSavings } : {}),
