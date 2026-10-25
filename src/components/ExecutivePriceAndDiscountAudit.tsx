@@ -2,6 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { DiscountRecord, MaterialComparison, InvoiceRecord } from '../types';
 import { formatRuble, openOriginalFileViewer, resolveDocumentFileUrl } from '../utils/format';
 import { evaluateDiscountAudit, EXCESSIVE_DISCOUNT_THRESHOLD } from '../utils/auditRiskEngine';
+import { analyzeDiscountFraudPortfolio } from '../utils/discountFraudEngine';
+import { DiscountFraudDetectionPanel, FraudFindingCard, SEVERITY_STYLE } from './DiscountFraudDetectionPanel';
 import {
   runForensicAudit,
   fetchLiveAIForensicAnalysis,
@@ -47,6 +49,8 @@ interface Props {
   discounts: DiscountRecord[];
   comparisons: MaterialComparison[];
   invoices?: InvoiceRecord[];
+  /** GES Arşivi + Prizma ERP (sourceCollection: 'prizma_invoices'): hile denetiminin gerçek fiyat havuzu */
+  historicalInvoices?: InvoiceRecord[];
   onUpdateDiscount?: (id: string, record: Partial<DiscountRecord>) => Promise<void> | void;
 }
 
@@ -54,6 +58,7 @@ export const ExecutivePriceAndDiscountAudit: React.FC<Props> = ({
   discounts,
   comparisons,
   invoices = [],
+  historicalInvoices,
   onUpdateDiscount
 }) => {
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -179,6 +184,17 @@ export const ExecutivePriceAndDiscountAudit: React.FC<Props> = ({
       };
     });
   }, [discounts, comparisons, invoices, aiVerdictsOverrides]);
+
+  // Akıllı hile denetimi: tüm portföy, GES Arşivi + Prizma ERP gerçek fiyatlarıyla
+  const fraudResult = useMemo(
+    () => analyzeDiscountFraudPortfolio(discounts, historicalInvoices || invoices),
+    [discounts, historicalInvoices, invoices]
+  );
+
+  const openRecordDetail = (record: DiscountRecord) => {
+    setSelectedRecordForDetail(record);
+    setAuditNoteInput(record.executiveAuditNote || '');
+  };
 
   // Aggregate metrics
   const metrics = useMemo(() => {
@@ -533,6 +549,9 @@ export const ExecutivePriceAndDiscountAudit: React.FC<Props> = ({
         )}
       </div>
 
+      {/* Akıllı Hile Denetimi */}
+      <DiscountFraudDetectionPanel result={fraudResult} discounts={discounts} onOpenRecord={openRecordDetail} />
+
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Metric 1 */}
@@ -864,6 +883,15 @@ export const ExecutivePriceAndDiscountAudit: React.FC<Props> = ({
                           <div className="text-[10px] text-slate-500 font-medium line-clamp-1 max-w-[170px]" title={forensicVerdict.headline}>
                             {forensicVerdict.headline}
                           </div>
+                          {(() => {
+                            const fr = fraudResult.byId.get(record.id);
+                            if (!fr || (fr.riskLevel !== 'CRITICAL' && fr.riskLevel !== 'HIGH')) return null;
+                            return (
+                              <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-black border ${SEVERITY_STYLE[fr.riskLevel].badge}`}>
+                                Hile şüphesi: {SEVERITY_STYLE[fr.riskLevel].label}
+                              </span>
+                            );
+                          })()}
                         </div>
                       </td>
 
@@ -1101,6 +1129,36 @@ export const ExecutivePriceAndDiscountAudit: React.FC<Props> = ({
 
               {/* Modal Body */}
               <div className="p-4 sm:p-6 space-y-6 overflow-y-auto flex-1 bg-slate-50/60">
+
+                {(() => {
+                  const fr = fraudResult.byId.get(selectedAuditItem.record.id);
+                  if (!fr || fr.findings.length === 0) return null;
+                  return (
+                    <div className="bg-white border-2 border-red-200 rounded-2xl p-4 space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <ShieldAlert className="w-5 h-5 text-red-600" />
+                        <h4 className="text-sm font-black text-slate-900">Akıllı Hile Denetimi Bulguları</h4>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${SEVERITY_STYLE[fr.riskLevel].badge}`}>
+                          {SEVERITY_STYLE[fr.riskLevel].label} · {fr.riskScore}/100
+                        </span>
+                        <span className="ml-auto text-xs text-slate-600">
+                          Beyan: <b>{formatRuble(fr.claimedDiscount)}</b> · Geçmişe göre gerçek:{' '}
+                          <b>{fr.verifiedRealSaving === null ? '—' : formatRuble(Math.max(0, fr.verifiedRealSaving))}</b>
+                        </span>
+                      </div>
+                      {fr.findings.map((f, i) => (
+                        <FraudFindingCard
+                          key={i}
+                          finding={f}
+                          onOpenRelated={id => {
+                            const rec = discounts.find(d => d.id === id);
+                            if (rec) openRecordDetail(rec);
+                          }}
+                        />
+                      ))}
+                    </div>
+                  );
+                })()}
 
                 {/* ========================================================= */}
                 {/* 0. 🤖 YAPAY ZEKA KIDEMLİ BAŞDENETÇİ ADLİ İNCELEME MASASI */}

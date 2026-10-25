@@ -19,6 +19,7 @@ import {
 
 import { matchLines } from '../utils/invoiceLineMatcher';
 import { findCheaperHistoricalBenchmarksForItems } from '../utils/preApprovalAuditEngine';
+import { analyzeDraftDiscountFraud, FRAUD_PATTERN_LABELS } from '../utils/discountFraudEngine';
 import { GesLogo } from './GesLogo';
 import {
   Coins,
@@ -2510,6 +2511,34 @@ export const DiscountEntryForm: React.FC<Props> = ({
     return duplicateWarning;
   }, [aiReviewModal, invoiceNo, vendorName, agreedPrice, orderDate, discounts, invoices, duplicateWarning]);
 
+  // Akıllı hile denetimi: kaydetmeden önce aynı kurallar taslağa uygulanır (mükerrer fatura uyarısı yukarıdaki bantta)
+  const draftFraudReport = useMemo(() => {
+    if (!String(vendorName).trim() || !(numOffer > 0) || !(numAgreed > 0) || numOffer <= numAgreed) return null;
+    const pool = [
+      ...(invoices || []),
+      ...(prizmaInvoices || []).map(p => ({ ...p, sourceCollection: 'prizma_invoices' }))
+    ] as InvoiceRecord[];
+    const report = analyzeDraftDiscountFraud(
+      {
+        vendorName,
+        invoiceNo,
+        orderDate,
+        jobsiteId,
+        category,
+        offerPrice: numOffer,
+        agreedPrice: numAgreed,
+        discountAmount: numOffer - numAgreed,
+        items: extractedItems.length > 0 ? (extractedItems as any) : [],
+        firstOfferFileName: firstOfferFile?.name || firstOfferFileName || undefined,
+        finalOfferFileName: finalOfferFile?.name || finalOfferFileName || undefined
+      },
+      discounts || [],
+      pool
+    );
+    const findings = report.findings.filter(f => f.code !== 'DUPLICATE_INVOICE' && f.code !== 'DUPLICATE_OVERRIDE' && f.severity !== 'INFO');
+    return findings.length > 0 ? { ...report, findings } : null;
+  }, [vendorName, invoiceNo, orderDate, jobsiteId, category, numOffer, numAgreed, extractedItems, firstOfferFile, finalOfferFile, firstOfferFileName, finalOfferFileName, discounts, invoices, prizmaInvoices]);
+
   // Notify parent App when a scanned discount/invoice is waiting for confirmation so user can switch tabs and return
   useEffect(() => {
     if (!onPendingDiscountScanChange) return;
@@ -2774,6 +2803,14 @@ export const DiscountEntryForm: React.FC<Props> = ({
           isAboveBestOffer: schematicAnalysis.isAboveBestOfferCount > 0,
           competitorCount: Math.max(0, Math.max(schematicAnalysis.uniqueVendorsCount, schematicAnalysis.initialDocs.length) - 1),
           canonicalMaterials: schematicAnalysis.canonicalMaterials
+        } : {}),
+        ...(draftFraudReport ? {
+          fraudPrecheckAlert: {
+            notifiedAt: new Date().toISOString(),
+            riskLevel: draftFraudReport.riskLevel,
+            codes: draftFraudReport.findings.map(f => f.code),
+            suspiciousAmount: draftFraudReport.suspiciousAmount
+          }
         } : {}),
         ...(cheaperPreviewMatches.length > 0 ? {
           historicalBenchmarkAlert: {
@@ -4613,6 +4650,30 @@ export const DiscountEntryForm: React.FC<Props> = ({
             >
               🔍 Kontrol Paneline Dön & Kaydet
             </button>
+          </div>
+        )}
+
+        {/* Akıllı hile denetimi ön uyarısı */}
+        {draftFraudReport && (
+          <div className="p-4 rounded-2xl bg-orange-50 border-2 border-orange-400 text-orange-950 shadow-sm space-y-2">
+            <div className="flex items-start space-x-3">
+              <ShieldAlert className="w-6 h-6 text-orange-600 shrink-0 mt-0.5" />
+              <div className="flex-1 space-y-1">
+                <h4 className="text-sm font-black text-orange-900">
+                  Akıllı hile denetimi bu kayıtta {draftFraudReport.findings.length} şüpheli durum buldu
+                </h4>
+                <p className="text-[11px] font-semibold text-orange-800">
+                  Kaydedebilirsiniz; ancak bu uyarıyı gördüğünüz kayda işlenir ve yönetici denetiminde gösterilir.
+                </p>
+              </div>
+            </div>
+            <ul className="space-y-1.5 pl-9">
+              {draftFraudReport.findings.map((f, i) => (
+                <li key={i} className="text-xs">
+                  <b>{FRAUD_PATTERN_LABELS[f.code]}:</b> {f.summary}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 

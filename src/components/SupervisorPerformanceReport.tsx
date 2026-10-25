@@ -2120,6 +2120,7 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
             discounts={discounts}
             comparisons={comparisons}
             invoices={invoices}
+            historicalInvoices={combinedInvoicePool}
             onUpdateDiscount={onUpdateDiscount}
           />
         )}
