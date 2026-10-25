@@ -3,7 +3,15 @@ import { formatRuble } from './format';
 import { isExemptFromBenchmarkAudit } from './auditRiskEngine';
 import { ensureRussianOriginalName } from './categoryClassifier';
 import { areMaterialSegmentsCompatible } from './materialSegmentIntelligence';
-import { clusterSameProductRows, isSameProductForPriceAlert } from './sameMaterialGuard';
+import { isSameProductForPriceAlert } from './sameMaterialGuard';
+import {
+  clusterSameMaterialRows,
+  isExactUnitConversion,
+  isPlausibleSameMaterialPriceRatio,
+  cleanDocumentNumber,
+  vendorKeyForMatching,
+  parsePurchaseDate
+} from './sameMaterialMatcher';
 import { extractTechnicalStandardAndGrade, formatTechnicalVariantBadges } from './materialGroupIntegrity';
 
 export interface AnomalyAlert {
@@ -139,6 +147,42 @@ const isVatRatio = (ratio: number) => Math.abs(ratio - 1.22) <= 0.006 || Math.ab
 // Sunucu her satırın KDV tabanını fatura toplamıyla doğruladıysa (vatBasisVerified) 1,20x / 1,22x fark gerçektir, KDV karışıklığı değildir.
 const isUnverifiedVatGap = (ratio: number, a: any, b: any) => isVatRatio(ratio) && !(a?.vatBasisVerified && b?.vatBasisVerified);
 
+/**
+ * Yalnızca faturada kayıtlı gerçek fiyatlar: tahmini birim dönüşümü (yoğunluk, paket, plaka) ile türetilmiş,
+ * kalemleri belgeyle doğrulanamamış ve aynı alımın ikinci kopyası (GES Arşivi + Prizma ERP) olan satırlar çıkarılır.
+ */
+function trustedPriceRows(history: any[]): any[] {
+  const seen = new Set<string>();
+  const rows: any[] = [];
+  for (const h of history || []) {
+    if (!(unitPriceOf(h) > 0)) continue;
+    if (h.invoiceLinesVerified === false) continue;
+    if (!isExactUnitConversion(h)) continue;
+    const name = String(h.rawOriginalName || h.originalName || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const price = unitPriceOf(h).toFixed(2);
+    const qty = String(quantityOf(h));
+    const docKey = cleanDocumentNumber(h.invoiceNumber);
+    const keys = [
+      `${vendorKeyForMatching(h.supplier)}|${parsePurchaseDate(h.date) ?? h.date}|${name}|${qty}|${price}`,
+      docKey ? `${docKey}|${name}|${qty}|${price}` : ''
+    ].filter(Boolean);
+    if (keys.some(k => seen.has(k))) continue;
+    keys.forEach(k => seen.add(k));
+    rows.push(h);
+  }
+  return rows;
+}
+
+/** Kümenin ortanca fiyatından 3 kattan fazla sapan satır birim/okuma hatasıdır (ör. kg fiyatı ton satırına yazılmış). */
+function withoutPriceOutliers(rows: any[]): any[] {
+  if (rows.length < 3) {
+    return rows.length === 2 && !isPlausibleSameMaterialPriceRatio(unitPriceOf(rows[0]), unitPriceOf(rows[1])) ? [] : rows;
+  }
+  const sorted = rows.map(unitPriceOf).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  return rows.filter(r => isPlausibleSameMaterialPriceRatio(unitPriceOf(r), median));
+}
+
 function mapHistoryRows(comp: MaterialComparison, rows: any[], stdUnit: string): NonNullable<AnomalyAlert['historyRows']> {
   return rows.map((h: any) => {
     // unitPriceOf = kıyaslama fiyatı (sunucuda %22 KDV dahil); net yalnızca bilgi amaçlı gösterilir
@@ -176,8 +220,10 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
     if (isExemptFromBenchmarkAudit(comp.materialName, comp.category).isExempt) return;
 
     const stdUnit = comp.standardUnit || comp.unit || 'Adet';
-    const pricedHistory = comp.history.filter((h: any) => unitPriceOf(h) > 0);
-    const productClusters = clusterSameProductRows(pricedHistory, comp.materialName, comp.category)
+    const pricedHistory = trustedPriceRows(comp.history);
+    // Ortak "aynı malzeme" kuralı (sameMaterialMatcher): aynı marka, model ve tüm teknik özellikler
+    const productClusters = clusterSameMaterialRows(pricedHistory, comp.materialName, comp.category)
+      .map(withoutPriceOutliers)
       .filter(rows => rows.length >= 2);
 
     productClusters.forEach((rows, clusterIdx) => {

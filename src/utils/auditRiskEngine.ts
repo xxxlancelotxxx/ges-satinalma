@@ -1,12 +1,10 @@
-import {
-  convertMaterialUnit,
-  normalizeStandardUnit
-} from './constructionUnitConverter';
+import { normalizeStandardUnit } from './constructionUnitConverter';
 import {
   extractTechnicalStandardAndGrade,
   areTechnicalVariantsCompatible,
   formatTechnicalVariantBadges
 } from './materialGroupIntegrity';
+import { isSameMaterialLine, isExactUnitConversion, convertUnitPriceStrict, parsePurchaseDate } from './sameMaterialMatcher';
 
 export const EXCESSIVE_DISCOUNT_THRESHOLD = 35;
 
@@ -252,20 +250,23 @@ export function evaluateDiscountAudit(
       const itemUnit = item.unit || 'adet';
       const benchmarkUnit = comp.standardUnit || comp.unit || 'adet';
 
-      // Akıllı şantiye birim dönüşümü (Örn: Rulo -> m², Metre -> Ton)
-      const conv = convertMaterialUnit({
-        materialName: item.description || item.materialName || comp.materialName,
-        category: input.category || comp.category,
-        fromUnit: itemUnit,
-        toUnit: benchmarkUnit,
-        unitPrice: itemPrice,
-        quantity: itemQty
-      });
+      // Fiyat uydurulmaz: yalnızca aynı birim veya kesin metrik ölçek (kg ⟷ ton) ile kıyaslanır
+      const strictPrice = convertUnitPriceStrict(itemPrice, itemUnit, benchmarkUnit);
+      const conv = {
+        conversionApplied: strictPrice !== null && normalizeStandardUnit(itemUnit) !== normalizeStandardUnit(benchmarkUnit),
+        convertedUnitPrice: strictPrice ?? 0,
+        convertedQuantity: strictPrice ? (itemPrice * itemQty) / strictPrice : itemQty,
+        formula: `${itemUnit} → ${benchmarkUnit}`
+      };
 
-      // Yalnızca birimler özdeşse veya başarıyla normalize edilebildiyse kıyasla
-      if (conv.conversionApplied || normalizeStandardUnit(itemUnit) === normalizeStandardUnit(benchmarkUnit)) {
-        const effectivePrice = conv.conversionApplied ? conv.convertedUnitPrice : itemPrice;
-        const curDateMs = input.orderDate ? new Date(input.orderDate).getTime() : 0;
+      if (strictPrice !== null) {
+        const effectivePrice = strictPrice;
+        const curDateMs = parsePurchaseDate(input.orderDate) ?? 0;
+        const itemLine = {
+          originalName: item.originalName || item.originalMaterialName || item.description || item.materialName,
+          materialName: item.description || item.materialName,
+          category: item.category || input.category
+        };
 
         let benchmarkAvg = 0;
         let benchmarkMin = 0;
@@ -278,10 +279,18 @@ export function evaluateDiscountAudit(
             if (hPrice <= 0) return false;
             if (input.invoiceNo && h.invoiceNumber && String(h.invoiceNumber).trim() === String(input.invoiceNo).trim()) return false;
             if (curDateMs > 0 && h.date) {
-              const hMs = new Date(h.date).getTime();
-              // Kendisinden >15 gün sonra alınmış gelecekteki faturaları geçmiş baz fiyatı yapma
-              if (hMs > curDateMs + 15 * 86400000) return false;
+              const hMs = parsePurchaseDate(h.date);
+              // Kendisinden sonra alınmış faturalar geçmiş baz fiyatı olamaz
+              if (hMs !== null && hMs > curDateMs) return false;
             }
+            // Yalnızca gerçek kayıtlı fiyat: tahmini birim dönüşümü ve belgeyle doğrulanamamış satır baz olamaz
+            if (h.invoiceLinesVerified === false || !isExactUnitConversion(h)) return false;
+            // Ortak kural: aynı marka, model ve teknik özellikteki malzeme
+            if (!isSameMaterialLine(itemLine, {
+              originalName: h.rawOriginalName || h.originalName,
+              materialName: h.rawMaterialName || comp.materialName,
+              category: comp.category
+            }).same) return false;
             const hVariant = extractTechnicalStandardAndGrade(
               h.rawOriginalName || h.originalName || '',
               h.rawMaterialName || comp.materialName || ''
@@ -297,9 +306,8 @@ export function evaluateDiscountAudit(
           benchmarkMin = Math.min(...otherPrices);
           benchmarkMax = Math.max(...otherPrices);
         } else {
-          benchmarkAvg = Number(comp.avgUnitPrice || 0);
-          benchmarkMin = Number(comp.minUnitPrice || benchmarkAvg);
-          benchmarkMax = Number(comp.maxUnitPrice || benchmarkAvg);
+          // Satır bazında doğrulanmış geçmiş yoksa grup ortalaması (farklı marka/özellik karışık olabilir) baz alınmaz
+          continue;
         }
 
         if (benchmarkAvg > 0) {
