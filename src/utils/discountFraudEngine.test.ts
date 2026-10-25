@@ -1,9 +1,5 @@
 import assert from 'node:assert/strict';
-import {
-  analyzeDiscountFraudPortfolio,
-  analyzeDraftDiscountFraud,
-  extractDocumentDateFromFileName
-} from './discountFraudEngine';
+import { analyzeDiscountFraudPortfolio, analyzeDraftDiscountFraud } from './discountFraudEngine';
 
 console.log('=== AKILLI İNDİRİM HİLE DENETİMİ TESTLERİ ===');
 
@@ -31,12 +27,6 @@ const invoice = (id: string, supplier: string, date: string, no: string, name: s
   items: [{ originalName: name, materialName: name, quantity: qty, unit: 'Adet', unitPrice: price, totalPrice: qty * price }],
   ...extra
 });
-
-// 1) Dosya adındaki tarih
-assert.equal(extractDocumentDateFromFileName('Счет-Заказ №040652 от 27.07.26_1.pdf'), Date.UTC(2026, 6, 27));
-assert.equal(extractDocumentDateFromFileName('Счет на оплату № 3686 от 04 августа 2026 г.pdf'), Date.UTC(2026, 7, 4));
-assert.equal(extractDocumentDateFromFileName('65551903 (1).pdf'), null);
-console.log('✓ belge adından tarih okunuyor');
 
 // 2) Şişirilmiş ilk teklif: aynı tedarikçi 2 hafta önce 400 ₽'ye satmış, ilk teklif 560, son 400 → kritik
 const history = [
@@ -125,20 +115,25 @@ const sameDoc = base({ id: 'disc_d', vendorName: 'ООО "ТД ТУЛА-СТАЛ
   offerPrice: 13495000, agreedPrice: 12685000, discountAmount: 810000, items: [],
   firstOfferFileName: 'Спецификация СБ.П-42450015 от 30.09.2026.pdf', finalOfferFileName: 'Спецификация СБ.П-42450015 от 30.09.2026.pdf' });
 res = analyzeDiscountFraudPortfolio([first, twin, dupInvoice, sameDoc] as any, []);
-assert.ok(res.byId.get('disc_b')!.findings.some(f => f.code === 'TWIN_RECORD' && f.severity === 'HIGH'), 'ikiz kayıt');
-assert.equal(res.byId.get('disc_a')!.findings.length, 0, 'ilk kayıt asıl kayıttır');
 assert.ok(res.byId.get('disc_c')!.findings.some(f => f.code === 'DUPLICATE_INVOICE' && f.severity === 'CRITICAL'), 'aynı fatura iki kez');
-const sd = res.byId.get('disc_d')!.findings.find(f => f.code === 'SAME_DOCUMENT_BOTH_STAGES');
-assert.ok(sd && sd.impactRub === 810000, 'aynı belge iki aşamada');
-console.log('✓ mükerrer fatura, ikiz kayıt ve aynı belge yakalandı');
+assert.equal(res.byId.get('disc_a')!.findings.length, 0, 'ilk kayıt asıl kayıttır');
+// Berkant: aynı gün giriş, aynı sepetli farklı fatura ve iki aşamada aynı dosya normal iş akışıdır
+assert.equal(res.byId.get('disc_b')!.riskLevel, 'CLEAN', 'aynı gün farklı fatura normal');
+assert.equal(res.byId.get('disc_d')!.riskLevel, 'CLEAN', 'aynı dosya tek başına şüphe değil');
+console.log('✓ mükerrer fatura yakalandı; aynı gün / aynı dosya normal sayıldı');
 
-// 8) İlk teklif belgesi son faturadan sonra tarihli
-const dateOrder = base({ id: 'disc_e', vendorName: 'ООО "Х"', invoiceNo: '777', orderDate: '2026-08-01', created_at: '2026-08-10T00:00:00Z',
-  offerPrice: 100000, agreedPrice: 90000, discountAmount: 10000, items: [],
-  firstOfferFileName: 'КП 777 от 09.08.2026.pdf', finalOfferFileName: 'Счет 777 от 01.08.2026.pdf' });
-res = analyzeDiscountFraudPortfolio([dateOrder] as any, []);
-assert.ok(res.byId.get('disc_e')!.findings.some(f => f.code === 'DOCUMENT_DATE_ORDER'));
-console.log('✓ ilk teklif belgesi son faturadan sonra tarihli');
+// 8) Aynı fiyata tekrar indirim: geçen ay indirimle 400'e alınmış, bu ay yine 400'e indirim beyanı
+const prevSync = invoice('inv_sync_disc_prev', 'ООО "ТРЕЙДМИ"', '2026-08-20', '4100', glue, 100, 400, { discountId: 'disc_prev' });
+const nails = 'Гвоздь строительный 2,5х60 мм (фасовка по 5 кг)';
+const repeat = base({ ...inflated, id: 'disc_repeat', invoiceNo: '5100', orderDate: '2026-09-18', offerPrice: 52000, agreedPrice: 45000, discountAmount: 7000,
+  items: [
+    { originalName: glue, materialName: glue, quantity: 100, unit: 'Adet', unitPrice: 400, totalPrice: 40000 },
+    { originalName: nails, materialName: nails, quantity: 10, unit: 'Adet', unitPrice: 500, totalPrice: 5000 }
+  ] });
+res = analyzeDiscountFraudPortfolio([repeat] as any, [prevSync] as any);
+const rp = res.byId.get('disc_repeat')!.findings.find(f => f.code === 'REPEAT_DISCOUNT_SAME_PRICE');
+assert.ok(rp && rp.impactRub === 7000, 'aynı fiyata tekrar indirim');
+console.log('✓ aynı fiyata tekrar indirim yakalandı');
 
 // 9) Faturada ödenen tutar = ilk teklif → indirim faturaya yansımamış
 const paidFull = base({ id: 'disc_f', vendorName: 'ООО "ТРЕЙДМИ"', invoiceNo: '9001', orderDate: '2026-09-10', created_at: '2026-09-12T00:00:00Z',

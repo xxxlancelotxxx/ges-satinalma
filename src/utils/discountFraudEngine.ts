@@ -33,12 +33,8 @@ export type FraudSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'INFO';
 export type FraudPatternCode =
   | 'INFLATED_FIRST_OFFER'
   | 'PHANTOM_SAVINGS'
+  | 'REPEAT_DISCOUNT_SAME_PRICE'
   | 'DUPLICATE_INVOICE'
-  | 'TWIN_RECORD'
-  | 'DUPLICATE_OVERRIDE'
-  | 'SAME_DOCUMENT_BOTH_STAGES'
-  | 'REUSED_DOCUMENT'
-  | 'DOCUMENT_DATE_ORDER'
   | 'STAGE_AMOUNT_MISMATCH'
   | 'INVOICE_TOTAL_MISMATCH'
   | 'EXCESSIVE_DISCOUNT';
@@ -46,12 +42,8 @@ export type FraudPatternCode =
 export const FRAUD_PATTERN_LABELS: Record<FraudPatternCode, string> = {
   INFLATED_FIRST_OFFER: 'Şişirilmiş ilk teklif',
   PHANTOM_SAVINGS: 'Hayali indirim (fiyat eski normale döndü)',
+  REPEAT_DISCOUNT_SAME_PRICE: 'Aynı fiyata tekrar indirim',
   DUPLICATE_INVOICE: 'Aynı fatura iki kez indirim',
-  TWIN_RECORD: 'İkiz kayıt (aynı sepet tekrar)',
-  DUPLICATE_OVERRIDE: 'Mükerrer uyarısı geçilerek kaydedildi',
-  SAME_DOCUMENT_BOTH_STAGES: 'İlk teklif ve son fatura aynı belge',
-  REUSED_DOCUMENT: 'Belge başka kayıtta da kullanılmış',
-  DOCUMENT_DATE_ORDER: 'İlk teklif son faturadan sonra tarihli',
   STAGE_AMOUNT_MISMATCH: 'Beyan tutarı belgeyi tutmuyor',
   INVOICE_TOTAL_MISMATCH: 'Faturada ödenen tutar beyandan yüksek',
   EXCESSIVE_DISCOUNT: 'Olağandışı yüksek indirim oranı'
@@ -66,7 +58,6 @@ export const INFLATED_FIRST_OFFER_MIN_PCT = 15;
 /** Geçmiş fiyat penceresi: emtia (demir, beton, kablo, yakıt) fiyatı hızlı değiştiği için daha kısa. */
 export const HISTORY_WINDOW_DAYS = 120;
 export const VOLATILE_HISTORY_WINDOW_DAYS = 45;
-export const TWIN_RECORD_WINDOW_DAYS = 30;
 export const EXCESSIVE_DISCOUNT_PCT = 35;
 
 export interface FraudEvidence {
@@ -181,58 +172,6 @@ function isAuditableMaterialLine(it: any, category?: string): boolean {
   return isLineArithmeticConsistent(it);
 }
 
-const RU_MONTHS: Record<string, number> = {
-  январ: 1, феврал: 2, март: 3, апрел: 4, ма: 5, июн: 6, июл: 7, август: 8, сентябр: 9, октябр: 10, ноябр: 11, декабр: 12
-};
-
-/** Belge adındaki tarih ("от 27.07.26", "от 04 августа 2026 г", "20.08.2026"). Bulunamazsa null. */
-export function extractDocumentDateFromFileName(name?: string): number | null {
-  const s = String(name || '').toLowerCase();
-  if (!s) return null;
-  const word = s.match(/(\d{1,2})\s+(январ\S*|феврал\S*|март\S*|апрел\S*|ма[йя]\S*|июн\S*|июл\S*|август\S*|сентябр\S*|октябр\S*|ноябр\S*|декабр\S*)\s+(\d{4})/);
-  if (word) {
-    const key = Object.keys(RU_MONTHS).find(k => word[2].startsWith(k));
-    if (key) return Date.UTC(Number(word[3]), RU_MONTHS[key] - 1, Number(word[1]));
-  }
-  const num = s.match(/(?:^|[^\d])(\d{1,2})[.\-](\d{1,2})[.\-](\d{4}|\d{2})(?!\d)/);
-  if (num) {
-    const day = Number(num[1]);
-    const month = Number(num[2]);
-    let year = Number(num[3]);
-    if (year < 100) year += 2000;
-    if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 2020 && year <= 2100) {
-      return Date.UTC(year, month - 1, day);
-    }
-  }
-  return null;
-}
-
-function normalizedFileName(name?: string): string {
-  return String(name || '').trim().toLowerCase();
-}
-
-/**
- * Dosya adı belgeyi tanımlayacak kadar özgül mü? ("1.pdf", "image.png", "İNDİRİM TABLOSU.pdf" gibi genel adlar
- * farklı belgeler için tekrar kullanılabilir; bunlarda yalnızca aynı depolama kimliği kanıt sayılır.)
- */
-function isDistinctiveDocumentName(name?: string): boolean {
-  const n = normalizedFileName(name).replace(/\.(pdf|jpe?g|png|xlsx?|docx?|heic|webp)$/i, '');
-  const digits = (n.match(/\d/g) || []).length;
-  return n.length >= 8 && digits >= 4;
-}
-
-function itemsFingerprint(items: any[] | undefined): string {
-  if (!Array.isArray(items) || items.length === 0) return '';
-  return items
-    .map(it => {
-      const p = buildMaterialMatchProfile({ originalName: it?.originalName, materialName: it?.materialName, category: it?.category });
-      const name = p?.sig.exactKey || String(it?.originalName || it?.materialName || '').toLowerCase().trim();
-      return `${name}|${Number(it?.quantity) || 0}|${comparisonGrossUnitPrice(it).toFixed(2)}`;
-    })
-    .sort()
-    .join('#');
-}
-
 function invoiceTotalExcludingFreight(inv: any): number[] {
   const total = Number(inv?.totalAmount) || 0;
   const freight = Number(inv?.excludedFreightGrossAmount || inv?.excludedFreightAmount) || 0;
@@ -262,6 +201,8 @@ interface LinePriceInsight {
   refCount: number;
   sameVendorRef: boolean;
   refEvidence: FraudEvidence[];
+  /** Aynı tedarikçiden aynı malzemenin en son İNDİRİMLİ alımı (önceki indirim kaydının ödenen fiyatı) */
+  prevDiscountBuy: { unitPrice: number; date: string; discountId?: string; invoiceNo?: string; fileUrl?: string } | null;
 }
 
 function analyzeLinePrices(d: DiscountRecord, pool: InvoiceRecord[]): LinePriceInsight[] {
@@ -291,7 +232,9 @@ function analyzeLinePrices(d: DiscountRecord, pool: InvoiceRecord[]): LinePriceI
     let firstOfferUnit: number | null = null;
     let firstOfferSource: LinePriceInsight['firstOfferSource'] = null;
     const ref = lineRefs[idx];
-    if (ref && ref.hasReference && ref.refPrice > 0) {
+    // Oransal (toplam indirim oranından dağıtılmış) ilk teklif tahmindir, belge fiyatı değildir: kullanılmaz
+    const isEstimatedRef = ref && /^(Oransal|İlk Teklif \(Değişim Yok\))/.test(String(ref.refSupplier || ''));
+    if (ref && ref.hasReference && ref.refPrice > 0 && !isEstimatedRef) {
       firstOfferUnit = ref.refPrice;
       firstOfferSource = 'PDF_LINE';
     } else if (singleMaterialRecord && scopeDeduction === 0) {
@@ -331,7 +274,20 @@ function analyzeLinePrices(d: DiscountRecord, pool: InvoiceRecord[]): LinePriceI
     const refUnit = Number(median(basis.slice(0, 5).map(m => m.comparablePrice)).toFixed(2));
     if (!(refUnit > 0)) continue;
 
+    const prevDisc = [...sameVendor]
+      .filter(m => isDiscountCopyInvoice(m.entry.inv))
+      .sort((a, b) => (parsePurchaseDate(b.entry.date) || 0) - (parsePurchaseDate(a.entry.date) || 0))[0];
+
     out.push({
+      prevDiscountBuy: prevDisc
+        ? {
+            unitPrice: prevDisc.comparablePrice,
+            date: prevDisc.entry.date,
+            discountId: (prevDisc.entry.inv as any).discountId || String(prevDisc.entry.inv.id || '').replace(/^inv_(?:sync|cmp)_/, ''),
+            invoiceNo: prevDisc.entry.inv.invoiceNumber,
+            fileUrl: prevDisc.entry.inv.fileUrl
+          }
+        : null,
       materialName: String(it.originalName || it.materialName),
       unit: String(it.unit || 'adet'),
       quantity: qty,
@@ -403,8 +359,35 @@ function detectPriceHistoryFindings(d: DiscountRecord, insights: LinePriceInsigh
     });
   }
 
-  // 2) Hayali indirim: indirim beyan edilmiş ama ödenen fiyat aynı malzemenin yakın geçmiş gerçek fiyatından düşük değil
+  // 2) Aynı fiyata tekrar indirim: aynı tedarikçiden aynı malzeme geçen sefer de "indirimle" bu fiyata alınmış
   const claimedPct = claimedDiscountPct(d);
+  if (findings.length === 0 && claimed >= MIN_FRAUD_IMPACT_RUB && claimedPct >= 2) {
+    for (const l of insights) {
+      const prev = l.prevDiscountBuy;
+      if (!prev || l.paidUnit < prev.unitPrice * 0.99) continue;
+      const lineShare = (l.paidUnit * l.quantity) / (agreed || 1);
+      const lineClaimed = l.firstOfferUnit ? Math.max(0, (l.firstOfferUnit - l.paidUnit) * l.quantity) : (lineShare >= 0.6 ? claimed : 0);
+      if (lineClaimed < MIN_FRAUD_IMPACT_RUB) continue;
+      findings.push({
+        code: 'REPEAT_DISCOUNT_SAME_PRICE',
+        severity: 'HIGH',
+        title: FRAUD_PATTERN_LABELS.REPEAT_DISCOUNT_SAME_PRICE,
+        materialName: l.materialName,
+        summary:
+          `"${l.materialName}" aynı tedarikçiden ${prev.date} tarihinde de indirim kaydıyla ${fmtRub(prev.unitPrice)}/${l.unit} fiyata alınmış. ` +
+          `Bu kayıtta yine ${fmtRub(l.paidUnit)}/${l.unit} ödenmiş ve ${fmtRub(lineClaimed)} indirim beyan edilmiş: fiyat düşmedi, aynı fiyata ikinci kez indirim yazıldı.`,
+        impactRub: Number(lineClaimed.toFixed(2)),
+        evidence: [
+          { label: 'Önceki indirimli alım', value: `${fmtRub(prev.unitPrice)}/${l.unit}`, date: prev.date, docNo: prev.invoiceNo, supplier: d.vendorName, source: 'DISCOUNT', discountId: prev.discountId, fileUrl: prev.fileUrl },
+          { label: 'Bu kayıt', value: `${fmtRub(l.paidUnit)}/${l.unit}`, date: d.orderDate, docNo: d.invoiceNo, supplier: d.vendorName, source: 'DISCOUNT', discountId: d.id, fileUrl: d.finalOfferFileUrl }
+        ],
+        relatedDiscountIds: prev.discountId ? [prev.discountId] : undefined
+      });
+      break;
+    }
+  }
+
+  // 3) Hayali indirim: indirim beyan edilmiş ama ödenen fiyat aynı malzemenin yakın geçmiş gerçek fiyatından düşük değil
   const hasInflatedFinding = findings.length > 0;
   if (!hasInflatedFinding && claimed >= MIN_FRAUD_IMPACT_RUB && claimedPct >= 2 && coverage >= 0.6) {
     const claimedOnCovered = claimed * coverage;
@@ -448,48 +431,6 @@ function detectPriceHistoryFindings(d: DiscountRecord, insights: LinePriceInsigh
 function detectDocumentFindings(d: DiscountRecord, claimed: number): FraudFinding[] {
   const findings: FraudFinding[] = [];
   if (claimed < MIN_FRAUD_IMPACT_RUB) return findings;
-
-  const firstId = String(d.firstOfferDriveFileId || '').trim();
-  const finalId = String(d.finalOfferDriveFileId || '').trim();
-  const firstName = normalizedFileName(d.firstOfferFileName);
-  const finalName = normalizedFileName(d.finalOfferFileName);
-  const sameStorage = Boolean(firstId && finalId && firstId === finalId);
-  const sameName = Boolean(firstName && finalName && firstName === finalName);
-  if (sameStorage || sameName) {
-    findings.push({
-      code: 'SAME_DOCUMENT_BOTH_STAGES',
-      severity: 'HIGH',
-      title: FRAUD_PATTERN_LABELS.SAME_DOCUMENT_BOTH_STAGES,
-      summary:
-        `İlk teklif ve son fatura olarak ${sameStorage ? 'aynı dosya' : 'aynı adlı dosya'} ("${d.firstOfferFileName}") yüklenmiş; ` +
-        `buna rağmen ${fmtRub(Number(d.offerPrice) || 0)} → ${fmtRub(Number(d.agreedPrice) || 0)} arası ${fmtRub(claimed)} indirim beyan edilmiş. ` +
-        `İndirimi gösteren ikinci bir belge yok.`,
-      impactRub: Number(claimed.toFixed(2)),
-      evidence: [
-        { label: 'İlk teklif dosyası', value: d.firstOfferFileName || '-', source: 'DOCUMENT', fileUrl: d.firstOfferFileUrl },
-        { label: 'Son fatura dosyası', value: d.finalOfferFileName || '-', source: 'DOCUMENT', fileUrl: d.finalOfferFileUrl }
-      ]
-    });
-  }
-
-  const firstDate = extractDocumentDateFromFileName(d.firstOfferFileName);
-  const finalDate = extractDocumentDateFromFileName(d.finalOfferFileName);
-  if (!sameName && firstDate !== null && finalDate !== null && firstDate > finalDate) {
-    const days = Math.round((firstDate - finalDate) / DAY_MS);
-    findings.push({
-      code: 'DOCUMENT_DATE_ORDER',
-      severity: 'HIGH',
-      title: FRAUD_PATTERN_LABELS.DOCUMENT_DATE_ORDER,
-      summary:
-        `İlk teklif belgesi ${new Date(firstDate).toLocaleDateString('tr-TR')} tarihli, son fatura ise ${new Date(finalDate).toLocaleDateString('tr-TR')} tarihli: ` +
-        `"ilk teklif" son faturadan ${days} gün sonra düzenlenmiş. İndirimden sonra yüksek fiyatlı belge alınmış olabilir.`,
-      impactRub: Number(claimed.toFixed(2)),
-      evidence: [
-        { label: 'İlk teklif dosyası', value: d.firstOfferFileName || '-', date: new Date(firstDate).toISOString().slice(0, 10), source: 'DOCUMENT', fileUrl: d.firstOfferFileUrl },
-        { label: 'Son fatura dosyası', value: d.finalOfferFileName || '-', date: new Date(finalDate).toISOString().slice(0, 10), source: 'DOCUMENT', fileUrl: d.finalOfferFileUrl }
-      ]
-    });
-  }
 
   // Beyan edilen ilk teklif / son tutar, aşama belgelerine girilen tutarlarla tutmuyor mu? (yalnızca indirimi büyüten yönde)
   const stages = Array.isArray(d.stageDocuments) ? d.stageDocuments : [];
@@ -538,8 +479,6 @@ function detectDocumentFindings(d: DiscountRecord, claimed: number): FraudFindin
 interface PortfolioIndex {
   active: DiscountRecord[];
   byInvoiceVendor: Map<string, DiscountRecord[]>;
-  byFingerprintVendor: Map<string, DiscountRecord[]>;
-  byDocument: Map<string, DiscountRecord[]>;
   invoicesByNumber: Map<string, InvoiceRecord[]>;
 }
 
@@ -550,34 +489,17 @@ function pushMap<T>(m: Map<string, T[]>, k: string, v: T) {
   else m.set(k, [v]);
 }
 
-function documentKeys(d: DiscountRecord): string[] {
-  const keys: string[] = [];
-  for (const [id, name] of [
-    [d.firstOfferDriveFileId, d.firstOfferFileName],
-    [d.finalOfferDriveFileId, d.finalOfferFileName]
-  ] as const) {
-    if (id) keys.push(`id:${String(id).trim()}`);
-    if (name && isDistinctiveDocumentName(name)) keys.push(`name:${normalizedFileName(name)}`);
-  }
-  return [...new Set(keys)];
-}
-
 function buildPortfolioIndex(discounts: DiscountRecord[], pool: InvoiceRecord[]): PortfolioIndex {
   const active = discounts.filter(isActive);
   const idx: PortfolioIndex = {
     active,
     byInvoiceVendor: new Map(),
-    byFingerprintVendor: new Map(),
-    byDocument: new Map(),
     invoicesByNumber: new Map()
   };
   for (const d of active) {
     const vk = vendorKeyForMatching(d.vendorName);
     const no = cleanDocumentNumber(d.invoiceNo || d.invoiceNumber);
     if (vk && no.length >= 3) pushMap(idx.byInvoiceVendor, `${vk}|${no}`, d);
-    const fp = itemsFingerprint(d.items);
-    if (vk && fp) pushMap(idx.byFingerprintVendor, `${vk}|${fp}`, d);
-    for (const k of documentKeys(d)) pushMap(idx.byDocument, k, d);
   }
   for (const inv of pool) {
     if (!inv || inv.isDeleted || isDiscountCopyInvoice(inv)) continue;
@@ -627,64 +549,6 @@ function detectDuplicateFindings(d: DiscountRecord, idx: PortfolioIndex, claimed
     });
   }
 
-  const fp = itemsFingerprint(d.items);
-  const cur = recordDate(d);
-  if (vk && fp && cur !== null) {
-    const twins = (idx.byFingerprintVendor.get(`${vk}|${fp}`) || []).filter(o => {
-      if (o.id === d.id || !isLater(o)) return false;
-      if (sameInvoice.some(s => s.id === o.id)) return false;
-      const t = recordDate(o);
-      return t !== null && Math.abs(cur - t) <= TWIN_RECORD_WINDOW_DAYS * DAY_MS && claimedDiscountOf(o) > 0;
-    });
-    if (twins.length > 0 && claimed >= MIN_FRAUD_IMPACT_RUB * 0.2) {
-      const sameDay = twins.some(o => recordDate(o) === cur);
-      const sameAmounts = twins.some(o => Math.abs((Number(o.offerPrice) || 0) - (Number(d.offerPrice) || 0)) < 1 && Math.abs((Number(o.agreedPrice) || 0) - (Number(d.agreedPrice) || 0)) < 1);
-      findings.push({
-        code: 'TWIN_RECORD',
-        severity: sameDay && sameAmounts ? 'HIGH' : 'MEDIUM',
-        title: FRAUD_PATTERN_LABELS.TWIN_RECORD,
-        summary:
-          `Aynı tedarikçiden birebir aynı kalem, miktar ve fiyatlarla ${sameDay ? 'aynı gün' : `${TWIN_RECORD_WINDOW_DAYS} gün içinde`} başka bir faturaya da indirim girilmiş` +
-          `${sameAmounts ? ' (ilk teklif ve son tutar da aynı)' : ''}. Tek pazarlık iki faturaya bölünüp iki kez sayılmış olabilir.`,
-        impactRub: Number(claimed.toFixed(2)),
-        evidence: twins.map(describeOther),
-        relatedDiscountIds: twins.map(o => o.id)
-      });
-    }
-  }
-
-  const docShared = new Map<string, DiscountRecord>();
-  for (const k of documentKeys(d)) {
-    for (const o of idx.byDocument.get(k) || []) {
-      if (o.id !== d.id && isLater(o) && !sameInvoice.some(s => s.id === o.id)) docShared.set(o.id, o);
-    }
-  }
-  if (docShared.size > 0 && claimed >= MIN_FRAUD_IMPACT_RUB) {
-    const others = [...docShared.values()];
-    findings.push({
-      code: 'REUSED_DOCUMENT',
-      severity: 'HIGH',
-      title: FRAUD_PATTERN_LABELS.REUSED_DOCUMENT,
-      summary: `Bu kayda yüklenen teklif/fatura belgesi daha önce başka bir indirim kaydında da kullanılmış. Aynı belgeyle iki farklı indirim beyan edilemez.`,
-      impactRub: Number(claimed.toFixed(2)),
-      evidence: [
-        { label: 'Bu kaydın belgeleri', value: `${d.firstOfferFileName || '-'} / ${d.finalOfferFileName || '-'}`, source: 'DOCUMENT', fileUrl: d.firstOfferFileUrl },
-        ...others.map(describeOther)
-      ],
-      relatedDiscountIds: others.map(o => o.id)
-    });
-  }
-
-  if ((d as any).forceSaveDuplicate === true && earlierSameInvoice.length === 0) {
-    findings.push({
-      code: 'DUPLICATE_OVERRIDE',
-      severity: 'MEDIUM',
-      title: FRAUD_PATTERN_LABELS.DUPLICATE_OVERRIDE,
-      summary: `Kayıt girilirken sistem "bu fatura zaten kayıtlı" uyarısı verdi, kullanıcı uyarıyı geçerek kaydetti. Eşleşen önceki kayıt kontrol edilmeli.`,
-      impactRub: 0,
-      evidence: [{ label: 'Kaydeden', value: d.performedByPersonnelName || d.supervisorName || '-', date: String(d.created_at || '').slice(0, 10), source: 'DISCOUNT', discountId: d.id }]
-    });
-  }
   return findings;
 }
 

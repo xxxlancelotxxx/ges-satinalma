@@ -2535,7 +2535,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
       discounts || [],
       pool
     );
-    const findings = report.findings.filter(f => f.code !== 'DUPLICATE_INVOICE' && f.code !== 'DUPLICATE_OVERRIDE' && f.severity !== 'INFO');
+    const findings = report.findings.filter(f => f.code !== 'DUPLICATE_INVOICE' && f.severity !== 'INFO');
     return findings.length > 0 ? { ...report, findings } : null;
   }, [vendorName, invoiceNo, orderDate, jobsiteId, category, numOffer, numAgreed, extractedItems, firstOfferFile, finalOfferFile, firstOfferFileName, finalOfferFileName, discounts, invoices, prizmaInvoices]);
 

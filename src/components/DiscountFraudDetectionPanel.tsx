@@ -28,14 +28,10 @@ export const SEVERITY_STYLE: Record<FraudSeverity | 'CLEAN', { label: string; ba
 const PATTERN_ORDER: FraudPatternCode[] = [
   'INFLATED_FIRST_OFFER',
   'PHANTOM_SAVINGS',
+  'REPEAT_DISCOUNT_SAME_PRICE',
   'DUPLICATE_INVOICE',
-  'TWIN_RECORD',
-  'REUSED_DOCUMENT',
-  'SAME_DOCUMENT_BOTH_STAGES',
-  'DOCUMENT_DATE_ORDER',
   'STAGE_AMOUNT_MISMATCH',
   'INVOICE_TOTAL_MISMATCH',
-  'DUPLICATE_OVERRIDE',
   'EXCESSIVE_DISCOUNT'
 ];
 
@@ -146,7 +142,7 @@ export const DiscountFraudDetectionPanel: React.FC<Props> = ({ result, discounts
             Akıllı Hile Denetimi
           </h3>
           <p className="text-xs text-slate-600 max-w-3xl leading-relaxed">
-            Her indirim kaydı 11 hile kalıbına göre taranır. Fiyat iddiaları yalnızca aynı marka, model ve özellikteki malzemenin
+            Her indirim kaydı 7 hile kalıbına göre taranır. Fiyat iddiaları yalnızca aynı marka, model ve özellikteki malzemenin
             kayıttan önceki gerçek (KDV dahil) alım fiyatlarına dayanır; tahmini fiyat üretilmez. Her bulgunun kanıt belgesi yanında gösterilir.
           </p>
         </div>
