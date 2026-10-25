@@ -14,15 +14,18 @@ import {
   findSameMaterialHistory,
   comparisonGrossUnitPrice,
   isLineArithmeticConsistent,
-  discountLinesArePaidPrices
+  discountLinesArePaidPrices,
+  isTrustedPriceSourceInvoice
 } from './preApprovalAuditEngine';
 import {
   cleanDocumentNumber,
   vendorKeyForMatching,
   parsePurchaseDate,
   amountsReconcile,
-  buildMaterialMatchProfile,
-  isFreightOrServiceLineText
+  isFreightOrServiceLineText,
+  isSameMaterialLine,
+  convertUnitPriceStrict,
+  isPlausibleSameMaterialPriceRatio
 } from './sameMaterialMatcher';
 import { isExemptFromBenchmarkAudit } from './auditRiskEngine';
 import { isCommodityVolatileMaterial } from './aiForensicAuditor';
@@ -37,6 +40,7 @@ export type FraudPatternCode =
   | 'DUPLICATE_INVOICE'
   | 'STAGE_AMOUNT_MISMATCH'
   | 'INVOICE_TOTAL_MISMATCH'
+  | 'QUANTITY_CUT_AS_DISCOUNT'
   | 'EXCESSIVE_DISCOUNT';
 
 export const FRAUD_PATTERN_LABELS: Record<FraudPatternCode, string> = {
@@ -45,7 +49,8 @@ export const FRAUD_PATTERN_LABELS: Record<FraudPatternCode, string> = {
   REPEAT_DISCOUNT_SAME_PRICE: 'Aynı fiyata tekrar indirim',
   DUPLICATE_INVOICE: 'Aynı fatura iki kez indirim',
   STAGE_AMOUNT_MISMATCH: 'Beyan tutarı belgeyi tutmuyor',
-  INVOICE_TOTAL_MISMATCH: 'Faturada ödenen tutar beyandan yüksek',
+  INVOICE_TOTAL_MISMATCH: 'Faturada ödenen fiyat beyandan yüksek',
+  QUANTITY_CUT_AS_DISCOUNT: 'Miktar azaltma indirim gibi gösterilmiş',
   EXCESSIVE_DISCOUNT: 'Olağandışı yüksek indirim oranı'
 };
 
@@ -59,6 +64,8 @@ export const INFLATED_FIRST_OFFER_MIN_PCT = 15;
 export const HISTORY_WINDOW_DAYS = 120;
 export const VOLATILE_HISTORY_WINDOW_DAYS = 45;
 export const EXCESSIVE_DISCOUNT_PCT = 35;
+/** Aynı tedarikçinin önceki fiyatı ancak bu kadar gün önceki bir alımsa referans olur. */
+export const SAME_VENDOR_MIN_GAP_DAYS = 7;
 
 export interface FraudEvidence {
   label: string;
@@ -198,6 +205,8 @@ interface LinePriceInsight {
   firstOfferUnit: number | null;
   firstOfferSource: 'PDF_LINE' | 'SINGLE_LINE' | null;
   refUnit: number;
+  /** Referans alımların en yükseği: ödenen fiyat bunun da üstündeyse fiyat geçmiş aralığın dışındadır */
+  refMax: number;
   refCount: number;
   sameVendorRef: boolean;
   refEvidence: FraudEvidence[];
@@ -205,7 +214,7 @@ interface LinePriceInsight {
   prevDiscountBuy: { unitPrice: number; date: string; discountId?: string; invoiceNo?: string; fileUrl?: string } | null;
 }
 
-function analyzeLinePrices(d: DiscountRecord, pool: InvoiceRecord[]): LinePriceInsight[] {
+export function analyzeLinePrices(d: DiscountRecord, pool: InvoiceRecord[]): LinePriceInsight[] {
   const items = Array.isArray(d.items) ? d.items : [];
   if (items.length === 0 || pool.length === 0) return [];
   const cur = recordDate(d);
@@ -262,7 +271,10 @@ function analyzeLinePrices(d: DiscountRecord, pool: InvoiceRecord[]): LinePriceI
     const windowMs = (volatile ? VOLATILE_HISTORY_WINDOW_DAYS : HISTORY_WINDOW_DAYS) * DAY_MS;
     const recent = matches.filter(m => {
       const t = parsePurchaseDate(m.entry.date);
-      return cur !== null && t !== null && t <= cur && cur - t <= windowMs;
+      if (cur === null || t === null || t > cur || cur - t > windowMs) return false;
+      // Aynı tedarikçinin birkaç gün içindeki faturaları aynı pazarlığın parçasıdır (bölünmüş fatura, aynı gün giriş): "önceki normal fiyat" sayılmaz
+      if (vendorKey && vendorKeyForMatching(m.entry.supplier) === vendorKey && cur - t < SAME_VENDOR_MIN_GAP_DAYS * DAY_MS) return false;
+      return true;
     });
     if (recent.length === 0) continue;
     const sameVendor = recent.filter(m => vendorKey && vendorKeyForMatching(m.entry.supplier) === vendorKey);
@@ -272,6 +284,7 @@ function analyzeLinePrices(d: DiscountRecord, pool: InvoiceRecord[]): LinePriceI
     const newestFirst = [...recent].sort((a, b) => (parsePurchaseDate(b.entry.date) || 0) - (parsePurchaseDate(a.entry.date) || 0));
     const basis = sameVendor.length > 0 ? sameVendor : newestFirst;
     const refUnit = Number(median(basis.slice(0, 5).map(m => m.comparablePrice)).toFixed(2));
+    const refMax = Math.max(...basis.slice(0, 5).map(m => m.comparablePrice));
     if (!(refUnit > 0)) continue;
 
     const prevDisc = [...sameVendor]
@@ -295,6 +308,7 @@ function analyzeLinePrices(d: DiscountRecord, pool: InvoiceRecord[]): LinePriceI
       firstOfferUnit,
       firstOfferSource,
       refUnit,
+      refMax,
       refCount: basis.length,
       sameVendorRef: sameVendor.length > 0,
       refEvidence: basis.slice(0, 5).map(m => ({
@@ -329,33 +343,50 @@ function detectPriceHistoryFindings(d: DiscountRecord, insights: LinePriceInsigh
   const realSaving = insights.reduce((s, l) => s + (l.refUnit - l.paidUnit) * l.quantity, 0);
 
   // 1) Şişirilmiş ilk teklif: belgeden bilinen ilk teklif satır fiyatı, aynı malzemenin yakın geçmiş gerçek fiyatından belirgin yüksek
-  for (const l of insights) {
-    if (!(l.firstOfferUnit && l.firstOfferUnit > 0)) continue;
-    const inflationPct = ((l.firstOfferUnit - l.refUnit) / l.refUnit) * 100;
-    const inflationRub = (l.firstOfferUnit - l.refUnit) * l.quantity;
-    if (inflationPct < INFLATED_FIRST_OFFER_MIN_PCT || inflationRub < MIN_FRAUD_IMPACT_RUB) continue;
-    const backToNormal = l.paidUnit >= l.refUnit * 0.99;
-    const severity: FraudSeverity = backToNormal && (inflationPct >= 25 || l.sameVendorRef) ? 'CRITICAL' : 'HIGH';
-    const lineClaimed = Math.max(0, (l.firstOfferUnit - l.paidUnit) * l.quantity);
-    const realLine = (l.refUnit - l.paidUnit) * l.quantity;
+  const inflated = insights
+    .filter(l => l.firstOfferUnit && l.firstOfferUnit > 0)
+    .map(l => {
+      const first = l.firstOfferUnit as number;
+      const pct = ((first - l.refUnit) / l.refUnit) * 100;
+      const lineClaimed = Math.max(0, (first - l.paidUnit) * l.quantity);
+      const realLine = Math.max(0, (l.refUnit - l.paidUnit) * l.quantity);
+      return { l, first, pct, fake: Math.max(0, lineClaimed - realLine), lineClaimed, realLine, backToNormal: l.paidUnit >= l.refUnit * 0.99 };
+    })
+    .filter(x => x.pct >= INFLATED_FIRST_OFFER_MIN_PCT && x.fake > 0)
+    .sort((a, b) => b.fake - a.fake);
+  const inflatedFake = inflated.reduce((s, x) => s + x.fake, 0);
+  // Küçük tutarlı şişirmeler de "Kontrol et" olarak gösterilir; yüksek/kritik için en az MIN_FRAUD_IMPACT_RUB
+  if (inflated.length > 0 && inflatedFake >= MIN_FRAUD_IMPACT_RUB * 0.2) {
+    const top = inflated[0];
+    const allBack = inflated.every(x => x.backToNormal);
+    const strong = inflated.some(x => x.pct >= 25 || x.l.sameVendorRef);
+    const severity: FraudSeverity = inflatedFake < MIN_FRAUD_IMPACT_RUB ? 'MEDIUM' : allBack && strong ? 'CRITICAL' : 'HIGH';
+    const t = top.l;
     findings.push({
       code: 'INFLATED_FIRST_OFFER',
       severity,
       title: FRAUD_PATTERN_LABELS.INFLATED_FIRST_OFFER,
-      materialName: l.materialName,
+      materialName: t.materialName,
       summary:
-        `"${l.materialName}" ilk teklifte ${fmtRub(l.firstOfferUnit)}/${l.unit} istenmiş; ` +
-        `${l.sameVendorRef ? 'aynı tedarikçi bu malzemeyi kısa süre önce' : 'bu malzeme yakın geçmişte'} ${fmtRub(l.refUnit)}/${l.unit} fiyatla satmış ` +
-        `(ilk teklif ${fmtPct(inflationPct)} yüksek). ` +
-        (backToNormal
-          ? `Son fiyat ${fmtRub(l.paidUnit)} ile yalnızca eski normale dönmüş: beyan edilen ${fmtRub(lineClaimed)} indirimin gerçek karşılığı yok.`
-          : `Son fiyat ${fmtRub(l.paidUnit)}; beyan edilen ${fmtRub(lineClaimed)} indirimin yalnızca ${fmtRub(Math.max(0, realLine))} kadarı geçmiş fiyata göre gerçek.`),
-      impactRub: Number(Math.max(0, lineClaimed - Math.max(0, realLine)).toFixed(2)),
-      evidence: [
-        { label: 'İlk teklif (belge)', value: `${fmtRub(l.firstOfferUnit)}/${l.unit}`, source: 'DOCUMENT', fileUrl: d.firstOfferFileUrl, docNo: d.firstOfferFileName },
-        { label: 'Son anlaşılan', value: `${fmtRub(l.paidUnit)}/${l.unit}`, source: 'DISCOUNT', discountId: d.id, docNo: d.invoiceNo, fileUrl: d.finalOfferFileUrl },
-        ...l.refEvidence
-      ]
+        `"${t.materialName}" ilk teklifte ${fmtRub(top.first)}/${t.unit} istenmiş; ` +
+        `${t.sameVendorRef ? 'aynı tedarikçiden bu malzeme daha önce' : 'bu malzeme yakın geçmişte'} ${fmtRub(t.refUnit)}/${t.unit} fiyatla alınmış ` +
+        `(ilk teklif ${fmtPct(top.pct)} yüksek). ` +
+        (top.backToNormal
+          ? `Son fiyat ${fmtRub(t.paidUnit)} ile yalnızca eski normale dönmüş.`
+          : `Son fiyat ${fmtRub(t.paidUnit)}; indirimin yalnızca ${fmtRub(top.realLine)} kadarı geçmiş fiyata göre gerçek.`) +
+        (inflated.length > 1 ? ` Bu kayıtta ilk teklifi şişirilmiş ${inflated.length} kalem var.` : '') +
+        ` Geçmiş fiyata göre karşılığı olmayan indirim: ${fmtRub(inflatedFake)}.`,
+      impactRub: Number(inflatedFake.toFixed(2)),
+      evidence: inflated.slice(0, 5).flatMap(x => [
+        {
+          label: `"${x.l.materialName}"`,
+          value: `ilk teklif ${fmtRub(x.first)} → son ${fmtRub(x.l.paidUnit)} / geçmiş ${fmtRub(x.l.refUnit)} (${x.l.unit}, ${fmtPct(x.pct)} şişirme)`,
+          source: 'DOCUMENT' as const,
+          fileUrl: d.firstOfferFileUrl,
+          docNo: d.firstOfferFileName
+        },
+        ...x.l.refEvidence.slice(0, 2)
+      ])
     });
   }
 
@@ -394,7 +425,8 @@ function detectPriceHistoryFindings(d: DiscountRecord, insights: LinePriceInsigh
     const notBelowNormal = insights.filter(l => l.paidUnit >= l.refUnit * 0.99);
     const share = notBelowNormal.reduce((s, l) => s + l.paidUnit * l.quantity, 0) / coveredPaid;
     if (realSaving <= claimedOnCovered * 0.2 && share >= 0.6) {
-      const paidAbove = insights.reduce((s, l) => s + Math.max(0, l.paidUnit - l.refUnit) * l.quantity, 0);
+      // Yüksek seviye ancak ödenen fiyat geçmiş alımların HEPSİNİN üstündeyse (fiyat dalgalanma aralığında değil)
+      const paidAbove = insights.reduce((s, l) => s + Math.max(0, l.paidUnit - l.refMax) * l.quantity, 0);
       const severity: FraudSeverity = realSaving <= 0 && paidAbove >= MIN_FRAUD_IMPACT_RUB ? 'HIGH' : 'MEDIUM';
       const worst = [...notBelowNormal].sort((a, b) => (b.paidUnit - b.refUnit) * b.quantity - (a.paidUnit - a.refUnit) * a.quantity)[0];
       findings.push({
@@ -406,7 +438,7 @@ function detectPriceHistoryFindings(d: DiscountRecord, insights: LinePriceInsigh
           `${fmtRub(claimed)} (${fmtPct(claimedPct)}) indirim beyan edilmiş, ancak kalemlerin ${fmtPct(coverage * 100)}'i için ` +
           `aynı malzemenin yakın geçmişteki gerçek fiyatı var ve ödenen fiyat o fiyattan düşük değil. ` +
           `Geçmişe göre gerçek tasarruf: ${fmtRub(Math.max(0, realSaving))}` +
-          (paidAbove > 0 ? `; hatta geçmiş fiyatın ${fmtRub(paidAbove)} üstünde ödenmiş.` : '.'),
+          (paidAbove > 0 ? `; hatta geçmişteki en yüksek fiyatın da ${fmtRub(paidAbove)} üstünde ödenmiş.` : '.'),
         impactRub: Number(Math.max(0, claimedOnCovered - Math.max(0, realSaving)).toFixed(2)),
         evidence: insights.slice(0, 6).flatMap(l => [
           {
@@ -421,7 +453,8 @@ function detectPriceHistoryFindings(d: DiscountRecord, insights: LinePriceInsigh
     }
   }
 
-  return { findings, verifiedRealSaving: Number(realSaving.toFixed(2)), coverage };
+  // Kalemlerin çoğunun geçmişi yoksa gerçek tasarruf iddia edilmez
+  return { findings, verifiedRealSaving: coverage >= 0.6 ? Number(realSaving.toFixed(2)) : null, coverage };
 }
 
 // ---------------------------------------------------------------------------
@@ -447,11 +480,12 @@ function detectDocumentFindings(d: DiscountRecord, claimed: number): FraudFindin
     if (inflated >= MIN_FRAUD_IMPACT_RUB && ((offerGap > 0 && !amountsReconcile(offer, docFirst)) || (finalGap > 0 && !amountsReconcile(agreed, docFinal)))) {
       findings.push({
         code: 'STAGE_AMOUNT_MISMATCH',
-        severity: 'HIGH',
+        // İki değer de aynı kaydın içinden (biri okuma hatası olabilir): belge açılıp kontrol edilmeli
+        severity: 'MEDIUM',
         title: FRAUD_PATTERN_LABELS.STAGE_AMOUNT_MISMATCH,
         summary:
           `Kayıtta ilk teklif ${fmtRub(offer)}, son tutar ${fmtRub(agreed)} beyan edilmiş; aşama belgelerinde ise ilk teklif ${fmtRub(docFirst)}, ` +
-          `son tutar ${fmtRub(docFinal)}. Fark indirimi ${fmtRub(inflated)} büyütüyor.`,
+          `son tutar ${fmtRub(docFinal)}. Fark indirimi ${fmtRub(inflated)} büyütüyor; ilk teklif belgesini açıp doğru tutarı kontrol edin.`,
         impactRub: Number(inflated.toFixed(2)),
         evidence: [
           { label: 'Beyan: ilk teklif / son', value: `${fmtRub(offer)} / ${fmtRub(agreed)}`, source: 'DISCOUNT', discountId: d.id },
@@ -558,47 +592,90 @@ function detectInvoiceTotalFindings(d: DiscountRecord, idx: PortfolioIndex): Fra
   const vk = vendorKeyForMatching(d.vendorName);
   const agreed = Number(d.agreedPrice) || 0;
   const offer = Number(d.adjustedOfferPrice || d.offerPrice) || 0;
-  if (!(agreed > 0) || !(offer > agreed)) return [];
+  const claimed = claimedDiscountOf(d);
+  if (!(agreed > 0) || !(offer > agreed) || claimed < MIN_FRAUD_IMPACT_RUB) return [];
+  // Kalem kalem kıyas: yalnızca ödenen kalem fiyatları biliniyorsa
+  if (!discountLinesArePaidPrices(d)) return [];
+  const recLines = (d.items || []).filter(it => isAuditableMaterialLine(it, d.category));
+  const recTotal = recLines.reduce((s, it: any) => s + comparisonGrossUnitPrice(it) * (Number(it.quantity) || 0), 0);
+  if (!(recTotal > 0)) return [];
 
   const candidates = (idx.invoicesByNumber.get(no) || []).filter(inv => {
     const sup = vendorKeyForMatching(inv.supplier || (inv as any).vendorName);
-    return Boolean(vk && sup && sup === vk);
+    return Boolean(vk && sup && sup === vk) && isTrustedPriceSourceInvoice(inv);
   });
+
   for (const inv of candidates) {
-    const totals = invoiceTotalExcludingFreight(inv);
-    // Faturadaki tutar (nakliye dahil ve hariç) beyan edilen son tutarı tutuyorsa sorun yok
-    if (totals.some(t => amountsReconcile(agreed, t) || t <= agreed)) continue;
-    const paid = Math.min(...totals);
-    // Fatura ilk tekliften de çok büyükse farklı kapsamdır, kıyaslanmaz
-    if (paid > offer * 1.05) continue;
-    const overClaim = paid - agreed;
-    if (overClaim < MIN_FRAUD_IMPACT_RUB) continue;
-    const noDiscountAtAll = totals.some(t => amountsReconcile(offer, t));
+    const invLines = (inv.items || []).filter((it: any) => !isFreightOrServiceLineText(it?.originalName || it?.materialName));
+    const used = new Set<number>();
+    const pairs: Array<{ name: string; unit: string; recQty: number; recUnit: number; invQty: number; invUnit: number }> = [];
+    for (const it of recLines as any[]) {
+      const recUnit = comparisonGrossUnitPrice(it);
+      const recQty = Number(it.quantity) || 0;
+      for (let k = 0; k < invLines.length; k++) {
+        if (used.has(k)) continue;
+        const il: any = invLines[k];
+        if (!isSameMaterialLine(it, { originalName: il.originalName, materialName: il.materialName, category: il.category }).same) continue;
+        const invUnit = convertUnitPriceStrict(comparisonGrossUnitPrice(il), il.unit, it.unit);
+        // Fatura satırı birim fiyatı makul değilse (tüm fatura tek satır okunmuş vb.) aynı kalem sayılmaz
+        if (invUnit === null || !isPlausibleSameMaterialPriceRatio(invUnit, recUnit)) continue;
+        const invQty = (Number(il.quantity) || 0) * (comparisonGrossUnitPrice(il) / invUnit);
+        used.add(k);
+        pairs.push({ name: String(it.originalName || it.materialName), unit: String(it.unit || 'adet'), recQty, recUnit, invQty, invUnit });
+        break;
+      }
+    }
+    const matchedPaid = pairs.reduce((s, p) => s + p.recUnit * p.recQty, 0);
+    // Faturanın içeriği kayıttaki kalemlerle örtüşmüyorsa (farklı sürüm / ikame ürün) kıyas yapılmaz
+    if (matchedPaid < recTotal * 0.8 || used.size < invLines.length * 0.8) continue;
+
     const src = isPrizmaRecord(inv) ? 'PRIZMA_ERP' : 'GES_ARCHIVE';
-    return [{
-      code: 'INVOICE_TOTAL_MISMATCH',
-      severity: noDiscountAtAll ? 'CRITICAL' : 'HIGH',
-      title: FRAUD_PATTERN_LABELS.INVOICE_TOTAL_MISMATCH,
-      summary: noDiscountAtAll
-        ? `${src === 'PRIZMA_ERP' ? 'Prizma ERP' : 'GES Arşivi'}'ndeki "${inv.invoiceNumber}" faturasında ödenen tutar ${fmtRub(paid)}, yani ilk teklifin kendisi. ` +
-          `Beyan edilen ${fmtRub(claimedDiscountOf(d))} indirim faturaya hiç yansımamış.`
-        : `${src === 'PRIZMA_ERP' ? 'Prizma ERP' : 'GES Arşivi'}'ndeki "${inv.invoiceNumber}" faturasında ödenen tutar ${fmtRub(paid)}; indirim kaydında ise ${fmtRub(agreed)} beyan edilmiş. ` +
-          `İndirim ${fmtRub(overClaim)} fazla gösterilmiş.`,
-      impactRub: Number(overClaim.toFixed(2)),
-      evidence: [
-        { label: 'Beyan: ilk teklif / son', value: `${fmtRub(offer)} / ${fmtRub(agreed)}`, source: 'DISCOUNT', discountId: d.id },
-        {
-          label: src === 'PRIZMA_ERP' ? 'Prizma ERP faturası' : 'GES Arşivi faturası',
-          value: fmtRub(paid),
-          docNo: inv.invoiceNumber,
-          date: inv.date,
-          supplier: inv.supplier,
-          source: src,
-          invoiceId: inv.id,
-          fileUrl: inv.fileUrl
-        }
-      ]
-    }];
+    const srcLabel = src === 'PRIZMA_ERP' ? 'Prizma ERP' : 'GES Arşivi';
+    const invTotals = invoiceTotalExcludingFreight(inv);
+    const offerIsInvoice = invTotals.some(t => amountsReconcile(offer, t));
+    const lineEvidence: FraudEvidence[] = pairs.slice(0, 6).flatMap(p => [
+      { label: `Kayıt: "${p.name}"`, value: `${p.recQty.toLocaleString('tr-TR')} ${p.unit} × ${fmtRub(p.recUnit)}`, source: 'DISCOUNT' as const, discountId: d.id, docNo: d.invoiceNo },
+      { label: `${srcLabel} faturası`, value: `${Number(p.invQty.toFixed(3)).toLocaleString('tr-TR')} ${p.unit} × ${fmtRub(p.invUnit)}`, source: src, docNo: inv.invoiceNumber, date: inv.date, invoiceId: inv.id, fileUrl: inv.fileUrl }
+    ]);
+
+    // 1) Faturadaki birim fiyat beyan edilen son fiyattan yüksek: indirim faturaya yansımamış
+    const priceOver = pairs.reduce((s, p) => s + Math.max(0, p.invUnit - p.recUnit) * p.recQty, 0);
+    if (priceOver >= MIN_FRAUD_IMPACT_RUB && pairs.some(p => p.invUnit > p.recUnit * 1.01)) {
+      const sameQty = pairs.every(p => Math.abs(p.invQty - p.recQty) <= Math.max(0.001, p.recQty * 0.001));
+      return [{
+        code: 'INVOICE_TOTAL_MISMATCH',
+        severity: offerIsInvoice && sameQty ? 'CRITICAL' : 'HIGH',
+        title: FRAUD_PATTERN_LABELS.INVOICE_TOTAL_MISMATCH,
+        summary:
+          `${srcLabel}'ndeki "${inv.invoiceNumber}" faturasında aynı kalemlerin birim fiyatları, indirim kaydındaki son fiyatlardan yüksek. ` +
+          (offerIsInvoice && sameQty
+            ? `Fatura tutarı (${fmtRub(Number(inv.totalAmount) || 0)}) ilk teklifin kendisi: beyan edilen ${fmtRub(claimed)} indirim faturaya hiç yansımamış.`
+            : `Kayıttaki fiyatlarla ödenmiş olsaydı ${fmtRub(priceOver)} daha az ödenecekti; indirim bu kadar fazla gösterilmiş.`),
+        impactRub: Number(Math.min(claimed, priceOver).toFixed(2)),
+        evidence: lineEvidence
+      }];
+    }
+
+    // 2) İndirim fiyattan değil miktardan: ilk teklif = faturadaki büyük miktar, "son fiyat" = daha az miktar, birim fiyat düşmemiş
+    const cutPairs = pairs.filter(p => p.invQty > p.recQty * 1.001);
+    const notCheaper = pairs.filter(p => p.recUnit >= p.invUnit * 0.99).reduce((s, p) => s + p.recUnit * p.recQty, 0);
+    if (offerIsInvoice && cutPairs.length > 0 && notCheaper >= matchedPaid * 0.8) {
+      const priceSaving = pairs.reduce((s, p) => s + (p.invUnit - p.recUnit) * p.recQty, 0);
+      const c = cutPairs[0];
+      return [{
+        code: 'QUANTITY_CUT_AS_DISCOUNT',
+        severity: 'CRITICAL',
+        title: FRAUD_PATTERN_LABELS.QUANTITY_CUT_AS_DISCOUNT,
+        materialName: c.name,
+        summary:
+          `İlk teklif tutarı (${fmtRub(offer)}) ${srcLabel}'ndeki "${inv.invoiceNumber}" faturasıyla aynı: ${Number(c.invQty.toFixed(3)).toLocaleString('tr-TR')} ${c.unit} × ${fmtRub(c.invUnit)}. ` +
+          `İndirim kaydında ise ${c.recQty.toLocaleString('tr-TR')} ${c.unit} × ${fmtRub(c.recUnit)} var: birim fiyat düşmemiş` +
+          (c.recUnit > c.invUnit * 1.01 ? ` (tersine ${fmtPct(((c.recUnit - c.invUnit) / c.invUnit) * 100)} artmış)` : '') +
+          `. Beyan edilen ${fmtRub(claimed)} "indirim" miktar azaltmaktan geliyor; fiyat bazında gerçek tasarruf ${fmtRub(Math.max(0, priceSaving))}.`,
+        impactRub: Number(Math.max(0, claimed - Math.max(0, priceSaving)).toFixed(2)),
+        evidence: lineEvidence
+      }];
+    }
   }
   return [];
 }

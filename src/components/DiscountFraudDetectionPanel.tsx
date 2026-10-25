@@ -32,6 +32,7 @@ const PATTERN_ORDER: FraudPatternCode[] = [
   'DUPLICATE_INVOICE',
   'STAGE_AMOUNT_MISMATCH',
   'INVOICE_TOTAL_MISMATCH',
+  'QUANTITY_CUT_AS_DISCOUNT',
   'EXCESSIVE_DISCOUNT'
 ];
 
@@ -142,7 +143,7 @@ export const DiscountFraudDetectionPanel: React.FC<Props> = ({ result, discounts
             Akıllı Hile Denetimi
           </h3>
           <p className="text-xs text-slate-600 max-w-3xl leading-relaxed">
-            Her indirim kaydı 7 hile kalıbına göre taranır. Fiyat iddiaları yalnızca aynı marka, model ve özellikteki malzemenin
+            Her indirim kaydı 8 hile kalıbına göre taranır. Fiyat iddiaları yalnızca aynı marka, model ve özellikteki malzemenin
             kayıttan önceki gerçek (KDV dahil) alım fiyatlarına dayanır; tahmini fiyat üretilmez. Her bulgunun kanıt belgesi yanında gösterilir.
           </p>
         </div>

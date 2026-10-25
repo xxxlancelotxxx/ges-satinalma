@@ -135,18 +135,31 @@ const rp = res.byId.get('disc_repeat')!.findings.find(f => f.code === 'REPEAT_DI
 assert.ok(rp && rp.impactRub === 7000, 'aynı fiyata tekrar indirim');
 console.log('✓ aynı fiyata tekrar indirim yakalandı');
 
-// 9) Faturada ödenen tutar = ilk teklif → indirim faturaya yansımamış
+// 9) Prizma faturasında aynı kalemin birim fiyatı beyan edilen son fiyattan yüksek → indirim faturaya yansımamış
 const paidFull = base({ id: 'disc_f', vendorName: 'ООО "ТРЕЙДМИ"', invoiceNo: '9001', orderDate: '2026-09-10', created_at: '2026-09-12T00:00:00Z',
-  offerPrice: 100000, agreedPrice: 90000, discountAmount: 10000, items: [] });
+  offerPrice: 100000, agreedPrice: 90000, discountAmount: 10000,
+  items: [{ originalName: glue, materialName: glue, quantity: 250, unit: 'Adet', unitPrice: 360, totalPrice: 90000 }] });
 const prizmaInv = invoice('prizma_9', 'ТРЕЙДМИ ООО', '2026-09-10', '9001', glue, 250, 400, { sourceCollection: 'prizma_invoices' });
 res = analyzeDiscountFraudPortfolio([paidFull] as any, [prizmaInv] as any);
 const itm = res.byId.get('disc_f')!.findings.find(f => f.code === 'INVOICE_TOTAL_MISMATCH');
 assert.ok(itm && itm.severity === 'CRITICAL' && itm.impactRub === 10000);
 // Fatura beyanı tutuyorsa sorun yok
-const okInv = { ...prizmaInv, totalAmount: 90000 };
-res = analyzeDiscountFraudPortfolio([paidFull] as any, [okInv] as any);
+res = analyzeDiscountFraudPortfolio([paidFull] as any, [invoice('prizma_9', 'ТРЕЙДМИ ООО', '2026-09-10', '9001', glue, 250, 360, { sourceCollection: 'prizma_invoices' })] as any);
 assert.equal(res.byId.get('disc_f')!.riskLevel, 'CLEAN');
-console.log('✓ faturaya yansımayan indirim yakalandı, tutan fatura temiz');
+// Fatura tek satır okunmuşsa (1 × toplam) kıyas yapılmaz
+res = analyzeDiscountFraudPortfolio([paidFull] as any, [invoice('prizma_9', 'ТРЕЙДМИ ООО', '2026-09-10', '9001', glue, 1, 100000, { sourceCollection: 'prizma_invoices' })] as any);
+assert.equal(res.byId.get('disc_f')!.riskLevel, 'CLEAN');
+console.log('✓ faturaya yansımayan indirim yakalandı; tutan ve hatalı okunmuş fatura temiz');
+
+// 9b) Miktar azaltma indirim gibi: ilk teklif = 4000 × 625 fatura, kayıt 3000 × 644,61
+const scaffold = 'Горизонтальный элемент 1,5 м (2,5 мм) кованый клин LOGO BAUMAK';
+const qtyCut = base({ id: 'disc_q', vendorName: 'ООО "Колорадо"', invoiceNo: 'УТ-16271', orderDate: '2026-09-09', created_at: '2026-09-10T00:00:00Z',
+  offerPrice: 2500000, agreedPrice: 1933830, discountAmount: 566170,
+  items: [{ originalName: scaffold, materialName: scaffold, quantity: 3000, unit: 'Adet', unitPrice: 644.61, totalPrice: 1933830 }] });
+res = analyzeDiscountFraudPortfolio([qtyCut] as any, [invoice('prizma_q', 'ООО "Колорадо"', '2026-09-09', 'УТ-16271', scaffold, 4000, 625, { sourceCollection: 'prizma_invoices' })] as any);
+const qc = res.byId.get('disc_q')!.findings.find(f => f.code === 'QUANTITY_CUT_AS_DISCOUNT');
+assert.ok(qc && qc.severity === 'CRITICAL' && qc.impactRub === 566170);
+console.log('✓ miktar azaltma indirim gibi gösterilmiş');
 
 // 10) Giriş anında taslak denetimi: aynı fatura daha önce indirimli girilmiş
 const draft = analyzeDraftDiscountFraud({ ...first, id: undefined, created_at: undefined } as any, [first] as any, []);
