@@ -53,6 +53,7 @@ interface Props {
   discounts: DiscountRecord[];
   comparisons: MaterialComparison[];
   jobsites: Jobsite[];
+  supervisors?: PurchasingSupervisor[];
   onNavigateToMaterial?: (materialName: string) => void;
   onUpdateInvoice?: (id: string, invoice: Partial<InvoiceRecord>) => void | Promise<void>;
   onDeleteInvoice?: (id: string) => void | Promise<void>;
@@ -131,6 +132,76 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
   const [managerNote, setManagerNote] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [selectedInvoiceForModal, setSelectedInvoiceForModal] = useState<InvoiceRecord | null>(null);
+  const [prizmaInvoices, setPrizmaInvoices] = useState<InvoiceRecord[]>([]);
+
+  // Load Prizma ERP invoices so clicking any Prizma row opens its real multi-item invoice & PDF
+  useEffect(() => {
+    let isMounted = true;
+    fetch('/api/prizma/invoices')
+      .then(res => (res.ok ? res.json() : []))
+      .then(data => {
+        if (!isMounted) return;
+        const list = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+        setPrizmaInvoices(list);
+      })
+      .catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const allLookupInvoices = useMemo(() => {
+    const map = new Map<string, InvoiceRecord>();
+    invoices.forEach(inv => {
+      if (inv && inv.id) map.set(inv.id, inv);
+    });
+    prizmaInvoices.forEach(pInv => {
+      if (pInv && pInv.id && !map.has(pInv.id)) {
+        map.set(pInv.id, pInv);
+      }
+    });
+    return Array.from(map.values());
+  }, [invoices, prizmaInvoices]);
+
+  const findMatchingInvoiceRecord = (
+    invoiceNo?: string,
+    opts?: { invoiceId?: string; prizmaDemandId?: number | string; supplier?: string }
+  ): InvoiceRecord | undefined => {
+    const targetId = String(opts?.invoiceId || '').trim();
+    if (targetId) {
+      const byId = allLookupInvoices.find(inv => String(inv.id || '').trim() === targetId);
+      if (byId) return byId;
+    }
+
+    const targetDemandId = opts?.prizmaDemandId ? String(opts.prizmaDemandId).trim() : '';
+    if (targetDemandId) {
+      const byDemand = allLookupInvoices.find(
+        inv =>
+          String((inv as any).prizmaDemandId || '').trim() === targetDemandId ||
+          String(inv.id || '') === `prizma_${targetDemandId}` ||
+          String(inv.id || '') === `inv_prizma_${targetDemandId}`
+      );
+      if (byDemand) return byDemand;
+    }
+
+    const cleanNo = String(invoiceNo || '').toLowerCase().trim();
+    if (!cleanNo) return undefined;
+
+    const cleanSup = String(opts?.supplier || '').toLowerCase().trim();
+    if (cleanSup) {
+      const byNoAndSupplier = allLookupInvoices.find(inv => {
+        const invNum = String(inv.invoiceNumber || (inv as any).invoiceNo || '').toLowerCase().trim();
+        const invSup = String(inv.supplier || (inv as any).vendorName || '').toLowerCase().trim();
+        return invNum === cleanNo && (invSup === cleanSup || invSup.includes(cleanSup) || cleanSup.includes(invSup));
+      });
+      if (byNoAndSupplier) return byNoAndSupplier;
+    }
+
+    return allLookupInvoices.find(inv => {
+      const invNum = String(inv.invoiceNumber || (inv as any).invoiceNo || '').toLowerCase().trim();
+      return invNum === cleanNo || String(inv.id || '').toLowerCase().trim() === cleanNo;
+    });
+  };
 
   // Hook for back button behavior on modals
   useModalBackHandler(!!selectedInvoiceForModal, () => {
@@ -141,21 +212,49 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
   });
 
   // Open full invoice detail / price basis modal
-  const handleOpenInvoiceDetail = (invoiceNo: string, rawInvoice?: InvoiceRecord) => {
+  const handleOpenInvoiceDetail = (
+    invoiceNo: string,
+    rawInvoice?: InvoiceRecord,
+    rowContext?: {
+      invoiceId?: string;
+      prizmaDemandId?: number | string;
+      invoiceFileId?: number | string;
+      prizmaRequestCode?: string;
+      prizmaOrderCode?: string;
+      prizmaBtfUrl?: string;
+      prizmaStfUrl?: string;
+      fileUrl?: string;
+      rawFileName?: string;
+      date?: string;
+      supplier?: string;
+      jobsiteName?: string;
+      quantity?: number;
+      unit?: string;
+      unitPrice?: number;
+      netUnitPrice?: number;
+      vatPercentage?: number;
+      originalUnitPrice?: number;
+      originalQuantity?: number;
+      originalUnit?: string;
+      materialName?: string;
+      category?: string;
+    }
+  ) => {
     if (rawInvoice) {
       setSelectedInvoiceForModal(rawInvoice);
       return;
     }
     const cleanNo = (invoiceNo || '').toLowerCase().trim();
-    
-    // 1. Direct search in invoices
-    let found = invoices.find(inv => {
-      const invNum = (inv.invoiceNumber || inv.invoiceNo || '').toLowerCase().trim();
-      return invNum === cleanNo || (inv.id && inv.id.toLowerCase().trim() === cleanNo);
+
+    // 1. Direct search across unified GES Archive + Prizma ERP invoices
+    let found = findMatchingInvoiceRecord(invoiceNo, {
+      invoiceId: rowContext?.invoiceId,
+      prizmaDemandId: rowContext?.prizmaDemandId,
+      supplier: rowContext?.supplier
     });
 
     // 2. Search in discounts if not found in direct invoices
-    if (!found) {
+    if (!found && cleanNo) {
       const discMatch = discounts.find(d => {
         const dNum = (d.invoiceNo || '').toLowerCase().trim();
         return dNum === cleanNo || (d.id && d.id.toLowerCase().trim() === cleanNo);
@@ -180,12 +279,16 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
             : [
                 {
                   id: 'item_1',
-                  materialName: discMatch.materialName || selectedAlertForDetail?.materialName || 'Malzeme',
-                  category: discMatch.category || selectedAlertForDetail?.category || 'Genel',
+                  materialName: discMatch.materialName || rowContext?.materialName || selectedAlertForDetail?.materialName || 'Malzeme',
+                  category: discMatch.category || rowContext?.category || selectedAlertForDetail?.category || 'Genel',
                   quantity: 1,
                   unit: 'Adet',
-                  unitPrice: agreed,
-                  totalPrice: agreed
+                  unitPrice: Number((agreed / 1.22).toFixed(2)),
+                  unitPriceNet: Number((agreed / 1.22).toFixed(2)),
+                  grossUnitPrice: agreed,
+                  totalPrice: Number((agreed / 1.22).toFixed(2)),
+                  grossTotalPrice: agreed,
+                  vatPercentage: 22
                 }
               ]
         };
@@ -194,33 +297,50 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
 
     if (found) {
       setSelectedInvoiceForModal(found);
-    } else if (selectedAlertForDetail) {
-      // Create a full-fidelity fallback invoice object showing the exact basis
-      const currPrice = selectedAlertForDetail.currentPrice || 0;
-      const qty = selectedAlertForDetail.quantity || 1;
-      const total = currPrice * qty;
+    } else if (rowContext || selectedAlertForDetail) {
+      // Create a full-fidelity fallback invoice object showing the exact clicked row's basis
+      const grossPrice = Number(rowContext?.originalUnitPrice ?? rowContext?.unitPrice ?? selectedAlertForDetail?.currentPrice ?? 0);
+      const qty = Number(rowContext?.originalQuantity ?? rowContext?.quantity ?? selectedAlertForDetail?.quantity ?? 1);
+      const unitStr = rowContext?.originalUnit || rowContext?.unit || selectedAlertForDetail?.unit || 'Adet';
+      const vatPct = Number(rowContext?.vatPercentage ?? 22);
+      const vatDiv = vatPct > 0 ? (1 + vatPct / 100) : 1;
+      const netPrice = Number(rowContext?.netUnitPrice) || Number((grossPrice / vatDiv).toFixed(2));
+      const grossTotal = Number((grossPrice * qty).toFixed(2));
+      const netTotal = Number((netPrice * qty).toFixed(2));
+
       const syntheticInvoice: InvoiceRecord = {
-        id: `basis_${Date.now()}`,
-        invoiceNumber: invoiceNo || selectedAlertForDetail.invoiceNo || 'Fatura Altlığı',
-        date: selectedAlertForDetail.dateStr || new Date().toISOString().split('T')[0],
-        supplier: selectedAlertForDetail.vendorName || 'Tedarikçi Firma',
-        jobsiteName: selectedAlertForDetail.jobsiteName || 'Genel Şantiye',
-        totalAmount: total > 0 ? total : currPrice,
-        subtotal: (total > 0 ? total : currPrice) * 0.833,
-        tax: (total > 0 ? total : currPrice) * 0.167,
+        id: rowContext?.invoiceId || `basis_${Date.now()}`,
+        invoiceNumber: invoiceNo || selectedAlertForDetail?.invoiceNo || 'Fatura Altlığı',
+        date: rowContext?.date || selectedAlertForDetail?.dateStr || new Date().toISOString().split('T')[0],
+        supplier: rowContext?.supplier || selectedAlertForDetail?.vendorName || 'Tedarikçi Firma',
+        jobsiteId: '',
+        jobsiteName: rowContext?.jobsiteName || selectedAlertForDetail?.jobsiteName || 'Genel Şantiye',
+        totalAmount: grossTotal > 0 ? grossTotal : grossPrice,
+        vatRate: vatPct,
         currency: 'RUB',
+        fileUrl: rowContext?.fileUrl || (rowContext?.prizmaDemandId ? `/api/prizma/invoice-file/${rowContext.prizmaDemandId}` : undefined),
+        rawFileName: rowContext?.rawFileName,
+        prizmaDemandId: rowContext?.prizmaDemandId as any,
+        invoiceFileId: rowContext?.invoiceFileId as any,
+        prizmaRequestCode: rowContext?.prizmaRequestCode,
+        prizmaOrderCode: rowContext?.prizmaOrderCode,
+        prizmaBtfUrl: rowContext?.prizmaBtfUrl,
+        prizmaStfUrl: rowContext?.prizmaStfUrl,
         uploadedBySupervisorId: 'sup_1',
-        createdAt: new Date().toISOString(),
+        created_at: new Date().toISOString(),
         items: [
           {
             id: 'basis_item_1',
-            materialName: selectedAlertForDetail.materialName,
-            category: selectedAlertForDetail.category,
+            materialName: rowContext?.materialName || selectedAlertForDetail?.materialName || 'Malzeme',
+            category: rowContext?.category || selectedAlertForDetail?.category || 'Genel',
             quantity: qty,
-            unit: selectedAlertForDetail.unit || 'Adet',
-            unitPrice: currPrice,
-            totalPrice: total > 0 ? total : currPrice,
-            discountAmount: 0
+            unit: unitStr,
+            unitPrice: netPrice,
+            unitPriceNet: netPrice,
+            grossUnitPrice: grossPrice,
+            totalPrice: netTotal > 0 ? netTotal : netPrice,
+            grossTotalPrice: grossTotal > 0 ? grossTotal : grossPrice,
+            vatPercentage: vatPct
           }
         ]
       };
@@ -611,20 +731,38 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
     // 1. Prefer canonical normalized history rows from comparisons
     if (selectedAlertForDetail.historyRows && selectedAlertForDetail.historyRows.length > 0) {
       return selectedAlertForDetail.historyRows.map(r => {
-        const matchedInv = invoices.find(
-          inv => (inv.invoiceNumber || (inv as any).invoiceNo || '').trim().toLowerCase() === (r.invoiceNo || '').trim().toLowerCase()
-        );
+        const matchedInv = findMatchingInvoiceRecord(r.invoiceNo, {
+          invoiceId: r.invoiceId,
+          prizmaDemandId: r.prizmaDemandId,
+          supplier: r.supplier
+        });
         const isTrigger =
           selectedAlertForDetail.invoiceNo === r.invoiceNo &&
           Math.abs(r.unitPrice - (selectedAlertForDetail.currentPrice || 0)) < 0.5;
         return {
           date: r.date,
           invoiceNo: r.invoiceNo,
+          invoiceId: r.invoiceId || matchedInv?.id,
+          prizmaDemandId: r.prizmaDemandId || (matchedInv as any)?.prizmaDemandId,
+          invoiceFileId: r.invoiceFileId || (matchedInv as any)?.invoiceFileId,
+          prizmaRequestCode: r.prizmaRequestCode || matchedInv?.prizmaRequestCode,
+          prizmaOrderCode: r.prizmaOrderCode || matchedInv?.prizmaOrderCode,
+          prizmaBtfUrl: r.prizmaBtfUrl || matchedInv?.prizmaBtfUrl,
+          prizmaStfUrl: r.prizmaStfUrl || matchedInv?.prizmaStfUrl,
+          fileUrl: r.fileUrl || matchedInv?.fileUrl,
+          rawFileName: r.rawFileName || matchedInv?.rawFileName,
           supplier: r.supplier,
           jobsiteName: r.jobsiteName,
           quantity: r.quantity,
           unit: r.unit,
           unitPrice: r.unitPrice,
+          netUnitPrice: r.netUnitPrice,
+          vatPercentage: r.vatPercentage,
+          originalUnitPrice: r.originalUnitPrice,
+          originalQuantity: r.originalQuantity,
+          originalUnit: r.originalUnit,
+          conversionApplied: r.conversionApplied,
+          conversionFormula: r.conversionFormula,
           totalPrice: r.quantity * r.unitPrice,
           isCurrentTrigger: isTrigger,
           invoice: matchedInv
@@ -637,19 +775,39 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
     if (matchedComp && Array.isArray(matchedComp.history) && matchedComp.history.length > 0) {
       return matchedComp.history.map((h: any) => {
         const invNo = h.invoiceNumber || 'Fatura';
-        const matchedInv = invoices.find(
-          inv => (inv.invoiceNumber || (inv as any).invoiceNo || '').trim().toLowerCase() === invNo.trim().toLowerCase()
-        );
-        const uPrice = Number(h.normalizedUnitPrice || h.unitPrice || 0);
+        const matchedInv = findMatchingInvoiceRecord(invNo, {
+          invoiceId: h.invoiceId,
+          prizmaDemandId: h.prizmaDemandId,
+          supplier: h.supplier
+        });
+        const uPrice = Number(h.paidGrossUnitPrice || h.normalizedUnitPrice || h.unitPrice || 0);
         const uQty = Number(h.normalizedQuantity || h.quantity || 1);
+        const vatPct = Number(h.vatPercentage ?? 22);
+        const vatDiv = vatPct > 0 ? (1 + vatPct / 100) : 1;
         return {
           date: (h.date || '').split('T')[0],
           invoiceNo: invNo,
+          invoiceId: h.invoiceId || matchedInv?.id,
+          prizmaDemandId: h.prizmaDemandId || (matchedInv as any)?.prizmaDemandId,
+          invoiceFileId: h.invoiceFileId || (matchedInv as any)?.invoiceFileId,
+          prizmaRequestCode: h.prizmaRequestCode || matchedInv?.prizmaRequestCode,
+          prizmaOrderCode: h.prizmaOrderCode || matchedInv?.prizmaOrderCode,
+          prizmaBtfUrl: h.prizmaBtfUrl || matchedInv?.prizmaBtfUrl,
+          prizmaStfUrl: h.prizmaStfUrl || matchedInv?.prizmaStfUrl,
+          fileUrl: h.fileUrl || matchedInv?.fileUrl,
+          rawFileName: h.rawFileName || matchedInv?.rawFileName,
           supplier: h.supplier || 'Tedarikçi',
           jobsiteName: h.jobsiteName || 'Genel',
           quantity: uQty,
           unit: matchedComp.standardUnit || matchedComp.unit || h.unit || 'Adet',
           unitPrice: uPrice,
+          netUnitPrice: Number(h.unitPriceNet) || Number((uPrice / vatDiv).toFixed(2)),
+          vatPercentage: vatPct,
+          originalUnitPrice: Number(h.originalPaidGrossUnitPrice || h.originalUnitPrice || uPrice),
+          originalQuantity: Number(h.originalQuantity || uQty),
+          originalUnit: h.originalUnit || h.unit || 'Adet',
+          conversionApplied: Boolean(h.conversionApplied),
+          conversionFormula: h.conversionFormula,
           totalPrice: uPrice * uQty,
           isCurrentTrigger: selectedAlertForDetail.invoiceNo === invNo,
           invoice: matchedInv
@@ -657,20 +815,36 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
       }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     }
 
-    const historyRows: {
+    const historyRows: Array<{
       date: string;
       invoiceNo: string;
+      invoiceId?: string;
+      prizmaDemandId?: number | string;
+      invoiceFileId?: number | string;
+      prizmaRequestCode?: string;
+      prizmaOrderCode?: string;
+      prizmaBtfUrl?: string;
+      prizmaStfUrl?: string;
+      fileUrl?: string;
+      rawFileName?: string;
       supplier: string;
       jobsiteName: string;
       quantity: number;
       unit: string;
       unitPrice: number;
+      netUnitPrice?: number;
+      vatPercentage?: number;
+      originalUnitPrice?: number;
+      originalQuantity?: number;
+      originalUnit?: string;
+      conversionApplied?: boolean;
+      conversionFormula?: string;
       totalPrice: number;
       isCurrentTrigger: boolean;
       invoice?: InvoiceRecord;
-    }[] = [];
+    }> = [];
 
-    invoices.forEach(inv => {
+    allLookupInvoices.forEach(inv => {
       if (!inv || !Array.isArray(inv.items)) return;
       const supplierName = (inv.supplier || (inv as any).vendorName || 'Tedarikçi').trim();
       const invNo = inv.invoiceNumber || (inv as any).invoiceNo || 'Fatura';
@@ -679,19 +853,32 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
         if (!item || !item.materialName) return;
         const itmName = item.materialName.toLowerCase().trim();
         if (itmName === targetName) {
+          const itemGross = Number(item.grossUnitPrice || item.unitPrice || 0);
+          const itemNet = Number(item.unitPriceNet || item.unitPrice || 0);
           const isTrigger =
             selectedAlertForDetail.invoiceNo === invNo &&
-            Math.abs((Number(item.unitPrice) || 0) - (selectedAlertForDetail.currentPrice || 0)) < 0.1;
+            Math.abs(itemGross - (selectedAlertForDetail.currentPrice || 0)) < 0.5;
 
           historyRows.push({
             date: inv.date || '',
             invoiceNo: invNo,
+            invoiceId: inv.id,
+            prizmaDemandId: (inv as any).prizmaDemandId,
+            invoiceFileId: (inv as any).invoiceFileId,
+            prizmaRequestCode: inv.prizmaRequestCode,
+            prizmaOrderCode: inv.prizmaOrderCode,
+            prizmaBtfUrl: inv.prizmaBtfUrl,
+            prizmaStfUrl: inv.prizmaStfUrl,
+            fileUrl: inv.fileUrl,
+            rawFileName: inv.rawFileName,
             supplier: supplierName,
             jobsiteName: inv.jobsiteName || 'Genel',
             quantity: Number(item.quantity) || 1,
             unit: item.unit || 'Adet',
-            unitPrice: Number(item.unitPrice) || 0,
-            totalPrice: Number(item.totalPrice) || ((Number(item.quantity) || 1) * (Number(item.unitPrice) || 0)),
+            unitPrice: itemGross,
+            netUnitPrice: itemNet,
+            vatPercentage: item.vatPercentage,
+            totalPrice: Number(item.grossTotalPrice || item.totalPrice) || ((Number(item.quantity) || 1) * itemGross),
             isCurrentTrigger: isTrigger,
             invoice: inv
           });
@@ -701,7 +888,7 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
 
     // Sort chronologically descending (newest first)
     return historyRows.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [selectedAlertForDetail, invoices, comparisons]);
+  }, [selectedAlertForDetail, allLookupInvoices, comparisons]);
 
   // List of unique jobsites for filtering
   const availableJobsites = useMemo(() => {
@@ -1160,7 +1347,17 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleOpenInvoiceDetail(alert.invoiceNo);
+                            handleOpenInvoiceDetail(alert.invoiceNo!, undefined, {
+                              invoiceId: alert.invoiceId,
+                              date: alert.dateStr,
+                              supplier: alert.maxSupplier || alert.vendorName,
+                              jobsiteName: alert.jobsiteName,
+                              unitPrice: alert.currentPrice,
+                              quantity: alert.quantity,
+                              unit: alert.unit,
+                              materialName: alert.materialName,
+                              category: alert.category
+                            });
                           }}
                           className="text-[11px] font-bold text-indigo-700 hover:text-indigo-950 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-lg border border-indigo-200 flex items-center space-x-1.5 cursor-pointer transition-colors shadow-2xs"
                           title={language === 'RU' ? 'Посмотреть оригинальный счет и обоснование' : 'Faturayı ve Fiyat Altlığını Aç'}
@@ -1263,7 +1460,11 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
                                         type="button"
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          handleOpenInvoiceDetail(hRow.invoiceNo);
+                                          handleOpenInvoiceDetail(hRow.invoiceNo, undefined, {
+                                            ...hRow,
+                                            materialName: alert.materialName,
+                                            category: alert.category
+                                          });
                                         }}
                                         className="text-indigo-600 hover:underline font-bold cursor-pointer"
                                       >
@@ -1399,7 +1600,19 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
                   {selectedAlertForDetail.invoiceNo && (
                     <button
                       type="button"
-                      onClick={() => handleOpenInvoiceDetail(selectedAlertForDetail.invoiceNo!)}
+                      onClick={() =>
+                        handleOpenInvoiceDetail(selectedAlertForDetail.invoiceNo!, undefined, {
+                          invoiceId: selectedAlertForDetail.invoiceId,
+                          date: selectedAlertForDetail.dateStr,
+                          supplier: selectedAlertForDetail.maxSupplier || selectedAlertForDetail.vendorName,
+                          jobsiteName: selectedAlertForDetail.jobsiteName,
+                          unitPrice: selectedAlertForDetail.currentPrice,
+                          quantity: selectedAlertForDetail.quantity,
+                          unit: selectedAlertForDetail.unit,
+                          materialName: selectedAlertForDetail.materialName,
+                          category: selectedAlertForDetail.category
+                        })
+                      }
                       className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1 rounded-lg font-bold flex items-center space-x-1.5 cursor-pointer shadow-sm transition-all border border-indigo-400"
                       title="Faturayı ve resmi fiyat altlığını aç"
                     >
@@ -1421,76 +1634,240 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
 
             {/* Modal Body */}
             <div className="p-5 sm:p-6 overflow-y-auto space-y-6 flex-1 text-slate-800 text-sm">
-              {/* 1. Price Metrics Hero Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-center">
-                  <p className="text-[11px] text-slate-500 font-bold uppercase font-sans">
-                    {language === 'RU' ? 'Прежняя цена' : 'Önceki Birim Fiyat'}
-                  </p>
-                  <p className="text-lg font-black text-slate-700 mt-1">
-                    {selectedAlertForDetail.previousPrice ? formatRuble(selectedAlertForDetail.previousPrice) : '-'}
-                  </p>
-                  <p className="text-[10px] text-slate-400 font-sans mt-0.5">
-                    {language === 'RU' ? 'Базовый тариф' : 'Önceki Sipariş Fiyatı'}
-                  </p>
-                </div>
+              {/* 1. Price Metrics Hero Grid: En Düşük (Baz), En Yüksek (Tepe), Son Fatura ve Bütçe Riski Ayrı Gösterim */}
+              {(() => {
+                const pricedRows = materialPurchaseHistory.filter(r => r.unitPrice > 0);
+                const sortedByPrice = [...pricedRows].sort((a, b) => a.unitPrice - b.unitPrice);
+                const cheapestRow = sortedByPrice[0];
+                const priciestRow = sortedByPrice[sortedByPrice.length - 1];
+                const latestRow = materialPurchaseHistory[0]; // already sorted newest first
 
-                <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 text-center">
-                  <p className="text-[11px] text-rose-800 font-bold uppercase font-sans">
-                    {language === 'RU' ? 'Текущая цена (Последний счет)' : 'Son Fatura Birim Fiyatı'}
-                  </p>
-                  <p className="text-xl font-black text-rose-600 mt-1">
-                    {selectedAlertForDetail.currentPrice ? formatRuble(selectedAlertForDetail.currentPrice) : '-'}
-                  </p>
-                  <p className="text-[11px] font-black text-rose-700 font-sans mt-0.5">
-                    +{selectedAlertForDetail.percentageChange}% {language === 'RU' ? 'рост' : 'artış'}
-                  </p>
-                </div>
+                const minPrice = cheapestRow?.unitPrice ?? selectedAlertForDetail.minUnitPrice ?? selectedAlertForDetail.previousPrice ?? 0;
+                const maxPrice = priciestRow?.unitPrice ?? selectedAlertForDetail.maxUnitPrice ?? selectedAlertForDetail.currentPrice ?? 0;
+                const latestPrice = latestRow?.unitPrice ?? selectedAlertForDetail.latestPrice ?? selectedAlertForDetail.currentPrice ?? 0;
 
-                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-center">
-                  <p className="text-[11px] text-amber-800 font-bold uppercase font-sans">
-                    {language === 'RU' ? 'Финансовое влияние (Риск)' : 'Yansıyan Bütçe Riski'}
-                  </p>
-                  <p className="text-xl font-black text-amber-600 mt-1">
-                    {formatRuble(selectedAlertForDetail.financialImpact)}
-                  </p>
-                  <p className="text-[10px] text-amber-700 font-sans mt-0.5">
-                    {language === 'RU' ? 'Расчетная переплата' : 'Fazla Maliyet Tutarı'}
-                  </p>
-                </div>
-              </div>
+                const minInvNo = cheapestRow?.invoiceNo || selectedAlertForDetail.minInvoiceNo;
+                const minDate = cheapestRow?.date || selectedAlertForDetail.minDateStr;
+                const minJobsite = cheapestRow?.jobsiteName || selectedAlertForDetail.minJobsiteName;
+                const minSupplier = cheapestRow?.supplier || selectedAlertForDetail.minSupplier;
 
-              {/* Fatura Numarası & Fiyat Altlığı Doğrudan İnceleme Barı */}
-              <div className="bg-indigo-50/70 border border-indigo-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-                <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs">
-                    <FileText className="w-5 h-5 text-amber-300" />
-                  </div>
-                  <div>
-                    <div className="text-[11px] font-bold text-indigo-700 uppercase tracking-wider">
-                      {language === 'RU' ? 'Номер счета и ценовое обоснование' : 'Fatura No ve Resmi Fiyat Altlığı'}
+                const maxInvNo = priciestRow?.invoiceNo || selectedAlertForDetail.maxInvoiceNo || selectedAlertForDetail.invoiceNo;
+                const maxDate = priciestRow?.date || selectedAlertForDetail.maxDateStr || selectedAlertForDetail.dateStr;
+                const maxJobsite = priciestRow?.jobsiteName || selectedAlertForDetail.maxJobsiteName || selectedAlertForDetail.jobsiteName;
+
+                const latestInvNo = latestRow?.invoiceNo || selectedAlertForDetail.latestInvoiceNo || selectedAlertForDetail.invoiceNo;
+                const latestDate = latestRow?.date || selectedAlertForDetail.latestDateStr || selectedAlertForDetail.dateStr;
+                const latestJobsite = latestRow?.jobsiteName || selectedAlertForDetail.latestJobsiteName || selectedAlertForDetail.jobsiteName;
+
+                const maxDiffPct = minPrice > 0 && maxPrice > minPrice
+                  ? Number((((maxPrice - minPrice) / minPrice) * 100).toFixed(1))
+                  : selectedAlertForDetail.percentageChange;
+                const latestDiffPct = minPrice > 0 && latestPrice >= minPrice
+                  ? Number((((latestPrice - minPrice) / minPrice) * 100).toFixed(1))
+                  : 0;
+                const unitLabel = selectedAlertForDetail.unit || cheapestRow?.unit || 'Adet';
+
+                return (
+                  <>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 font-mono">
+                      {/* Card 1: En Düşük Birim Fiyat (Baz Alım) */}
+                      <div className="bg-emerald-50/80 border border-emerald-200 rounded-2xl p-3.5 text-center flex flex-col justify-between">
+                        <div>
+                          <p className="text-[10px] text-emerald-800 font-extrabold uppercase font-sans tracking-wide">
+                            {language === 'RU' ? 'Мин. цена (База)' : 'En Düşük Fiyat (Baz Alım)'}
+                          </p>
+                          <p className="text-lg font-black text-emerald-700 mt-1">
+                            {minPrice > 0 ? formatRuble(minPrice) : '-'}
+                            {minPrice > 0 && <span className="text-[10px] font-normal text-emerald-600"> /{unitLabel}</span>}
+                          </p>
+                          <p className="text-[10px] text-emerald-700 font-sans font-semibold mt-0.5 truncate" title={`${minJobsite || ''} ${minSupplier ? `• ${minSupplier}` : ''}`}>
+                            {minJobsite || (language === 'RU' ? 'Базовый тариф' : 'En Uygun Referans')}
+                          </p>
+                        </div>
+                        {minInvNo && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleOpenInvoiceDetail(minInvNo, cheapestRow?.invoice, cheapestRow ? {
+                                ...cheapestRow,
+                                materialName: selectedAlertForDetail.materialName,
+                                category: selectedAlertForDetail.category
+                              } : {
+                                invoiceId: selectedAlertForDetail.minInvoiceId,
+                                date: minDate,
+                                supplier: minSupplier,
+                                jobsiteName: minJobsite,
+                                unitPrice: minPrice,
+                                unit: unitLabel,
+                                materialName: selectedAlertForDetail.materialName,
+                                category: selectedAlertForDetail.category
+                              })
+                            }
+                            className="mt-2 w-full py-1 px-2 bg-white hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-bold font-sans flex items-center justify-center space-x-1 cursor-pointer transition-colors"
+                          >
+                            <FileText className="w-3 h-3 text-emerald-600 shrink-0" />
+                            <span className="truncate">Fatura: {minInvNo} {minDate ? `(${minDate})` : ''}</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Card 2: En Yüksek Birim Fiyat (Tepe Alım) */}
+                      <div className="bg-rose-50/90 border border-rose-200 rounded-2xl p-3.5 text-center flex flex-col justify-between">
+                        <div>
+                          <p className="text-[10px] text-rose-800 font-extrabold uppercase font-sans tracking-wide">
+                            {language === 'RU' ? 'Макс. цена (Пик)' : 'En Yüksek Fiyat (Tepe Alım)'}
+                          </p>
+                          <p className="text-lg font-black text-rose-600 mt-1">
+                            {maxPrice > 0 ? formatRuble(maxPrice) : '-'}
+                            {maxPrice > 0 && <span className="text-[10px] font-normal text-rose-500"> /{unitLabel}</span>}
+                          </p>
+                          <p className="text-[10px] font-black text-rose-700 font-sans mt-0.5">
+                            En Düşüğe Göre +%{maxDiffPct} Fark
+                          </p>
+                        </div>
+                        {maxInvNo && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleOpenInvoiceDetail(maxInvNo, priciestRow?.invoice, priciestRow ? {
+                                ...priciestRow,
+                                materialName: selectedAlertForDetail.materialName,
+                                category: selectedAlertForDetail.category
+                              } : {
+                                invoiceId: selectedAlertForDetail.maxInvoiceId || selectedAlertForDetail.invoiceId,
+                                date: maxDate,
+                                supplier: selectedAlertForDetail.maxSupplier || selectedAlertForDetail.vendorName,
+                                jobsiteName: maxJobsite,
+                                unitPrice: maxPrice,
+                                unit: unitLabel,
+                                materialName: selectedAlertForDetail.materialName,
+                                category: selectedAlertForDetail.category
+                              })
+                            }
+                            className="mt-2 w-full py-1 px-2 bg-white hover:bg-rose-100 text-rose-800 border border-rose-300 rounded-lg text-[10px] font-bold font-sans flex items-center justify-center space-x-1 cursor-pointer transition-colors"
+                          >
+                            <FileText className="w-3 h-3 text-rose-600 shrink-0" />
+                            <span className="truncate">Fatura: {maxInvNo} {maxDate ? `(${maxDate})` : ''}</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Card 3: Son Fatura Birim Fiyatı (Güncel Alım) */}
+                      <div className="bg-indigo-50/80 border border-indigo-200 rounded-2xl p-3.5 text-center flex flex-col justify-between">
+                        <div>
+                          <p className="text-[10px] text-indigo-800 font-extrabold uppercase font-sans tracking-wide">
+                            {language === 'RU' ? 'Последний счет (Актуальная)' : 'Son Fatura Fiyatı (Güncel)'}
+                          </p>
+                          <p className="text-lg font-black text-indigo-700 mt-1">
+                            {latestPrice > 0 ? formatRuble(latestPrice) : '-'}
+                            {latestPrice > 0 && <span className="text-[10px] font-normal text-indigo-500"> /{unitLabel}</span>}
+                          </p>
+                          <p className="text-[10px] font-bold text-indigo-700 font-sans mt-0.5">
+                            {latestDiffPct <= 0.5
+                              ? '✓ En Uygun Baz Fiyatla Alındı'
+                              : `En Düşüğe Göre +%${latestDiffPct} Fark`}
+                          </p>
+                        </div>
+                        {latestInvNo && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleOpenInvoiceDetail(latestInvNo, latestRow?.invoice, latestRow ? {
+                                ...latestRow,
+                                materialName: selectedAlertForDetail.materialName,
+                                category: selectedAlertForDetail.category
+                              } : {
+                                invoiceId: selectedAlertForDetail.latestInvoiceId || selectedAlertForDetail.invoiceId,
+                                date: latestDate,
+                                supplier: selectedAlertForDetail.latestSupplier || selectedAlertForDetail.vendorName,
+                                jobsiteName: latestJobsite,
+                                unitPrice: latestPrice,
+                                unit: unitLabel,
+                                materialName: selectedAlertForDetail.materialName,
+                                category: selectedAlertForDetail.category
+                              })
+                            }
+                            className="mt-2 w-full py-1 px-2 bg-white hover:bg-indigo-100 text-indigo-800 border border-indigo-300 rounded-lg text-[10px] font-bold font-sans flex items-center justify-center space-x-1 cursor-pointer transition-colors"
+                          >
+                            <FileText className="w-3 h-3 text-indigo-600 shrink-0" />
+                            <span className="truncate">Fatura: {latestInvNo} {latestDate ? `(${latestDate})` : ''}</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Card 4: Yansıyan Bütçe Riski */}
+                      <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 text-center flex flex-col justify-between">
+                        <div>
+                          <p className="text-[10px] text-amber-800 font-extrabold uppercase font-sans tracking-wide">
+                            {language === 'RU' ? 'Финансовое влияние (Риск)' : 'Yansıyan Bütçe Riski'}
+                          </p>
+                          <p className="text-lg font-black text-amber-600 mt-1">
+                            {formatRuble(selectedAlertForDetail.financialImpact)}
+                          </p>
+                          <p className="text-[10px] text-amber-700 font-sans font-semibold mt-0.5">
+                            {language === 'RU' ? 'Расчетная переплата' : 'En Düşük Baza Göre Fazla Maliyet'}
+                          </p>
+                        </div>
+                        <div className="mt-2 py-1 px-2 bg-amber-100/70 text-amber-900 rounded-lg text-[10px] font-bold font-sans">
+                          KDV Dahil Fatura Gerçek Fiyat Bazlı
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-sm font-black text-slate-900 font-mono flex items-center space-x-2">
-                      <span>{selectedAlertForDetail.invoiceNo || 'Mevcut Alım Kaydı'}</span>
-                      {selectedAlertForDetail.dateStr && (
-                        <span className="text-xs font-normal text-slate-500 font-sans">
-                          • {selectedAlertForDetail.dateStr}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
 
-                <button
-                  type="button"
-                  onClick={() => handleOpenInvoiceDetail(selectedAlertForDetail.invoiceNo || 'Fatura Altlığı')}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all flex items-center justify-center space-x-2 cursor-pointer shrink-0"
-                >
-                  <Eye className="w-4 h-4" />
-                  <span>{language === 'RU' ? 'Открыть счет и обоснование' : 'Faturayı ve Fiyat Altlığını Aç'}</span>
-                  <ExternalLink className="w-3.5 h-3.5 opacity-80" />
-                </button>
-              </div>
+                    {/* Fatura Numarası & Fiyat Altlığı Doğrudan İnceleme Barı */}
+                    <div className="bg-indigo-50/70 border border-indigo-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                      <div className="flex items-center space-x-3">
+                        <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                          <FileText className="w-5 h-5 text-amber-300" />
+                        </div>
+                        <div>
+                          <div className="text-[11px] font-bold text-indigo-700 uppercase tracking-wider">
+                            {language === 'RU' ? 'Пиковый счет и ценовое обоснование' : 'En Yüksek Fiyatlı Fatura ve Resmi Fiyat Altlığı'}
+                          </div>
+                          <div className="text-sm font-black text-slate-900 font-mono flex flex-wrap items-center gap-2">
+                            <span>Fatura: {maxInvNo || selectedAlertForDetail.invoiceNo || 'Mevcut Alım Kaydı'}</span>
+                            {maxPrice > 0 && (
+                              <span className="text-xs font-extrabold text-rose-700 bg-rose-100 px-2 py-0.5 rounded border border-rose-200">
+                                {formatRuble(maxPrice)} /{unitLabel}
+                              </span>
+                            )}
+                            {maxDate && (
+                              <span className="text-xs font-normal text-slate-500 font-sans">
+                                • {maxDate} {maxJobsite ? `• ${maxJobsite}` : ''}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleOpenInvoiceDetail(maxInvNo || selectedAlertForDetail.invoiceNo || 'Fatura Altlığı', priciestRow?.invoice, priciestRow ? {
+                            ...priciestRow,
+                            materialName: selectedAlertForDetail.materialName,
+                            category: selectedAlertForDetail.category
+                          } : {
+                            invoiceId: selectedAlertForDetail.maxInvoiceId || selectedAlertForDetail.invoiceId,
+                            date: maxDate,
+                            supplier: selectedAlertForDetail.maxSupplier || selectedAlertForDetail.vendorName,
+                            jobsiteName: maxJobsite,
+                            unitPrice: maxPrice,
+                            unit: unitLabel,
+                            materialName: selectedAlertForDetail.materialName,
+                            category: selectedAlertForDetail.category
+                          })
+                        }
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all flex items-center justify-center space-x-2 cursor-pointer shrink-0"
+                      >
+                        <Eye className="w-4 h-4" />
+                        <span>{language === 'RU' ? 'Открыть счет и обоснование' : 'Faturayı ve Fiyat Altlığını Aç'}</span>
+                        <ExternalLink className="w-3.5 h-3.5 opacity-80" />
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
 
               {/* 2. Intelligent Market Analysis Box (The Core Reason & Context requested by user) */}
               {(() => {
@@ -1534,16 +1911,17 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
                   </span>
                 </div>
 
-                <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-sm max-h-60 overflow-y-auto">
+                <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-sm max-h-72 overflow-y-auto">
                   <table className="w-full text-left text-xs border-collapse">
-                    <thead className="bg-slate-100 text-slate-700 sticky top-0 font-bold border-b border-slate-200">
+                    <thead className="bg-slate-100 text-slate-700 sticky top-0 font-bold border-b border-slate-200 z-10">
                       <tr>
                         <th className="py-2.5 px-3">{language === 'RU' ? 'Дата' : 'Tarih'}</th>
                         <th className="py-2.5 px-3">{language === 'RU' ? 'Счет №' : 'Fatura No'}</th>
                         <th className="py-2.5 px-3">{language === 'RU' ? 'Объект' : 'Şantiye'}</th>
                         <th className="py-2.5 px-3">{language === 'RU' ? 'Поставщик' : 'Tedarikçi'}</th>
                         <th className="py-2.5 px-3 text-right">{language === 'RU' ? 'Кол-во' : 'Miktar'}</th>
-                        <th className="py-2.5 px-3 text-right">{language === 'RU' ? 'Цена за ед.' : 'Birim Fiyat'}</th>
+                        <th className="py-2.5 px-3 text-right">{language === 'RU' ? 'Цена (с НДС)' : 'Birim Fiyat (KDV Dahil)'}</th>
+                        <th className="py-2.5 px-3 text-right">{language === 'RU' ? 'Разница к мин.' : 'En Düşüğe Göre Fark'}</th>
                         <th className="py-2.5 px-3 text-right">{language === 'RU' ? 'Итого' : 'Toplam'}</th>
                         <th className="py-2.5 px-3 text-center">{language === 'RU' ? 'Обоснование / Счет' : 'Altlık / Belge'}</th>
                       </tr>
@@ -1551,62 +1929,124 @@ export const ProcurementAnomalyAlerts: React.FC<Props> = ({
                     <tbody className="divide-y divide-slate-100">
                       {materialPurchaseHistory.length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="py-4 text-center text-slate-400 font-medium">
+                          <td colSpan={9} className="py-4 text-center text-slate-400 font-medium">
                             {language === 'RU' ? 'Нет других счетов' : 'Başka fatura kaydı bulunamadı'}
                           </td>
                         </tr>
                       ) : (
-                        materialPurchaseHistory.map((row, idx) => (
-                          <tr
-                            key={idx}
-                            className={`transition-colors font-medium ${
-                              row.isCurrentTrigger ? 'bg-rose-50/70 font-bold text-rose-950' : 'hover:bg-slate-50'
-                            }`}
-                          >
-                            <td className="py-2.5 px-3 font-mono whitespace-nowrap">
-                              {row.date}
-                              {row.isCurrentTrigger && (
-                                <span className="ml-1.5 text-[9px] bg-rose-600 text-white px-1.5 py-0.5 rounded font-sans">
-                                  {language === 'RU' ? 'Текущий' : 'Bu Fatura'}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-2.5 px-3 font-mono">
-                              <button
-                                type="button"
-                                onClick={() => handleOpenInvoiceDetail(row.invoiceNo, row.invoice)}
-                                className="font-mono text-indigo-600 hover:text-indigo-950 underline font-bold flex items-center space-x-1 cursor-pointer transition-colors"
-                                title={language === 'RU' ? 'Посмотреть оригинальный счет и обоснование' : 'Faturayı ve Fiyat Altlığını Aç'}
+                        (() => {
+                          const validPrices = materialPurchaseHistory.map(r => r.unitPrice).filter(p => p > 0);
+                          const minHistPrice = validPrices.length > 0 ? Math.min(...validPrices) : (selectedAlertForDetail.minUnitPrice || 0);
+                          const maxHistPrice = validPrices.length > 0 ? Math.max(...validPrices) : (selectedAlertForDetail.maxUnitPrice || 0);
+
+                          return materialPurchaseHistory.map((row, idx) => {
+                            const isLatest = idx === 0;
+                            const isCheapest = minHistPrice > 0 && Math.abs(row.unitPrice - minHistPrice) < 0.05;
+                            const isPriciest = maxHistPrice > minHistPrice + 0.05 && Math.abs(row.unitPrice - maxHistPrice) < 0.05;
+                            const diffVsMinPct = minHistPrice > 0 ? ((row.unitPrice - minHistPrice) / minHistPrice) * 100 : 0;
+
+                            return (
+                              <tr
+                                key={idx}
+                                className={`transition-colors font-medium ${
+                                  isPriciest
+                                    ? 'bg-rose-50/70 font-bold text-rose-950'
+                                    : isCheapest
+                                    ? 'bg-emerald-50/50 text-slate-900'
+                                    : 'hover:bg-slate-50'
+                                }`}
                               >
-                                <FileText className="w-3 h-3 text-indigo-500 shrink-0" />
-                                <span>{row.invoiceNo}</span>
-                                <ExternalLink className="w-2.5 h-2.5 text-indigo-400 shrink-0" />
-                              </button>
-                            </td>
-                            <td className="py-2.5 px-3">{row.jobsiteName}</td>
-                            <td className="py-2.5 px-3 text-slate-600">{row.supplier}</td>
-                            <td className="py-2.5 px-3 text-right font-mono">
-                              {row.quantity} {row.unit}
-                            </td>
-                            <td className="py-2.5 px-3 text-right font-mono font-bold">
-                              {formatRuble(row.unitPrice)}
-                            </td>
-                            <td className="py-2.5 px-3 text-right font-mono text-slate-900 font-bold">
-                              {formatRuble(row.totalPrice)}
-                            </td>
-                            <td className="py-2.5 px-3 text-center">
-                              <button
-                                type="button"
-                                onClick={() => handleOpenInvoiceDetail(row.invoiceNo, row.invoice)}
-                                className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 hover:text-indigo-950 border border-indigo-200 rounded-lg text-[10px] font-bold inline-flex items-center space-x-1 cursor-pointer transition-colors shadow-2xs"
-                                title={language === 'RU' ? 'Открыть оригинальный счет' : 'Faturayı ve Fiyat Altlığını Görüntüle'}
-                              >
-                                <Eye className="w-3 h-3 text-indigo-600" />
-                                <span>{language === 'RU' ? 'Счет' : 'Fatura Gör'}</span>
-                              </button>
-                            </td>
-                          </tr>
-                        ))
+                                <td className="py-2.5 px-3 font-mono whitespace-nowrap">
+                                  <div>{row.date}</div>
+                                  <div className="flex flex-wrap gap-1 mt-0.5">
+                                    {isLatest && (
+                                      <span className="text-[9px] bg-indigo-600 text-white px-1.5 py-0.2 rounded font-sans font-bold">
+                                        {language === 'RU' ? 'Последний' : 'SON FATURA'}
+                                      </span>
+                                    )}
+                                    {isCheapest && (
+                                      <span className="text-[9px] bg-emerald-600 text-white px-1.5 py-0.2 rounded font-sans font-bold">
+                                        {language === 'RU' ? 'Мин. база' : 'EN DÜŞÜK BAZ'}
+                                      </span>
+                                    )}
+                                    {isPriciest && (
+                                      <span className="text-[9px] bg-rose-600 text-white px-1.5 py-0.2 rounded font-sans font-bold">
+                                        {language === 'RU' ? 'Пик' : 'EN YÜKSEK TEPE'}
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="py-2.5 px-3 font-mono">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleOpenInvoiceDetail(row.invoiceNo, row.invoice, {
+                                        ...row,
+                                        materialName: selectedAlertForDetail.materialName,
+                                        category: selectedAlertForDetail.category
+                                      })
+                                    }
+                                    className="font-mono text-indigo-600 hover:text-indigo-950 underline font-bold flex items-center space-x-1 cursor-pointer transition-colors"
+                                    title={language === 'RU' ? 'Посмотреть оригинальный счет и обоснование' : 'Faturayı ve Fiyat Altlığını Aç'}
+                                  >
+                                    <FileText className="w-3 h-3 text-indigo-500 shrink-0" />
+                                    <span>{row.invoiceNo}</span>
+                                    <ExternalLink className="w-2.5 h-2.5 text-indigo-400 shrink-0" />
+                                  </button>
+                                </td>
+                                <td className="py-2.5 px-3">{row.jobsiteName}</td>
+                                <td className="py-2.5 px-3 text-slate-600">{row.supplier}</td>
+                                <td className="py-2.5 px-3 text-right font-mono">
+                                  <div>{row.quantity.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} {row.unit}</div>
+                                  {row.conversionApplied && row.originalQuantity && row.originalUnit && row.originalUnit !== row.unit && (
+                                    <div className="text-[10px] text-slate-400 font-normal">
+                                      ({row.originalQuantity} {row.originalUnit})
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-2.5 px-3 text-right font-mono font-bold">
+                                  <div>{formatRuble(row.unitPrice)}</div>
+                                  {row.conversionApplied && row.originalUnitPrice && Math.abs(row.originalUnitPrice - row.unitPrice) > 0.05 && (
+                                    <div className="text-[10px] text-amber-700 font-normal">
+                                      Fatura: {formatRuble(row.originalUnitPrice)}/{row.originalUnit}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-2.5 px-3 text-right font-mono font-bold">
+                                  {isCheapest || diffVsMinPct < 0.2 ? (
+                                    <span className="text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded text-[10px] font-sans">
+                                      EN UYGUN BAZ
+                                    </span>
+                                  ) : (
+                                    <span className="text-rose-700 bg-rose-100 px-1.5 py-0.5 rounded text-[10px]">
+                                      +%{diffVsMinPct.toFixed(1)}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-2.5 px-3 text-right font-mono text-slate-900 font-bold">
+                                  {formatRuble(row.totalPrice)}
+                                </td>
+                                <td className="py-2.5 px-3 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleOpenInvoiceDetail(row.invoiceNo, row.invoice, {
+                                        ...row,
+                                        materialName: selectedAlertForDetail.materialName,
+                                        category: selectedAlertForDetail.category
+                                      })
+                                    }
+                                    className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 hover:text-indigo-950 border border-indigo-200 rounded-lg text-[10px] font-bold inline-flex items-center space-x-1 cursor-pointer transition-colors shadow-2xs"
+                                    title={language === 'RU' ? 'Открыть оригинальный счет' : 'Faturayı ve Fiyat Altlığını Görüntüle'}
+                                  >
+                                    <Eye className="w-3 h-3 text-indigo-600" />
+                                    <span>{language === 'RU' ? 'Счет' : 'Fatura Gör'}</span>
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          });
+                        })()
                       )}
                     </tbody>
                   </table>

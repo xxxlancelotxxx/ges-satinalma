@@ -277,6 +277,15 @@ export const InvoiceDetailModal: React.FC<Props> = ({
     Number(item.grossTotalPrice) || (Number(item.grossUnitPrice) || Number(item.unitPrice) || 0) * (Number(item.quantity) || 1);
   const itemGrossUnit = (item: InvoiceItem) =>
     Number(item.grossUnitPrice) || itemGrossTotal(item) / (Number(item.quantity) || 1);
+  const itemNetUnit = (item: InvoiceItem) => {
+    const explicitNet = Number(item.unitPriceNet);
+    if (explicitNet > 0) return explicitNet;
+    const grossU = itemGrossUnit(item);
+    const rawU = Number(item.unitPrice) || 0;
+    if (rawU > 0 && Math.abs(grossU - rawU) > 0.01) return rawU;
+    const vRate = Number.isFinite(Number(item.vatPercentage)) ? Number(item.vatPercentage) : invoiceVatRate;
+    return vRate > 0 ? Number((grossU / (1 + vRate / 100)).toFixed(2)) : grossU;
+  };
   const linesGap = Number((invoice as any).lineTotalGapGross) || 0;
   const linesNotReconciled = (invoice as any).linesReconciled === false;
   const linesFromDocument = (invoice as any).linesSource === 'invoice_pdf' && !linesNotReconciled;
@@ -299,10 +308,20 @@ export const InvoiceDetailModal: React.FC<Props> = ({
     window.print();
   };
 
+  const resolvedPrizmaDemandId =
+    (invoice as any).prizmaDemandId ||
+    (String(invoice.id || '').startsWith('prizma_') ? Number(String(invoice.id).replace('prizma_', '')) : undefined) ||
+    (String(invoice.id || '').startsWith('inv_prizma_') ? Number(String(invoice.id).replace('inv_prizma_', '')) : undefined);
+
+  const effectiveFileUrl =
+    invoice.fileUrl ||
+    (resolvedPrizmaDemandId ? `/api/prizma/invoice-file/${resolvedPrizmaDemandId}` : undefined) ||
+    ((invoice as any).invoiceFileId ? `/api/prizma/file/${(invoice as any).invoiceFileId}` : undefined);
+
   const handleOpenDrive = () => {
     const fileName = invoice.rawFileName || `Fatura_${invoice.invoiceNumber}_${invoice.supplier.replace(/\s+/g, '_')}.pdf`;
 
-    openOriginalFileViewer(invoice.fileUrl, fileName, {
+    openOriginalFileViewer(effectiveFileUrl, fileName, {
       supplier: invoice.supplier,
       amount: invoice.totalAmount,
       date: invoice.date,
@@ -377,9 +396,9 @@ export const InvoiceDetailModal: React.FC<Props> = ({
 
           {/* Header Action Buttons */}
           <div className="flex items-center space-x-2 shrink-0">
-            {(invoice as any).prizmaDemandId ? (
+            {resolvedPrizmaDemandId ? (
               <a
-                href={`/api/prizma/invoice-file/${(invoice as any).prizmaDemandId}`}
+                href={`/api/prizma/invoice-file/${resolvedPrizmaDemandId}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="px-3 py-1.5 bg-amber-600/30 hover:bg-amber-600 text-amber-200 hover:text-white border border-amber-500/40 rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5 cursor-pointer shadow-sm"
@@ -401,9 +420,9 @@ export const InvoiceDetailModal: React.FC<Props> = ({
               </a>
             )}
 
-            {((invoice as any).prizmaBtfUrl || (invoice as any).prizmaUrl || (invoice as any).prizmaDemandId) && (
+            {((invoice as any).prizmaBtfUrl || (invoice as any).prizmaUrl || resolvedPrizmaDemandId) && (
               <a
-                href={getPrizmaBtfUrl((invoice as any).prizmaDemandId, (invoice as any).prizmaBtfUrl || (invoice as any).prizmaUrl)}
+                href={getPrizmaBtfUrl(resolvedPrizmaDemandId, (invoice as any).prizmaBtfUrl || (invoice as any).prizmaUrl)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="px-3 py-1.5 bg-blue-600/30 hover:bg-blue-600 text-blue-200 hover:text-white border border-blue-500/40 rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5 cursor-pointer shadow-sm"
@@ -838,7 +857,7 @@ export const InvoiceDetailModal: React.FC<Props> = ({
                           <td className="py-2 px-2 text-right font-mono text-indigo-900 font-black bg-indigo-50/30 border-r border-b border-slate-300">
                             {formatTL(itemGrossUnit(item))}
                             <div className="text-[10px] font-semibold text-slate-500">
-                              KDV Hariç: {formatTL(Number(item.unitPriceNet) || Number(item.unitPrice) || 0)}
+                              KDV Hariç: {formatTL(itemNetUnit(item))}
                             </div>
                           </td>
                           <td className="py-2 px-2.5 text-right font-mono font-black text-emerald-800 bg-emerald-50/30 border-r border-b border-slate-300">
@@ -910,8 +929,8 @@ export const InvoiceDetailModal: React.FC<Props> = ({
         {/* Tab 2: Orijinal Belge & Drive */}
         {activeTab === 'document' && (
           <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 space-y-4 bg-slate-100/70">
-            {invoice.fileUrl ? (() => {
-              const safeUrl = getSafeFileUrl(invoice.fileUrl);
+            {effectiveFileUrl ? (() => {
+              const safeUrl = getSafeFileUrl(effectiveFileUrl);
               const isImg = safeUrl.match(/\.(jpg|jpeg|png|webp|gif|svg)($|\?)/i) || safeUrl.startsWith('data:image/');
               return (
                 <div className="border-2 border-slate-300 rounded-2xl overflow-hidden bg-white flex flex-col items-center justify-center relative p-4 shadow-sm min-h-[340px]">

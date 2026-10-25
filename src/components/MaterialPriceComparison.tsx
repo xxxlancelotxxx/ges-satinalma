@@ -127,6 +127,72 @@ export const MaterialPriceComparison: React.FC<Props> = ({
   const [expandedMaterialName, setExpandedMaterialName] = useState<string | null>(null);
 
   const [selectedInvoiceForModal, setSelectedInvoiceForModal] = useState<InvoiceRecord | null>(null);
+  const [prizmaInvoices, setPrizmaInvoices] = useState<InvoiceRecord[]>([]);
+
+  useEffect(() => {
+    let isMounted = true;
+    fetch('/api/prizma/invoices')
+      .then(res => (res.ok ? res.json() : []))
+      .then(data => {
+        if (!isMounted) return;
+        const list = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+        setPrizmaInvoices(list);
+      })
+      .catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const allLookupInvoices = useMemo(() => {
+    const map = new Map<string, InvoiceRecord>();
+    invoices.forEach(inv => {
+      if (inv && inv.id) map.set(inv.id, inv);
+    });
+    prizmaInvoices.forEach(pInv => {
+      if (pInv && pInv.id && !map.has(pInv.id)) {
+        map.set(pInv.id, pInv);
+      }
+    });
+    return Array.from(map.values());
+  }, [invoices, prizmaInvoices]);
+
+  const findMatchingInvoiceForHistory = (hist: any): InvoiceRecord | undefined => {
+    const targetId = String(hist?.invoiceId || '').trim();
+    if (targetId) {
+      const byId = allLookupInvoices.find(inv => String(inv.id || '').trim() === targetId);
+      if (byId) return byId;
+    }
+
+    const targetDemandId = hist?.prizmaDemandId ? String(hist.prizmaDemandId).trim() : '';
+    if (targetDemandId) {
+      const byDemand = allLookupInvoices.find(
+        inv =>
+          String((inv as any).prizmaDemandId || '').trim() === targetDemandId ||
+          String(inv.id || '') === `prizma_${targetDemandId}` ||
+          String(inv.id || '') === `inv_prizma_${targetDemandId}`
+      );
+      if (byDemand) return byDemand;
+    }
+
+    const cleanNo = String(hist?.invoiceNumber || '').toLowerCase().trim();
+    if (!cleanNo) return undefined;
+
+    const cleanSup = String(hist?.supplier || '').toLowerCase().trim();
+    if (cleanSup) {
+      const byNoAndSupplier = allLookupInvoices.find(inv => {
+        const invNum = String(inv.invoiceNumber || (inv as any).invoiceNo || '').toLowerCase().trim();
+        const invSup = String(inv.supplier || (inv as any).vendorName || '').toLowerCase().trim();
+        return invNum === cleanNo && (invSup === cleanSup || invSup.includes(cleanSup) || cleanSup.includes(invSup));
+      });
+      if (byNoAndSupplier) return byNoAndSupplier;
+    }
+
+    return allLookupInvoices.find(inv => {
+      const invNum = String(inv.invoiceNumber || (inv as any).invoiceNo || '').toLowerCase().trim();
+      return invNum === cleanNo || String(inv.id || '').toLowerCase().trim() === cleanNo;
+    });
+  };
 
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [prizmaSourceFilter, setPrizmaSourceFilter] = useState<'all' | 'prizma_only' | 'local_only'>(
@@ -1365,9 +1431,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                           hist.unitPrice === mat.maxUnitPrice &&
                           mat.minUnitPrice !== mat.maxUnitPrice;
 
-                        const targetInvoice = invoices.find(
-                          inv => inv.invoiceNumber === hist.invoiceNumber || inv.id === hist.invoiceId
-                        );
+                        const targetInvoice = findMatchingInvoiceForHistory(hist);
 
                         return (
                           <tr
@@ -1376,6 +1440,11 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                               if (targetInvoice) {
                                 setSelectedInvoiceForModal(targetInvoice);
                               } else {
+                                const grossU = Number(hist.originalUnitPrice || hist.unitPrice || 0);
+                                const qtyVal = Number(hist.originalQuantity || hist.quantity || 1);
+                                const vatPct = Number(hist.vatPercentage ?? 22);
+                                const vatDiv = vatPct > 0 ? (1 + vatPct / 100) : 1;
+                                const netU = Number(hist.originalNetUnitPrice || hist.unitPriceNet) || Number((grossU / vatDiv).toFixed(2));
                                 const constructedInvoice: InvoiceRecord = {
                                   id: hist.invoiceId || `inv_hist_${hist.invoiceNumber || hIdx}`,
                                   invoiceNumber: hist.invoiceNumber || 'BELİRSİZ',
@@ -1385,21 +1454,29 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                                   jobsiteName: hist.jobsiteName || (jobsites[0]?.name || 'SET OF3a'),
                                   uploadedBySupervisorId: (supervisors[0]?.id || 'sup_1'),
                                   uploadedBySupervisorName: (supervisors[0]?.name || 'Nuri Buga'),
-                                  totalAmount: hist.unitPrice * (hist.quantity || 1),
+                                  totalAmount: Number((grossU * qtyVal).toFixed(2)),
+                                  vatRate: vatPct,
                                   items: [
                                     {
                                       id: `item_hist_${hIdx}`,
                                       materialName: mat.materialName,
+                                      originalName: hist.originalName,
                                       category: mat.category,
-                                      unit: mat.unit || 'Adet',
-                                      quantity: hist.quantity || 1,
-                                      unitPrice: hist.unitPrice,
-                                      totalPrice: hist.unitPrice * (hist.quantity || 1)
+                                      unit: hist.originalUnit || mat.unit || 'Adet',
+                                      quantity: qtyVal,
+                                      unitPrice: netU,
+                                      unitPriceNet: netU,
+                                      grossUnitPrice: grossU,
+                                      totalPrice: Number((netU * qtyVal).toFixed(2)),
+                                      grossTotalPrice: Number((grossU * qtyVal).toFixed(2)),
+                                      vatPercentage: vatPct
                                     }
                                   ],
                                   created_at: hist.date || new Date().toISOString(),
                                   fileUrl: hist.fileUrl,
                                   rawFileName: hist.rawFileName,
+                                  prizmaDemandId: (hist as any).prizmaDemandId,
+                                  invoiceFileId: (hist as any).invoiceFileId,
                                   prizmaSource: hist.prizmaSource,
                                   prizmaRequestCode: hist.prizmaRequestCode,
                                   prizmaOrderCode: hist.prizmaOrderCode,
@@ -1832,11 +1909,11 @@ export const MaterialPriceComparison: React.FC<Props> = ({
             {/* Net Pricing & Zero-Freight Isolation Notice Banner */}
             {(() => {
               const freightEntries = mat.history.filter(h => {
-                const inv = invoices.find(i => i.invoiceNumber === h.invoiceNumber || i.id === h.invoiceId);
+                const inv = findMatchingInvoiceForHistory(h);
                 return (Number((h as any).excludedFreightAmount) || Number(inv?.excludedFreightAmount) || 0) > 0;
               });
               const totalExcludedFreight = freightEntries.reduce((sum, h) => {
-                const inv = invoices.find(i => i.invoiceNumber === h.invoiceNumber || i.id === h.invoiceId);
+                const inv = findMatchingInvoiceForHistory(h);
                 return sum + (Number((h as any).excludedFreightAmount) || Number(inv?.excludedFreightAmount) || 0);
               }, 0);
 
@@ -1935,14 +2012,17 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                         hist.unitPrice === mat.maxUnitPrice &&
                         mat.minUnitPrice !== mat.maxUnitPrice;
 
-                      const targetInvoice = invoices.find(
-                        inv => inv.invoiceNumber === hist.invoiceNumber || inv.id === hist.invoiceId
-                      );
+                      const targetInvoice = findMatchingInvoiceForHistory(hist);
 
                       const handleOpenInvoice = () => {
                         if (targetInvoice) {
                           setSelectedInvoiceForModal(targetInvoice);
                         } else {
+                          const grossU = Number(hist.originalUnitPrice || hist.unitPrice || 0);
+                          const qtyVal = Number(hist.originalQuantity || hist.quantity || 1);
+                          const vatPct = Number(hist.vatPercentage ?? 22);
+                          const vatDiv = vatPct > 0 ? (1 + vatPct / 100) : 1;
+                          const netU = Number(hist.originalNetUnitPrice || hist.unitPriceNet) || Number((grossU / vatDiv).toFixed(2));
                           const constructedInvoice: InvoiceRecord = {
                             id: hist.invoiceId || `inv_hist_${hist.invoiceNumber || hIdx}`,
                             invoiceNumber: hist.invoiceNumber || 'BELİRSİZ',
@@ -1952,21 +2032,29 @@ export const MaterialPriceComparison: React.FC<Props> = ({
                             jobsiteName: hist.jobsiteName || (jobsites[0]?.name || 'SET OF3a'),
                             uploadedBySupervisorId: (supervisors[0]?.id || 'sup_1'),
                             uploadedBySupervisorName: (supervisors[0]?.name || 'Nuri Buga'),
-                            totalAmount: hist.unitPrice * (hist.quantity || 1),
+                            totalAmount: Number((grossU * qtyVal).toFixed(2)),
+                            vatRate: vatPct,
                             items: [
                               {
                                 id: `item_hist_${hIdx}`,
                                 materialName: mat.materialName,
+                                originalName: hist.originalName,
                                 category: mat.category,
-                                unit: mat.unit || 'Adet',
-                                quantity: hist.quantity || 1,
-                                unitPrice: hist.unitPrice,
-                                totalPrice: hist.unitPrice * (hist.quantity || 1)
+                                unit: hist.originalUnit || mat.unit || 'Adet',
+                                quantity: qtyVal,
+                                unitPrice: netU,
+                                unitPriceNet: netU,
+                                grossUnitPrice: grossU,
+                                totalPrice: Number((netU * qtyVal).toFixed(2)),
+                                grossTotalPrice: Number((grossU * qtyVal).toFixed(2)),
+                                vatPercentage: vatPct
                               }
                             ],
                             created_at: hist.date || new Date().toISOString(),
                             fileUrl: hist.fileUrl,
                             rawFileName: hist.rawFileName,
+                            prizmaDemandId: (hist as any).prizmaDemandId,
+                            invoiceFileId: (hist as any).invoiceFileId,
                             prizmaSource: hist.prizmaSource,
                             prizmaRequestCode: hist.prizmaRequestCode,
                             prizmaOrderCode: hist.prizmaOrderCode,

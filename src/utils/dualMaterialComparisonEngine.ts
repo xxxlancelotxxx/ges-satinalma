@@ -1931,9 +1931,15 @@ function normalizeHistoryPackVsPieceOutliers(history: MaterialComparison['histor
       const totalPieces = Number((qty * packCount).toFixed(2));
       return {
         ...h,
+        originalUnitPrice: h.originalUnitPrice ?? price,
+        originalQuantity: h.originalQuantity ?? qty,
+        originalUnit: h.originalUnit || 'paket',
+        conversionApplied: true,
+        conversionFormula: `1 Paket (${packCount} adet) = ${price.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽ → ${perPiecePrice} ₽/adet`,
         normalizedUnitPrice: perPiecePrice,
         normalizedQuantity: totalPieces,
         unitPrice: perPiecePrice,
+        paidGrossUnitPrice: perPiecePrice,
         quantity: totalPieces
       };
     }

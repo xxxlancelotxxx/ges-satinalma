@@ -1,110 +1,92 @@
-# İndirim Alınmayan Faturalar (Doğrudan Fatura Girişleri) Denetim & Baskı Raporu Planı
+# Anomali Teşhisi, Piyasa Analizi ve Fatura İçi Fiyat Birebir Eşitleme Planı
 
-## 1. Amaç ve Kapsam
-Bu geliştirme, **Performans ve İndirim Raporu** ekranına, **AI Otomatik Fatura Okuma -> Sistemde Kayıtlı Faturalar & Malzeme Kalemleri** arşivinde yer alan ancak **Şef İndirim & TDF Teklif Merkezi** üzerinden indirim/pazarlık kaydı girilmemiş olan **İndirimsiz Doğrudan Faturaları** tespit eden, şef ve şantiye bazında karneleyen ve şeflere gönderilmek üzere **Excel (.xlsx)**, **PDF (Yazdırılabilir Kurumsal Rapor)** ve **HTML** formatlarında dışa aktaran yeni bir denetim modülü kazandırır.
+Anomali Teşhisi, Piyasa Analizi ve Fatura Geçmişi tablolarında görünen birim fiyatlar ile **"Fatura Gör"** butonuna tıklandığında açılan fatura detay ekranındaki birim fiyatların tüm sistem genelinde (%100 doğrulukla) birebir eşleşmesini sağlar ve Prizma ERP faturalarının gerçek içerik ve PDF belgeleriyle açılmasını kalıcı olarak çözer.
 
-Temel hedef; satınalma şeflerine indirim almadan doğrudan sisteme işledikleri faturaları somut liste ve tutarlarla iletmek, kaçırılan potansiyel indirim tutarını göstermek ve her bir fatura için **"Neden İndirim Alınmadı?"** sorusuna yazılı savunma/açıklama talep ederek pazarlık baskısı oluşturmaktır.
+## Kullanıcı Onayı ve Kritik Kararlar
+
+> [!IMPORTANT]
+> Sistem genelinde yapılan canlı veri denetiminde (467 GES Arşivi faturası, 634 Prizma ERP faturası ve 3.416 malzeme geçmişi satırı) XPS Carbon Prof 100 mm örneğindeki gibi tablo fiyatı (`7.487,04 ₽` / `7.000,00 ₽`) ile fatura detay ekranı (`7.553,25 ₽`) arasındaki farkın nedenleri tespit edilmiş ve aşağıdaki kararlar doğrultusunda kalıcı çözüm kurgulanmıştır:
+
+- **Onaylanan Karar 1 (Fiyat Bazı)**: Anomali ve fiyat geçmişi tablolarında yapay `%20 -> %22` KDV yeniden ölçeklemesi yapılmayacak; faturadaki **gerçek KDV dahil ödenen birim fiyat** birebir gösterilecektir.
+- **Onaylanan Karar 2 (Üst Özet Kartları)**: Anomali detay penceresinin üst özet alanında **En Düşük Birim Fiyat (Baz Fatura)**, **En Yüksek Birim Fiyat (Tepe Fatura)** ve **Son Fatura Birim Fiyatı (Güncel Alım)** ayrı kartlar halinde net olarak gösterilecektir.
 
 ---
 
-## 2. Onaylanan Kullanıcı Kararları
-1. **Raporlama ve Gruplama Yapısı**: Hem **Şef Bazlı Özet Karne** (şefin toplam fatura adedi, indirimli fatura adedi, indirimsiz fatura adedi/oranı, indirimsiz toplam fatura hacmi ve hedef orana göre kaçırılan potansiyel indirim tutarı) hem de **Detaylı Fatura Listesi** (şef, şantiye, tedarikçi firma, fatura numarası, fatura tarihi, kalem sayısı, toplam tutar, tahmini kayıp tutarı ve şef savunma alanı) bir arada sunulacaktır.
-2. **Çıktı Sütunları ve Denetim Alanları**: Ekranda ve indirilen **Excel, PDF, HTML** raporlarında; ayarlanabilir hedef indirim oranına (varsayılan `%5`, kullanıcı tarafından `%3`, `%5`, `%10` vb. değiştirilebilir) göre hesaplanan **Tahmini Kayıp İndirim Tutarı** sütunu ve şeflerin doldurması veya yönetimin not düşmesi için **Neden İndirim Alınmadı? (Şef Savunma / Açıklama)** sütunu yer alacaktır.
+## 1. Genel Bakış ve Kök Neden Çözümü
+
+- **Ne Yapar**:
+  1. **Prizma ERP Faturalarının Tam Bağlantısı (1.586 Satır)**: XPS Carbon Prof 100 mm örneğindeki `1964` (`7.487,04 ₽`), `1978` (`7.000,00 ₽`), `1887` (`7.553,25 ₽`), `1647` (`7.553,25 ₽`), `1066` (`7.553,25 ₽`) ve `465` (`6.250,00 ₽`) gibi Prizma ERP kaynaklı faturalara tıklandığında uyarı kartının tepe fiyatını (`7.553,25 ₽`) koyan hatalı yedek (fallback) mekanizma kaldırılır; doğrudan ilgili Prizma faturasının gerçek kalemleri, gerçek birim fiyatı ve orijinal `Счет на оплату` PDF belgesi açılır.
+  2. **Gerçek KDV Dahil Fiyatın Korunması (59 Satır)**: Faturada gerçek KDV dahil fiyatı (`grossUnitPrice`) belli olan kalemlerin `%20` KDV'den `%22`'ye yapay olarak çarpılması ve zaten KDV'si ayrıştırılmış kalemlerin çapraz KDV kontrolünde ikinci kez bölünüp çarpılması engellenir.
+  3. **En Düşük, En Yüksek ve Son Fatura Ayrımı**: Şantiyeler arası fiyat farkı (`JOBSITE_PRICE_GAP`) uyarılarında geçmişteki en yüksek fiyatlı faturanın (`7.553,25 ₽`, Haziran) yanlışlıkla "Son Fatura Birim Fiyatı" olarak yazılması düzeltilir; en son tarihli fatura (`7.487,04 ₽`, Ekim) ile en yüksek ve en düşük faturalar ayrı ayrı gösterilir.
+- **Hedef Kullanıcılar**: Satınalma yöneticileri, şantiye şefleri ve maliyet kontrol ekibi.
+- **Temel Kazanım**: Tabloda hangi rakam yazıyorsa faturanın içine girildiğinde de kuruşu kuruşuna aynı rakam ve gerçek fatura belgesi görülür.
 
 ---
 
-## 3. Mimari ve Veri Akış Şeması
+## 2. Kullanıcı Deneyimi ve Görsel Tasarım
 
-```text
-+-----------------------------------------------------------------------------------+
-|                        VERİ KAYNAKLARI (CANLI FIRESTORE)                          |
-+-----------------------------------------+-----------------------------------------+
-                                          |
-                  +-----------------------+-----------------------+
-                  v                                               v
-  [Sistemde Kayıtlı Faturalar]                    [Şef İndirim & TDF Kayıtları]
-  (GES Arşivi Fatura & Kalemleri)                 (Pazarlık / TDF İndirim Kayıtları)
-                  |                                               |
-                  +-----------------------+-----------------------+
-                                          |
-                                          v
-+-----------------------------------------------------------------------------------+
-|                İNDİRİMSİZ FATURA EŞLEŞTİRME & AYIKLAMA MOTORU                     |
-|  1. Silinmiş (Çöp Kutusu) ve Prizma ERP referans kayıtlarını hariç tut            |
-|  2. İndirim Merkezinden senkronize edilen (inv_sync_ / discountId) kayıtları ele  |
-|  3. Normalize edilmiş Fatura No veya (Tedarikçi + Tarih + Tutar) eşleşmesini ele  |
-|  => KALANLAR: İndirim Alınmadan Doğrudan Girilen Faturalar                        |
-+-----------------------------------------------------------------------------------+
-                                          |
-                                          v
-+-----------------------------------------------------------------------------------+
-|            PERFORMANS VE İNDİRİM RAPORU -> İNDİRİMSİZ FATURA DENETİMİ             |
-|                                                                                   |
-|  +-----------------------------------------------------------------------------+  |
-|  | A. Filtre & Kontrol Barı                                                    |  |
-|  | - Şef Seçimi | Şantiye Seçimi | Tedarikçi / Fatura No Arama | Tarih Aralığı |  |
-|  | - Hedef İndirim Oranı Seçici (%3, %5, %7, %10)                              |  |
-|  | - Tek Tıkla İndir: [Excel (.xlsx)]  [PDF Raporu]  [HTML Dosyası]            |  |
-|  +-----------------------------------------------------------------------------+  |
-|  | B. Üst KPI & Şef Bazlı İndirimsiz Fatura Karnesi                            |  |
-|  | - Toplam İndirimsiz Fatura Adedi & Hacmi (RUB / TRY / USD / EUR)            |  |
-|  | - Şef Karnesi Tablosu: Şef | Şantiye | Toplam Fatura | İndirimsiz Adet (%)  |  |
-|  |   | İndirimsiz Tutar | Kaçırılan Potansiyel İndirim | "Sadece Bu Şefi İndir"|  |
-|  +-----------------------------------------------------------------------------+  |
-|  | C. Detaylı İndirimsiz Faturalar & Kalem Denetim Tablosu                     |  |
-|  | - Sütunlar: Tarih | Şef & Şantiye | Tedarikçi Firma | Fatura No | Kalemler  |  |
-|  |   | Fatura Tutarı | Tahmini Kayıp (%X) | Neden İndirim Alınmadı? (Savunma)  |  |
-|  | - Satır genleştiğinde faturadaki malzeme kalemlerini ve birim fiyatları gör |  |
-|  +-----------------------------------------------------------------------------+  |
-+-----------------------------------------------------------------------------------+
+- **Kullanıcı Akışı**:
+  1. Kullanıcı **Anomali Teşhisi** veya **Birim Fiyat Kıyaslama** ekranında bir malzemenin detay penceresini açar.
+  2. Üst bölümde **4 net özet kart** yer alır:
+     - **En Düşük Birim Fiyat (Baz)**: Ör. `6.250,00 ₽ / m³` (`Fatura 465 • 2026-04-09 • Nuri Buga`)
+     - **En Yüksek Birim Fiyat (Tepe)**: Ör. `7.553,25 ₽ / m³` (`Fatura 1066 • 2026-06-26 • Nuri Buga`)
+     - **Son Fatura Birim Fiyatı (Güncel)**: Ör. `7.487,04 ₽ / m³` (`Fatura 1964 • 2026-10-13 • Nuri Buga`)
+     - **Fiyat Farkı & Mali Etki**: En düşük baz ile tepe/son alım arasındaki yüzdesel sapma ve toplam ruble etkisi.
+  3. Alt kısımdaki **Tüm Zamanların Fatura Geçmişi** tablosunda her satırın yanında duruma göre **En Düşük Baz**, **En Yüksek Fiyat** ve **Son Alım** rozetleri gösterilir.
+  4. Kullanıcı tablodaki herhangi bir satırda (`1964`, `1978` vb.) **"Fatura Gör"** butonuna tıkladığında, o faturanın gerçek Prizma veya GES Arşivi kaydı (`7.487,04 ₽`, `7.000,00 ₽` vb.) ve orijinal PDF faturası açılır.
+- **Görsel Kimlik ve Tema**:
+  - *Estetik Yönelim*: Finansal denetim netliği sağlayan kurumsal veri arayüzü.
+  - *Renk Paleti*: En düşük baz fiyat için zümrüt yeşili (`emerald`), en yüksek tepe fiyat için kırmızı/kehribar (`rose`/`amber`), güncel son fatura için çivit/mavi (`indigo`) vurgu tonları.
+  - *Tipografi*: Tüm birim fiyatlar ve toplam tutarlar `tabular-nums` (hizalı rakam) formatında, KDV durumu (`KDV Dahil Ödenen`) açıkça belirtilerek sunulur.
+
+---
+
+## 3. Temel Mimari Kararlar ve Gerekçeleri
+
+- **Karar 1: Birleşik Fatura Çözümleme Havuzu (GES Arşivi + Prizma ERP)**
+  - *Seçilen Yaklaşım*: Firestore'daki `invoices` (467 kayıt) ve `prizma_invoices` (634 kayıt) veritabanında izole kalmaya devam ederken, arayüzde fatura detay çözümleme haritası her iki kaynağı da (`invoiceId` -> `invoiceNumber + supplier` -> `invoiceNumber` öncelik sırasıyla) tarar.
+  - *Neden*: GES Arşivi sayımlarını (`invoices: 467, discounts: 261`) bozmadan 1.586 Prizma fatura satırının tamamının gerçek fatura verisi ve PDF'i ile açılmasını sağlar.
+- **Karar 2: Fatura İçi KDV Dahil Gerçek Fiyatın (`paidGrossUnitPrice`) Esas Alınması**
+  - *Seçilen Yaklaşım*: Fatura kaleminde doğrulanmış KDV dahil birim fiyat mevcut olduğunda karşılaştırma motoru bu fiyatı doğrudan korur; yalnızca fiziksel birim dönüşümü (ör. paket -> m³, ton -> kg) varsa standart birime çevirir ve faturadaki orijinal birim fiyatını da yanında tutar.
+  - *Neden*: `%20` KDV'li eski faturaların `%22` ile çarpılarak faturada yazmayan sanal rakamlar üretmesini ve kullanıcıda "fatura içi ile tablo uyuşmuyor" algısı oluşmasını tamamen ortadan kaldırır.
+
+---
+
+## 4. Teknik Mimari ve Veri Akışı
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   VERİ KAYNAKLARI (Firestore İzole)                     │
+│   ┌────────────────────────────┐     ┌──────────────────────────────┐   │
+│   │ GES Arşivi (467 Fatura)    │     │ Prizma ERP (634 Fatura)      │   │
+│   └─────────────┬──────────────┘     └──────────────┬───────────────┘   │
+└─────────────────┼───────────────────────────────────┼───────────────────┘
+                  │                                   │
+                  ▼                                   ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│          KARŞILAŞTIRMA & ANOMALİ MOTORU (Gerçek KDV Dahil Fiyat)        │
+│  • Doğrulanmış grossUnitPrice / netUnitPrice kalemlerde çapraz KDV      │
+│    bölme/çarpma (Step A/B) devre dışı bırakılır                         │
+│  • Tablo birim fiyatı = Faturadaki gerçek KDV dahil birim fiyat         │
+│  • Her geçmiş satırına invoiceId, prizmaDemandId, invoiceFileId eklenir │
+└─────────────────────────────────┬───────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│            ANOMALİ TEŞHİSİ & PİYASA ANALİZİ DETAY PENCERESİ             │
+│  ┌──────────────────────┬──────────────────────┬─────────────────────┐  │
+│  │ En Düşük Birim Fiyat │ En Yüksek Birim Fiyat│ Son Fatura Fiyatı   │  │
+│  │ (Baz Fatura & Tarih) │ (Tepe Fatura & Tarih)│ (Güncel Alım & No)  │  │
+│  └──────────────────────┴──────────────────────┴─────────────────────┘  │
+│                                 │                                       │
+│                    "Fatura Gör" │ (invoiceId / prizmaDemandId)          │
+│                                 ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │ FATURA DETAY PENCERESİ (Gerçek Kalemler + Prizma/GES PDF Önizleme)│  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 4. Kullanıcı Deneyimi (UX) ve Görsel Tasarım
-
-### A. Sekme ve Görünüm Geçişi
-- **Performans ve İndirim Raporu** ekranının üst kısmına belirgin bir görünüm seçici eklenecektir:
-  1. **Genel Performans & İndirim Analizi** (Mevcut görünüm)
-  2. **İndirim Alınmayan Faturalar Denetimi (Baskı & Sorgu Raporu)** (Yeni görünüm — üzerinde tespit edilen indirimsiz fatura sayısı rozeti ile)
-
-### B. Üst Özet Kartları ve Şef Bazlı Özet Karne
-- **4 Kritik Denetim Kartı**:
-  - **İndirimsiz Fatura Sayısı**: Toplam fatura içindeki payı (`%`) ile birlikte.
-  - **İndirimsiz Toplam Fatura Hacmi**: İndirim alınmadan doğrudan onaylanan faturaların toplam tutarı.
-  - **Kaçırılan Potansiyel İndirim (Tahmini Kayıp)**: Seçili hedef indirim oranına (örn. `%5`) göre masada bırakılan toplam tutar.
-  - **En Çok İndirimsiz Fatura Giren Şef**: Odaklanılması gereken ilk sorumluyu gösteren uyarı kartı.
-- **Şef Bazlı İndirimsiz Fatura Karnesi Tablosu**:
-  - Her satınalma şefi için: *Şef Adı*, *Şantiyesi*, *Toplam Fatura Sayısı*, *İndirimli Fatura Sayısı*, *İndirimsiz Fatura Sayısı*, *İndirimsiz Giriş Oranı (%)*, *İndirimsiz Fatura Toplamı* ve *Tahmini Kayıp İndirim Tutarı*.
-  - Her şef satırının sağında **"Bu Şefin Sorgu Raporunu İndir (Excel / PDF / HTML)"** hızlı aksiyon butonları yer alacak; böylece yöneticiler tek tıkla ilgili şefe sadece kendi indirimsiz faturalarını içeren dosyayı gönderebilecektir.
-
-### C. Detaylı İndirimsiz Fatura Listesi ve Kalem İnceleme
-- **Filtreleme**: Satınalma Şefi, Şantiye, Tedarikçi Firma / Fatura No arama kutusu, Başlangıç–Bitiş Fatura Tarihi ve Para Birimi filtresi.
-- **Tablo Sütunları**:
-  1. **Sıra No**
-  2. **Fatura Tarihi & Kayıt Tarihi**
-  3. **Satınalma Şefi & Şantiye**
-  4. **Tedarikçi Firma**
-  5. **Fatura Numarası** (Orijinal PDF/Görsel varsa tek tıkla görüntüleme ikonu ile)
-  6. **Kalem Sayısı & Özeti** (Tıklandığında alt satırda faturanın tüm malzeme kalemlerini, miktar ve birim fiyatlarını açar)
-  7. **Fatura Toplam Tutarı** (`tabular-nums` hizalı)
-  8. **Tahmini Kayıp İndirim (`%Hedef`)** (Kırmızı vurgu ile)
-  9. **Neden İndirim Alınmadı? (Şef Savunma / Açıklama)**: Ekrandan da anlık not yazılabilir, çıktılarda ise şefin doldurması için belirgin kutucuklu sütun olarak yer alır.
-
----
-
-## 5. Kurumsal Dışa Aktarım (Excel, PDF ve HTML) Tasarımı
-
-### 1. Kurumsal Excel (`.xlsx`) Çıktısı
-- **1. Sayfa — "Şef Özet Karnesi"**:
-  - Kurumsal lacivert/kırmızı başlık bloğu, rapor tarihi, seçili filtre özeti ve hedef indirim oranı bilgisi.
-  - Şef bazlı toplam fatura, indirimli fatura, indirimsiz fatura adedi, indirimsiz tutar ve kaçırılan potansiyel indirim tablosu.
-- **2. Sayfa — "İndirimsiz Faturalar Sorgu Listesi"**:
-  - Sütunlar: `Sıra No`, `Fatura Tarihi`, `Satınalma Şefi`, `Şantiye`, `Tedarikçi Firma`, `Fatura No`, `Kalem Sayısı`, `Ana Kalemler Özeti`, `Fatura Tutarı`, `Para Birimi`, `Hedef İndirim (%)`, `Tahmini Kayıp İndirim Tutarı`, `NEDEN İNDİRİM ALINMADI? (ŞEF SAVUNMA / AÇIKLAMA)`.
-  - Savunma sütunu sarı/açık turuncu vurgu rengiyle ve geniş sütun genişliğiyle (`45px`) biçimlendirilir; böylece şef Excel dosyasını açıp doğrudan her faturanın karşısına açıklamasını yazıp geri gönderebilir.
-
-### 2. Kurumsal PDF & HTML Rapor Çıktısı
-- Üst kısımda **"İNDİRİM ALINMAYAN FATURALAR DENETİM VE SAVUNMA FORMU"** başlığı ve resmi uyarı notu (*"Aşağıda listelenen faturalar Şef İndirim & TDF Teklif Merkezi üzerinden herhangi bir pazarlık/indirim kaydı olmaksızın doğrudan sisteme işlenmiştir. Her bir fatura için neden indirim alınmadığını ve rekabetçi teklif toplanmama gerekçesini ilgili sütuna işleyerek yönetime iletiniz."*).
-- Üstte **Şef Bazlı Özet Karne**, altında **Detaylı Fatura Tablosu** ve en altta **Satınalma Şefi İmza / Teslim Tarihi** ile **Satınalma Müdürü Onay** blokları yer alır.
-- **HTML İndir** butonu tek dosya halinde tüm stilleri gömülü `.html` dosyası indirir (WhatsApp, e-posta veya Telegram üzerinden şefe doğrudan gönderilebilir).
-- **PDF İndir / Yazdır** butonu yatay (`Landscape A4`) formatta, sayfa taşması olmadan temiz baskı/PDF penceresi açar.
+### Durum ve Etkileşim Eşleştirmesi
+- **Fatura Detay Açılışı**: Satırdaki `invoiceId` veya `invoiceNumber + supplier` üzerinden gerçek fatura nesnesi bulunur. İstisnai olarak kayıt bulunamazsa dahi uyarı kartının tepe fiyatı (`currentPrice`) **asla** kullanılmaz; tıklanan satırın kendi `unitPrice`, `netUnitPrice`, `grossUnitPrice`, `quantity`, `supplier` ve `date` bilgileriyle birebir gösterim yapılır.
+- **Prizma PDF Görüntüleme**: Prizma kaynaklı faturalarda `prizmaDemandId` / `invoiceFileId` üzerinden orijinal PDF (`Счет на оплату`) doğrudan fatura detay penceresinde yüklenir.

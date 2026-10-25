@@ -38,15 +38,41 @@ export interface AnomalyAlert {
   description: string;
   recommendation: string;
   invoiceNo?: string;
+  invoiceId?: string;
   quantity?: number;
   unit?: string;
   russianSubtitle?: string;
   minUnitPrice?: number;
+  minInvoiceNo?: string;
+  minInvoiceId?: string;
+  minSupplier?: string;
+  minJobsiteName?: string;
+  minDateStr?: string;
   maxUnitPrice?: number;
+  maxInvoiceNo?: string;
+  maxInvoiceId?: string;
+  maxSupplier?: string;
+  maxJobsiteName?: string;
+  maxDateStr?: string;
+  latestPrice?: number;
+  latestInvoiceNo?: string;
+  latestInvoiceId?: string;
+  latestSupplier?: string;
+  latestJobsiteName?: string;
+  latestDateStr?: string;
   avgUnitPrice?: number;
   historyRows?: Array<{
     date: string;
     invoiceNo: string;
+    invoiceId?: string;
+    prizmaDemandId?: number | string;
+    invoiceFileId?: number | string;
+    prizmaRequestCode?: string;
+    prizmaOrderCode?: string;
+    prizmaBtfUrl?: string;
+    prizmaStfUrl?: string;
+    fileUrl?: string;
+    rawFileName?: string;
     supplier: string;
     jobsiteName: string;
     quantity: number;
@@ -54,8 +80,13 @@ export interface AnomalyAlert {
     unitPrice: number;
     netUnitPrice?: number;
     grossUnitPrice?: number;
+    paidGrossUnitPrice?: number;
     vatPercentage?: number;
     originalName?: string;
+    originalUnitPrice?: number;
+    originalQuantity?: number;
+    originalUnit?: string;
+    conversionApplied?: boolean;
     conversionFormula?: string;
   }>;
   marketCluster?: 'STEEL_REBAR' | 'CONCRETE_CEMENT' | 'COPPER_CABLE' | 'LOGISTICS_GAP' | 'GENERAL';
@@ -141,7 +172,7 @@ export interface PriceAnomalyOptions {
   getMarketCluster: (materialName: string, category: string) => AnomalyAlert['marketCluster'];
 }
 
-const unitPriceOf = (h: any) => Number(h.normalizedUnitPrice || h.unitPrice || 0);
+const unitPriceOf = (h: any) => Number(h.paidGrossUnitPrice || h.normalizedUnitPrice || h.unitPrice || 0);
 const quantityOf = (h: any) => Number(h.normalizedQuantity || h.quantity || 1);
 const isVatRatio = (ratio: number) => Math.abs(ratio - 1.22) <= 0.006 || Math.abs(ratio - 1.20) <= 0.006;
 // Sunucu her satırın KDV tabanını fatura toplamıyla doğruladıysa (vatBasisVerified) 1,20x / 1,22x fark gerçektir, KDV karışıklığı değildir.
@@ -185,13 +216,22 @@ function withoutPriceOutliers(rows: any[]): any[] {
 
 function mapHistoryRows(comp: MaterialComparison, rows: any[], stdUnit: string): NonNullable<AnomalyAlert['historyRows']> {
   return rows.map((h: any) => {
-    // unitPriceOf = kıyaslama fiyatı (sunucuda %22 KDV dahil); net yalnızca bilgi amaçlı gösterilir
     const grossUp = unitPriceOf(h);
-    const vatPct = Number(h.vatPercentage) || 22;
-    const netUp = Number(h.normalizedNetUnitPrice || h.unitPriceNet) || Number((grossUp / 1.22).toFixed(2));
+    const vatPct = Number(h.vatPercentage ?? 22);
+    const vatDivisor = vatPct > 0 ? (1 + vatPct / 100) : 1;
+    const netUp = Number(h.normalizedNetUnitPrice || h.unitPriceNet) || Number((grossUp / vatDivisor).toFixed(2));
     return {
       date: (h.date || '').split('T')[0],
       invoiceNo: h.invoiceNumber || 'Fatura',
+      invoiceId: h.invoiceId,
+      prizmaDemandId: h.prizmaDemandId,
+      invoiceFileId: h.invoiceFileId,
+      prizmaRequestCode: h.prizmaRequestCode,
+      prizmaOrderCode: h.prizmaOrderCode,
+      prizmaBtfUrl: h.prizmaBtfUrl || h.prizmaUrl,
+      prizmaStfUrl: h.prizmaStfUrl,
+      fileUrl: h.fileUrl,
+      rawFileName: h.rawFileName,
       supplier: h.supplier || 'Tedarikçi',
       jobsiteName: h.jobsiteName || 'Genel Şantiye',
       quantity: quantityOf(h),
@@ -199,8 +239,13 @@ function mapHistoryRows(comp: MaterialComparison, rows: any[], stdUnit: string):
       unitPrice: grossUp,
       netUnitPrice: netUp,
       grossUnitPrice: grossUp,
+      paidGrossUnitPrice: Number(h.paidGrossUnitPrice || grossUp),
       vatPercentage: vatPct,
       originalName: ensureRussianOriginalName(comp.materialName, h.originalName),
+      originalUnitPrice: Number(h.originalPaidGrossUnitPrice || h.originalUnitPrice || grossUp),
+      originalQuantity: Number(h.originalQuantity || quantityOf(h)),
+      originalUnit: h.originalUnit || stdUnit,
+      conversionApplied: Boolean(h.conversionApplied),
       conversionFormula: h.conversionFormula
     };
   });
@@ -232,6 +277,9 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
       const sortedByPrice = [...rows].sort((a, b) => unitPriceOf(a) - unitPriceOf(b));
       const cheapestRec = sortedByPrice[0];
       const priciestRec = sortedByPrice[sortedByPrice.length - 1];
+      const sortedChronological = [...rows].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      const latestClusterRec = sortedChronological[0] || priciestRec;
+
       const clusterTech = extractTechnicalStandardAndGrade(
         priciestRec?.originalName || cheapestRec?.originalName || '',
         comp.materialName
@@ -243,6 +291,7 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
         : baseClusterMatName;
       const minUnitPrice = unitPriceOf(cheapestRec);
       const maxUnitPrice = unitPriceOf(priciestRec);
+      const latestClusterPrice = unitPriceOf(latestClusterRec);
       const avgUnitPrice = Number((rows.reduce((s: number, h: any) => s + unitPriceOf(h), 0) / rows.length).toFixed(2));
 
       // 1. Same Supplier Price Hike Detection (Canonical Elma-Elma Normalized Comparisons)
@@ -296,12 +345,29 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
           previousPrice: prevPrice,
           currentPrice: currPrice,
           minUnitPrice,
+          minInvoiceNo: cheapestRec?.invoiceNumber,
+          minInvoiceId: cheapestRec?.invoiceId,
+          minSupplier: cheapestRec?.supplier,
+          minJobsiteName: cheapestRec?.jobsiteName,
+          minDateStr: (cheapestRec?.date || '').split('T')[0],
           maxUnitPrice,
+          maxInvoiceNo: priciestRec?.invoiceNumber,
+          maxInvoiceId: priciestRec?.invoiceId,
+          maxSupplier: priciestRec?.supplier,
+          maxJobsiteName: priciestRec?.jobsiteName,
+          maxDateStr: (priciestRec?.date || '').split('T')[0],
+          latestPrice: currPrice,
+          latestInvoiceNo: latest.invoiceNumber,
+          latestInvoiceId: latest.invoiceId,
+          latestSupplier: latest.supplier,
+          latestJobsiteName: latest.jobsiteName,
+          latestDateStr: (latest.date || '').split('T')[0],
           avgUnitPrice,
           percentageChange: pctIncrease,
           financialImpact: totalImpact,
           dateStr: (latest.date || '').split('T')[0],
           invoiceNo: latest.invoiceNumber,
+          invoiceId: latest.invoiceId,
           quantity: currQty,
           unit: stdUnit,
           historyRows: mappedHistoryRows,
@@ -350,12 +416,29 @@ export function buildSameMaterialPriceAlerts(mode1Comparisons: MaterialCompariso
         previousPrice: minUnitPrice,
         currentPrice: maxUnitPrice,
         minUnitPrice,
+        minInvoiceNo: cheapestRec?.invoiceNumber,
+        minInvoiceId: cheapestRec?.invoiceId,
+        minSupplier: cheapestRec?.supplier,
+        minJobsiteName: cheapestRec?.jobsiteName,
+        minDateStr: (cheapestRec?.date || '').split('T')[0],
         maxUnitPrice,
+        maxInvoiceNo: priciestRec?.invoiceNumber,
+        maxInvoiceId: priciestRec?.invoiceId,
+        maxSupplier: priciestRec?.supplier,
+        maxJobsiteName: priciestRec?.jobsiteName,
+        maxDateStr: (priciestRec?.date || '').split('T')[0],
+        latestPrice: latestClusterPrice,
+        latestInvoiceNo: latestClusterRec?.invoiceNumber,
+        latestInvoiceId: latestClusterRec?.invoiceId,
+        latestSupplier: latestClusterRec?.supplier,
+        latestJobsiteName: latestClusterRec?.jobsiteName,
+        latestDateStr: (latestClusterRec?.date || '').split('T')[0],
         avgUnitPrice,
         percentageChange: priceDiffPct,
         financialImpact: totalImpact,
         dateStr: (priciestRec?.date || new Date().toISOString()).split('T')[0],
         invoiceNo: priciestRec?.invoiceNumber,
+        invoiceId: priciestRec?.invoiceId,
         unit: stdUnit,
         historyRows: mappedHistoryRows,
         marketCluster: 'LOGISTICS_GAP',

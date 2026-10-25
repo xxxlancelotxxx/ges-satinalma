@@ -885,8 +885,25 @@ app.get(['/api/files/:filename(*)', '/api/files/drive/:filename(*)'], async (req
         ? (matchedDisc ? { ...matchedDisc, ...matchedInv } : matchedInv)
         : matchedDisc;
 
-      if (recordToRender) {
-        const pdfBuf = await generateArchivePdf(recordToRender, cleanFilename);
+      let finalRecordToRender: any = recordToRender;
+      if (!finalRecordToRender) {
+        const prizmaList = await prizmaSyncService.getInvoicesCached().catch(() => []);
+        const matchedPrizma = (prizmaList || []).find((p: any) => {
+          const pNorm = normalizeSingleInvoicePricingAndFreight({ ...p }, p);
+          return (
+            (p.rawFileName && String(p.rawFileName).toLowerCase() === lowerClean) ||
+            (p.id && lowerClean.includes(String(p.id).toLowerCase())) ||
+            uniqueCandidates.includes(String(p.invoiceNumber || '').toLowerCase()) ||
+            uniqueCandidates.includes(String(pNorm.invoiceNumber || '').toLowerCase())
+          );
+        });
+        if (matchedPrizma) {
+          finalRecordToRender = normalizeSingleInvoicePricingAndFreight({ ...matchedPrizma }, matchedPrizma);
+        }
+      }
+
+      if (finalRecordToRender) {
+        const pdfBuf = await generateArchivePdf(finalRecordToRender, cleanFilename);
         if (bucket) {
           bucket.file(`faturalar/${cleanFilename}`).save(pdfBuf, {
             resumable: false,
@@ -1687,8 +1704,10 @@ function enrichAndNormalizeInvoiceRecords(records: any[], prizmaInvs: any[]): an
         }
 
         // Case 2: Item was NOT divided by VAT (or was entered with VAT in STF/Portal), so curNet / 1.22 (or 1.20) matches a confirmed Net price
+        // CRITICAL: Never divide a second time if Pass 1 already separated curGross and curNet!
+        const wasAlreadyDividedByVat = (curGross > curNet * 1.05) || Boolean(it.isNetNormalized) || it.lineSource === 'invoice_pdf';
         const alreadyMatchesConfirmedNet = confirmedList.some(cNet => Math.abs(curNet - cNet) / cNet <= 0.008);
-        if (!alreadyMatchesConfirmedNet) {
+        if (!wasAlreadyDividedByVat && !alreadyMatchesConfirmedNet) {
           for (const testVat of [vatPct, 22, 20]) {
             if (!(testVat > 0)) continue;
             const testFactor = 1 + testVat / 100;
@@ -7160,6 +7179,9 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
             existingMatch.prizmaSource = isMatchPurePrizma;
             existingMatch.origin = isMatchPurePrizma ? 'prizma' : 'ges_archive';
             existingMatch.prizmaLinked = true;
+            existingMatch.prizmaDemandId = (pInv as any).prizmaDemandId || existingMatch.prizmaDemandId;
+            existingMatch.invoiceFileId = (pInv as any).invoiceFileId || existingMatch.invoiceFileId;
+            existingMatch.rawFileName = pInv.rawFileName || existingMatch.rawFileName;
             existingMatch.prizmaRequestCode = pInv.prizmaRequestCode || existingMatch.prizmaRequestCode;
             existingMatch.prizmaOrderCode = pInv.prizmaOrderCode || existingMatch.prizmaOrderCode;
             existingMatch.prizmaBtfUrl = pInv.prizmaBtfUrl || existingMatch.prizmaBtfUrl;
@@ -7176,6 +7198,8 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
               existingMatch.items = pInv.items.map(it => ({
                 ...it,
                 ...(basisVerified ? { vatBasisVerified: true } : {}),
+                prizmaDemandId: (pInv as any).prizmaDemandId,
+                invoiceFileId: (pInv as any).invoiceFileId,
                 prizmaRequestCode: pInv.prizmaRequestCode,
                 prizmaOrderCode: pInv.prizmaOrderCode,
                 prizmaBtfUrl: pInv.prizmaBtfUrl,
@@ -7184,6 +7208,8 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
               }));
             } else if (Array.isArray(existingMatch.items)) {
               existingMatch.items.forEach((it: any) => {
+                it.prizmaDemandId = (pInv as any).prizmaDemandId || it.prizmaDemandId;
+                it.invoiceFileId = (pInv as any).invoiceFileId || it.invoiceFileId;
                 it.prizmaRequestCode = pInv.prizmaRequestCode || it.prizmaRequestCode;
                 it.prizmaOrderCode = pInv.prizmaOrderCode || it.prizmaOrderCode;
                 it.prizmaBtfUrl = pInv.prizmaBtfUrl || it.prizmaBtfUrl;
@@ -7203,10 +7229,16 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
               uploadedBySupervisorId: '',
               uploadedBySupervisorName: pInv.prizmaCreatedBy || 'Prizma ERP',
               totalAmount: pInv.totalAmount,
+              rawFileName: pInv.rawFileName,
+              fileUrl: (pInv as any).fileUrl,
+              prizmaDemandId: (pInv as any).prizmaDemandId,
+              invoiceFileId: (pInv as any).invoiceFileId,
               excludedFreightAmount: (pInv as any).excludedFreightAmount,
               excludedFreightGrossAmount: (pInv as any).excludedFreightGrossAmount,
               items: pInv.items.map(it => ({
                 ...it,
+                prizmaDemandId: (pInv as any).prizmaDemandId,
+                invoiceFileId: (pInv as any).invoiceFileId,
                 prizmaRequestCode: pInv.prizmaRequestCode,
                 prizmaOrderCode: pInv.prizmaOrderCode,
                 prizmaBtfUrl: pInv.prizmaBtfUrl,
@@ -7683,7 +7715,9 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
         const effectiveNetUnitPrice = conv.conversionApplied ? conv.convertedUnitPrice : priceNum;
         const effectiveQuantity = conv.conversionApplied ? conv.convertedQuantity : quantity;
         const grossMultiplier = priceNum > 0 ? (grossPriceNum / priceNum) : (1 + vatPct / 100);
-        const effectiveGrossUnitPrice = Number((effectiveNetUnitPrice * grossMultiplier).toFixed(2));
+        const effectiveGrossUnitPrice = conv.conversionApplied
+          ? Number((effectiveNetUnitPrice * grossMultiplier).toFixed(2))
+          : Number(grossPriceNum.toFixed(2));
 
         const resolvedOrigName = ensureRussianOriginalName(matGroup.materialName, item.originalName || item.materialName);
 
@@ -7705,61 +7739,6 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
           vatBasisVerified: Boolean(item.vatBasisVerified)
         });
       });
-
-      // Cross-Invoice Historical VAT Ratio Reconciliation within the same benchmarked material group:
-      // Ensure no entry remains 1.20x or 1.22x off due to VAT-inclusive vs VAT-exclusive entry
-      if (rawHistory.length > 1) {
-        // Step A: If an ambiguous Portal entry was divided by VAT, check if its effectiveGrossUnitPrice equals a non-ambiguous entry's effectiveNetUnitPrice
-        for (const entry of rawHistory) {
-          if (!entry.isPortalAmbiguous || entry.vatBasisVerified) continue;
-          const matchedPeer = rawHistory.find(other =>
-            other !== entry &&
-            !other.isPortalAmbiguous &&
-            other.effectiveNetUnitPrice > 0 &&
-            Math.abs(entry.effectiveGrossUnitPrice - other.effectiveNetUnitPrice) / other.effectiveNetUnitPrice <= 0.008
-          );
-          const alreadyMatchesNet = rawHistory.some(other =>
-            other !== entry &&
-            !other.isPortalAmbiguous &&
-            other.effectiveNetUnitPrice > 0 &&
-            Math.abs(entry.effectiveNetUnitPrice - other.effectiveNetUnitPrice) / other.effectiveNetUnitPrice <= 0.008
-          );
-          if (matchedPeer && !alreadyMatchesNet) {
-            const vFactor = entry.vatPct > 0 ? (1 + entry.vatPct / 100) : 1.22;
-            entry.effectiveNetUnitPrice = matchedPeer.effectiveNetUnitPrice;
-            entry.effectiveGrossUnitPrice = Number((entry.effectiveNetUnitPrice * vFactor).toFixed(2));
-            entry.originalNetUnitPrice = entry.originalGrossUnitPrice;
-            entry.originalGrossUnitPrice = Number((entry.originalNetUnitPrice * vFactor).toFixed(2));
-            entry.isPortalAmbiguous = false;
-          }
-        }
-
-        // Step B: For any entry (Portal or Prizma) whose effectiveNetUnitPrice is 1.20x or 1.22x (±0.6%) of another entry's effectiveNetUnitPrice,
-        // normalize the VAT-inflated entry down to the Net baseline price
-        for (const entry of rawHistory) {
-          // Fatura toplamıyla doğrulanmış kalemin fiyatı gerçektir; başka faturayla 1,22x oranı tesadüf olabilir.
-          if (entry.vatBasisVerified) continue;
-          for (const testVat of [entry.vatPct || 22, 22, 20]) {
-            if (!(testVat > 0)) continue;
-            const vFactor = 1 + testVat / 100;
-            const dividedCandidate = entry.effectiveNetUnitPrice / vFactor;
-            const matchedNetPeer = rawHistory.find(other =>
-              other !== entry &&
-              other.effectiveNetUnitPrice > 0 &&
-              Math.abs(dividedCandidate - other.effectiveNetUnitPrice) / other.effectiveNetUnitPrice <= 0.006
-            );
-            if (matchedNetPeer) {
-              const origRatio = entry.originalNetUnitPrice > 0 ? (matchedNetPeer.effectiveNetUnitPrice / entry.effectiveNetUnitPrice) : (1 / vFactor);
-              entry.effectiveGrossUnitPrice = entry.effectiveNetUnitPrice;
-              entry.effectiveNetUnitPrice = matchedNetPeer.effectiveNetUnitPrice;
-              entry.originalGrossUnitPrice = entry.originalNetUnitPrice;
-              entry.originalNetUnitPrice = Number((entry.originalNetUnitPrice * origRatio).toFixed(2));
-              entry.vatPct = testVat;
-              break;
-            }
-          }
-        }
-      }
 
       const history: any[] = [];
       let totalNormalizedSpend = 0;
@@ -7786,18 +7765,16 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
           .toLowerCase()
           .replace(/^(?:ка|ут|цб|рн|сч|ту|nf|ft|prz)[\s_-]*0*/i, '')
           .replace(/[^a-z0-9а-яё]/gi, '');
-        const dedupKey = `${normalizeVendorName(inv.supplier || '')}__${coreInvNo}__${effectiveNetUnitPrice.toFixed(2)}__${originalQuantity}`;
+        const dedupKey = `${normalizeVendorName(inv.supplier || '')}__${coreInvNo}__${effectiveGrossUnitPrice.toFixed(2)}__${originalQuantity}`;
         if (coreInvNo && seenInvoiceItemKeys.has(dedupKey)) continue;
         if (coreInvNo) seenInvoiceItemKeys.add(dedupKey);
 
-        // Kıyaslama tabanı: KDV DAHİL fiyat, tek oran %22 (Berkant kararı, 2026-10-18).
-        // %20/%22 KDV'li satırlar net × 1,22; KDV'siz (%0, muaf) satırlar ödenen fiyatla; %10 indirimli oran kendi brütüyle.
-        // Faturası zaten %22 KDV'li olan satırlarda doğrudan ödenen KDV dahil birim fiyat kullanılarak 1 kuruşluk yuvarlama kayması önlenir.
-        const basisMultiplier = comparisonMultiplierForVat(vatPct);
-        const comparisonUnitPrice = (vatPct === 22 && effectiveGrossUnitPrice > 0)
+        // Tek Doğruluk Kaynağı: Faturada ödenen gerçek KDV dahil birim fiyat (effectiveGrossUnitPrice) birebir kullanılır.
+        const basisMultiplier = vatPct > 0 ? (1 + vatPct / 100) : 1;
+        const comparisonUnitPrice = effectiveGrossUnitPrice > 0
           ? effectiveGrossUnitPrice
           : Number((effectiveNetUnitPrice * basisMultiplier).toFixed(2));
-        const comparisonOriginalUnitPrice = (vatPct === 22 && originalGrossUnitPrice > 0)
+        const comparisonOriginalUnitPrice = originalGrossUnitPrice > 0
           ? originalGrossUnitPrice
           : Number((originalNetUnitPrice * basisMultiplier).toFixed(2));
 
@@ -7809,6 +7786,9 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
         totalNormalizedQuantity += effectiveQuantity;
 
         const entrySeg = analyzeMaterialSegment(matGroup.materialName, resolvedOrigName, matGroup.category, effectiveNetUnitPrice);
+        const resolvedDemandId = (inv as any).prizmaDemandId || (item as any).prizmaDemandId ||
+          (String(inv.id || '').startsWith('prizma_') ? Number(String(inv.id).replace('prizma_', '')) : undefined) ||
+          (String(inv.id || '').startsWith('inv_prizma_') ? Number(String(inv.id).replace('inv_prizma_', '')) : undefined);
 
         history.push({
           date: inv.date || inv.created_at || new Date().toISOString(),
@@ -7820,7 +7800,7 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
           grossUnitPrice: comparisonUnitPrice,
           paidGrossUnitPrice: effectiveGrossUnitPrice,
           vatPercentage: vatPct,
-          comparisonVatBasis: basisMultiplier > 1 ? Math.round((basisMultiplier - 1) * 100) : 0,
+          comparisonVatBasis: vatPct > 0 ? vatPct : 0,
           quantity: effectiveQuantity,
           unit: conv.conversionApplied ? benchmarkUnit : originalUnit,
           originalUnitPrice: comparisonOriginalUnitPrice,
@@ -7848,6 +7828,9 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
           qualitySegmentLabel: entrySeg.qualitySegmentLabel,
           brand: entrySeg.brand,
           invoiceId: inv.id,
+          itemId: item.id,
+          prizmaDemandId: resolvedDemandId,
+          invoiceFileId: (inv as any).invoiceFileId || (item as any).invoiceFileId,
           rawFileName: inv.rawFileName,
           fileUrl: inv.fileUrl,
           excludedFreightAmount: inv.excludedFreightAmount,
@@ -7859,7 +7842,7 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
           origin: Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))) ? 'prizma' : 'ges_archive',
           prizmaSource: Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))),
           gesArchiveSource: !Boolean(inv.id && (String(inv.id).startsWith('prizma_') || String(inv.id).startsWith('inv_prizma_'))),
-          prizmaLinked: Boolean(inv.prizmaBtfUrl || inv.prizmaRequestCode || inv.prizmaDemandId),
+          prizmaLinked: Boolean(inv.prizmaBtfUrl || inv.prizmaRequestCode || resolvedDemandId),
           prizmaRequestCode: inv.prizmaRequestCode || item.prizmaRequestCode,
           prizmaOrderCode: inv.prizmaOrderCode || item.prizmaOrderCode,
           prizmaBtfUrl: inv.prizmaBtfUrl || item.prizmaBtfUrl,
@@ -12148,7 +12131,13 @@ app.post('/api/prizma/unlink', async (req, res) => {
 app.get('/api/prizma/invoices', async (req, res) => {
   try {
     const list = await prizmaSyncService.getInvoicesCached();
-    let results = [...list];
+    let results = list.map((pInv: any) => normalizeSingleInvoicePricingAndFreight({
+      ...pInv,
+      vendorName: pInv.vendorName || pInv.supplier,
+      uploadedBySupervisorName: pInv.prizmaCreatedBy || 'Prizma ERP',
+      prizmaSource: true,
+      origin: 'prizma'
+    }, pInv));
 
     const search = req.query.search ? String(req.query.search).trim().toLowerCase() : '';
     const jobsite = req.query.jobsite ? String(req.query.jobsite).trim().toLowerCase() : '';

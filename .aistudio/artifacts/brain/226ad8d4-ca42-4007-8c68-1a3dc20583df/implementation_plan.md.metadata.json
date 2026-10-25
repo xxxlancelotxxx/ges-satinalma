@@ -1,6 +1,6 @@
 {
-  "summary":  "Performans ve İndirim Raporu sekmesine eklenecek \"İndirim Alınmayan Faturalar (Doğrudan Fatura Girişleri) Denetim & Baskı Raporu\" modülünün mimari, kullanıcı deneyimi ve Excel/PDF/HTML dışa aktarım uygulama planı.",
-  "updatedAt":  "2026-10-24T10:58:31.907543183Z",
+  "summary":  "Anomali teşhisi, piyasa analizi ve fatura geçmişi tabloları ile fatura detay pencereleri arasındaki fiyat uyuşmazlıklarını (Prizma ERP fatura bağlantısı, KDV dahil gerçek fiyat gösterimi ve En Düşük / En Yüksek / Son Fatura ayrımı) kalıcı olarak gideren uygulama planı.",
+  "updatedAt":  "2026-10-25T15:01:24.395771400Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
