@@ -1984,7 +1984,6 @@ export function splitGroupBySpec<T>(entries: T[], getText: (e: T) => string, get
     'panelGrade',
     'coating',
     'couplerSeries',
-    'pack',
     'bagKg'
   ];
 
