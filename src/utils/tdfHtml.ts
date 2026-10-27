@@ -3,73 +3,75 @@
  * Aynı çıktı: ekrandaki "TDF formu" adımı (iframe), "HTML indir" ve "PDF indir" (html2pdf) için kullanılır.
  */
 import { computeTdf, TdfComputed, TdfForm, tdfFormat } from './tdfEngine';
-import { buildTdfReport, cellBrandNote, freightText, materialSpecText, TDF_LEVEL_LABEL, TDF_TERM_ROWS, TDF_UNIT_LABEL, termText } from './tdfReport';
+import { buildTdfReport, cellBrandNote, cellOfferedName, freightText, materialSpecText, TDF_LEVEL_LABEL, TDF_TERM_ROWS, TDF_UNIT_LABEL, termText } from './tdfReport';
 
 const esc = (v: unknown) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const nl2br = (v: unknown) => esc(v).replace(/\n/g, '<br>');
 
 const CSS = `
-:root{--ink:#0f1b2d;--muted:#5a6579;--line:#c9cfda;--navy:#102c54;--navy2:#1e3f6e;--head:#d6dce4;--sum:#d9e1f2;--best:#ffeb9c;
---accent:#2f5bd3;--accent-soft:#e9efff;--good:#0b7a4b;--good-soft:#e2f5ec;--warn:#a15c00;--warn-soft:#fff3d6;--bad:#b42318;--bad-soft:#fde8e6;--grey:#f5f6f8}
+:root{--ink:#0f172a;--muted:#526077;--line:#cbd5e1;--navy:#0f294a;--navy2:#1e3a63;--head:#e2e8f0;--sum:#dbeafe;--best:#fef08a;
+--accent:#2563eb;--accent-soft:#eff6ff;--good:#047857;--good-soft:#ecfdf5;--warn:#b45309;--warn-soft:#fffbeb;--bad:#be123c;--bad-soft:#fff1f2;--grey:#f8fafc}
 *{box-sizing:border-box}
-html,body{margin:0;background:#fff;color:var(--ink);font-family:"IBM Plex Sans","Segoe UI",Arial,system-ui,sans-serif;font-size:12.5px;line-height:1.4}
-.paper{max-width:1500px;margin:0 auto;padding:24px;display:flex;flex-direction:column;gap:20px}
-.ph{background:var(--navy);color:#fff;padding:16px 22px;display:flex;justify-content:space-between;gap:16px;border-radius:4px}
-.ph .t{font-size:17px;font-weight:700}
-.ph .s{font-size:11.5px;opacity:.88;margin-top:4px}
-.ph .logo{font-weight:800;font-size:22px;letter-spacing:.08em;align-self:center}
+html,body{margin:0;background:#fff;color:var(--ink);font-family:"IBM Plex Sans","Segoe UI",Arial,system-ui,sans-serif;font-size:12.5px;line-height:1.45}
+.paper{max-width:1540px;margin:0 auto;padding:24px;display:flex;flex-direction:column;gap:18px}
+.ph{background:linear-gradient(135deg,var(--navy) 0%,var(--navy2) 100%);color:#fff;padding:18px 24px;display:flex;justify-content:space-between;gap:16px;border-radius:8px;box-shadow:0 2px 6px rgba(15,41,74,.12)}
+.ph .t{font-size:17.5px;font-weight:800;letter-spacing:.01em}
+.ph .s{font-size:11.5px;opacity:.9;margin-top:4px}
+.ph .logo{font-weight:900;font-size:23px;letter-spacing:.1em;align-self:center;background:rgba(255,255,255,.12);padding:6px 14px;border-radius:6px}
 .sec{break-inside:auto}
-.sec h3{font-size:12px;text-transform:uppercase;letter-spacing:.07em;margin:0 0 8px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;color:var(--navy)}
-.sec h3 .ru{font-weight:400;color:var(--muted);letter-spacing:.03em}
-.ai{font-size:10px;color:var(--accent);font-weight:600;text-transform:none;letter-spacing:0;border:1px solid var(--accent);border-radius:999px;padding:0 7px}
-.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
-.kpi{border:1px solid var(--line);border-radius:6px;padding:9px 12px}
-.kpi .k{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:600}
-.kpi .v{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums}
-.kpi .h{font-size:11.5px;color:var(--muted)}
-.reco{border:1.5px solid var(--good);background:var(--good-soft);border-radius:6px;padding:12px 16px;display:flex;flex-direction:column;gap:5px}
-.reco b.big{font-size:14.5px}
+.sec h3{font-size:12px;text-transform:uppercase;letter-spacing:.07em;margin:0 0 8px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;color:var(--navy);font-weight:800}
+.sec h3 .ru{font-weight:500;color:var(--muted);letter-spacing:.03em}
+.ai{font-size:10px;color:var(--accent);font-weight:600;text-transform:none;letter-spacing:0;border:1px solid #bfdbfe;background:var(--accent-soft);border-radius:6px;padding:1px 7px}
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.kpi{border:1px solid var(--line);border-top:3px solid var(--navy);border-radius:8px;padding:10px 14px;background:#fff}
+.kpi:first-child{border-top-color:var(--good);background:var(--good-soft)}
+.kpi .k{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:700}
+.kpi .v{font-size:18px;font-weight:800;font-variant-numeric:tabular-nums;margin-top:2px;color:var(--ink)}
+.kpi .h{font-size:11px;color:var(--muted);margin-top:2px}
+.reco{border:1.5px solid #34d399;background:var(--good-soft);border-radius:8px;padding:13px 18px;display:flex;flex-direction:column;gap:5px}
+.reco b.big{font-size:14.5px;color:#064e3b}
 .reco ol{margin:4px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:3px}
-.reco .user{border-top:1px dashed var(--good);padding-top:6px;margin-top:4px}
+.reco .user{border-top:1px dashed #6ee7b7;padding-top:6px;margin-top:4px}
 .alerts{display:flex;flex-direction:column;gap:6px}
-.al{display:grid;grid-template-columns:70px 1fr;gap:10px;border:1px solid var(--line);border-radius:6px;padding:7px 10px;align-items:start;break-inside:avoid}
-.al .lv{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:2px 6px;border-radius:4px;text-align:center}
-.al.critical{border-color:var(--bad)} .al.critical .lv{background:var(--bad-soft);color:var(--bad)}
-.al.warning .lv{background:var(--warn-soft);color:var(--warn)}
+.al{display:grid;grid-template-columns:76px 1fr;gap:10px;border:1px solid var(--line);border-radius:7px;padding:8px 12px;align-items:start;break-inside:avoid;background:#fff}
+.al .lv{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:2.5px 6px;border-radius:4px;text-align:center}
+.al.critical{border-color:#fda4af;background:#fffafb} .al.critical .lv{background:var(--bad-soft);color:var(--bad)}
+.al.warning{border-color:#fde68a} .al.warning .lv{background:var(--warn-soft);color:var(--warn)}
 .al.info .lv{background:var(--accent-soft);color:var(--accent)}
 .al p{margin:0} .al .act{font-size:11.5px;color:var(--muted);margin-top:2px}
 .chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
-.chip{font-size:10.5px;border:1px solid var(--line);border-radius:999px;padding:1px 8px;color:var(--muted)}
+.chip{font-size:10.5px;border:1px solid var(--line);border-radius:6px;padding:1px 8px;color:var(--muted);background:var(--grey)}
 .hint{color:var(--muted);font-size:11.5px;margin:6px 0 0}
 table{border-collapse:collapse;width:100%;font-size:11.5px}
-th,td{border:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top}
-thead th{background:var(--head);font-size:10.5px;font-weight:600;line-height:1.2}
-thead th .ru,td .ru{display:block;font-weight:400;opacity:.75}
-th.sup{background:var(--navy);color:#fff;text-align:center;font-size:12px}
+th,td{border:1px solid var(--line);padding:5px 7px;text-align:left;vertical-align:middle}
+thead th{background:var(--head);font-size:10.5px;font-weight:700;line-height:1.25;color:var(--ink)}
+thead th .ru,td .ru{display:block;font-weight:400;opacity:.75;font-size:10px}
+th.sup{background:var(--navy);color:#fff;text-align:center;font-size:12px;letter-spacing:.02em}
 th.bestH{background:var(--best);color:var(--ink);text-align:center}
 td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 td.c{text-align:center}
 td.low{background:var(--good-soft);color:var(--good);font-weight:700}
 td.high{background:var(--bad-soft);color:var(--bad)}
-td.empty{color:var(--muted);text-align:center}
-td.del{font-size:10.5px;color:var(--muted)}
-td.bestC{background:var(--best);font-weight:600}
-td.w{background:var(--warn-soft);color:var(--warn);font-weight:700;box-shadow:inset 0 0 0 2px var(--warn)}
-td.w .why{display:block;font-size:10px;font-weight:400;white-space:normal;text-align:left;max-width:220px}
+td.empty{color:var(--muted);text-align:center;background:var(--grey)}
+td.del{font-size:10px;color:var(--muted);line-height:1.25;max-width:190px}
+td.del .off{display:block;color:#64748b;font-size:9.5px;margin-top:1px}
+td.bestC{background:#fef9c3;font-weight:700}
+td.w{background:var(--warn-soft);color:var(--warn);font-weight:700;box-shadow:inset 0 0 0 1.5px #f59e0b}
+td.w .why{display:block;font-size:9.5px;font-weight:600;white-space:normal;text-align:right;color:var(--warn);margin-top:2px}
 td.miss{background:var(--warn-soft);color:var(--warn)}
 td.bad{background:var(--bad-soft);color:var(--bad)}
 tr.sum td{font-weight:700;background:var(--sum)}
 tr.terms td{background:var(--grey);font-size:11px}
 tr.terms td.miss{background:var(--warn-soft)}
 tr{break-inside:avoid}
-.tag{font-size:9.5px;padding:0 5px;border-radius:999px;font-weight:600;white-space:nowrap}
+.tag{font-size:9.5px;padding:1px 5px;border-radius:4px;font-weight:600;white-space:nowrap}
 .tag.user{background:var(--accent-soft);color:var(--accent)} .tag.bad{background:var(--bad-soft);color:var(--bad)}
 .qual{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .qual div{border:1px solid var(--line);border-radius:6px;padding:8px 10px;break-inside:avoid}
 .qual b{display:block;margin-bottom:2px}
 .qual .lbl{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:4px;display:block}
-td .spec{display:block;font-size:10px;color:var(--muted);font-weight:400}
-td .mt{font-size:9.5px;color:var(--accent);font-weight:600}
+td .spec{display:block;font-size:10px;color:var(--muted);font-weight:500;margin-top:1px}
+td .mt{display:inline-block;font-size:9.5px;color:var(--accent);background:var(--accent-soft);padding:0 5px;border-radius:4px;font-weight:600;margin-left:4px}
 tr.grand td{font-weight:800;background:var(--sum);font-size:12.5px}
 .sign{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:12px}
 .sign div{border-top:1.5px solid var(--ink);padding-top:6px;font-size:11px;color:var(--muted);min-height:54px}
@@ -119,25 +121,29 @@ export function renderTdfHtml(form: TdfForm, opts: TdfHtmlOptions = {}): string 
 
   // 1 · Fiyat matrisi
   h += `<div class="sec"><h3>1 · Fiyat karşılaştırması <span class="ru">Сравнение цен (₽ с НДС 22%)</span></h3><table><thead><tr>`;
-  h += `<th rowspan="2">№</th><th rowspan="2">Açıklama<span class="ru">Описание</span></th><th rowspan="2">Miktar<span class="ru">Кол-во</span></th>`;
+  h += `<th rowspan="2">№</th><th rowspan="2">Standart Kalem Adı<span class="ru">Наименование · стандарт</span></th><th rowspan="2">Miktar<span class="ru">Кол-во</span></th>`;
   S.forEach(s => { h += `<th class="sup" colspan="3">${esc(s.short)}</th>`; });
   h += `<th class="bestH" colspan="3">En iyi fiyat · Лучшая цена</th></tr><tr>`;
-  S.forEach(() => { h += `<th>Birim fiyat<span class="ru">Цена за ед.</span></th><th>Toplam<span class="ru">Сумма, ₽</span></th><th>Marka · teslim<span class="ru">Бренд · срок</span></th>`; });
+  S.forEach(() => { h += `<th>Birim fiyat<span class="ru">Цена за ед.</span></th><th>Toplam<span class="ru">Сумма, ₽</span></th><th>Teklif detayı · teslim<span class="ru">В КП · срок</span></th>`; });
   h += `<th class="bestH">Firma<span class="ru">Поставщик ✓</span></th><th class="bestH">Birim fiyat</th><th class="bestH">1. ile 2. fark<span class="ru">Разница</span></th></tr></thead><tbody>`;
   c.materials.forEach((m, i) => {
     const unit = TDF_UNIT_LABEL[m.unit] || m.unit;
     const comparableCount = S.filter(s => { const x = m.cells[s.key]; return x && !(x.warning && /Teknik fark|Birim farklı/.test(x.warning)); }).length;
     const spec = materialSpecText(m);
-    const mt = m.match === 'similar' ? ' <span class="mt">benzer adla eşleşti</span>' : m.match === 'ai' ? ' <span class="mt">yapay zekâ eşleştirdi</span>' : '';
+    const mt = m.match === 'ai' ? '<span class="mt">YZ eşleştirdi</span>' : '';
     h += `<tr><td class="num">${i + 1}</td><td><b>${esc(m.name)}</b>${mt}${spec ? `<span class="spec">${esc(spec)}</span>` : ''}</td><td class="num">${qty(m.orderQty)} ${esc(unit)}</td>`;
     S.forEach(s => {
       const x = m.cells[s.key];
       if (!x) { h += `<td class="empty" colspan="3">—</td>`; return; }
       const excluded = !!(x.warning && /Teknik fark|Birim farklı/.test(x.warning));
       const cls = x.warning ? 'w' : (m.bestPrice !== null && Math.abs(x.unitPrice - m.bestPrice) < 0.005 ? 'low' : (comparableCount > 2 && m.worstPrice !== null && Math.abs(x.unitPrice - m.worstPrice) < 0.005 && m.worstPrice !== m.bestPrice ? 'high' : ''));
-      const why = x.warning ? `<span class="why">${esc(x.warning)}${excluded ? ' · kıyasa katılmadı' : ''}</span>` : '';
+      const warnShort = x.warning ? x.warning.replace(/^Teknik fark:\s*/i, '') : '';
+      const why = x.warning ? `<span class="why">⚠ ${esc(warnShort)}${excluded ? ' · bilgi amaçlı' : ''}</span>` : '';
       const conv = x.convertedFrom ? ` title="${esc(x.convertedFrom)}"` : '';
-      h += `<td class="num ${cls}"${conv}>${rub(x.unitPrice)}${x.warning ? ' !' : ''}${why}</td><td class="num">${rub(x.total)}</td><td class="del">${esc(cellBrandNote(m, s.col))}</td>`;
+      const bn = cellBrandNote(m, s.col);
+      const offName = cellOfferedName(m, s.col);
+      const detailHtml = `${bn ? `<span>${esc(bn)}</span>` : ''}${offName ? `<span class="off" title="${esc(x.name)}">${esc(offName)}</span>` : ''}`;
+      h += `<td class="num ${cls}"${conv}>${rub(x.unitPrice)}${why}</td><td class="num">${rub(x.total)}</td><td class="del">${detailHtml || '—'}</td>`;
     });
     const best = m.bestSuppliers.map(k => S.find(s => s.key === k)?.short || k).join(', ');
     h += m.bestPrice === null

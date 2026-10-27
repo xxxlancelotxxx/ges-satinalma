@@ -6,7 +6,7 @@
  */
 import ExcelJS from 'exceljs';
 import { computeTdf, TdfComputed, TdfForm, tdfFormat } from '../src/utils/tdfEngine';
-import { buildTdfReport, cellBrandNote, freightText, materialSpecText, TDF_LEVEL_LABEL, TDF_TERM_ROWS, TDF_UNIT_LABEL, termText } from '../src/utils/tdfReport';
+import { buildTdfReport, cellBrandNote, cellOfferedName, freightText, materialSpecText, TDF_LEVEL_LABEL, TDF_TERM_ROWS, TDF_UNIT_LABEL, termText } from '../src/utils/tdfReport';
 
 const NAVY = 'FF102C54', NAVY2 = 'FF1E3F6E', HEAD = 'FFD6DCE4', SUM = 'FFD9E1F2', BEST = 'FFFFEB9C', GOOD = 'FFE2F5EC', GOODF = 'FF0B7A4B',
   BAD = 'FFFDE8E6', BADF = 'FFB42318', WARN = 'FFFFF3D6', WARNF = 'FFA15C00', GREY = 'FFF5F6F8', INFO = 'FFE9EFFF', INFOF = 'FF2F5BD3',
@@ -114,12 +114,12 @@ export async function buildTdfWorkbook(form: TdfForm, opts: { todayIso?: string;
   band(row, '1 · FİYAT KARŞILAŞTIRMASI  ·  Сравнение цен (₽ с НДС 22%)'); row++;
   const h1 = row, h2 = row + 1;
   box(h1, h2, 1, 1, '№', { bg: HEAD, b: true, sz: 9, al: 'center' });
-  box(h1, h2, 2, 2, 'Açıklama\nОписание', { bg: HEAD, b: true, sz: 9, al: 'center' });
+  box(h1, h2, 2, 2, 'Standart Kalem Adı\nНаименование', { bg: HEAD, b: true, sz: 9, al: 'center' });
   box(h1, h2, 3, 3, `Miktar\nКол-во, ${r.unitLabel}`, { bg: HEAD, b: true, sz: 9, al: 'center' });
   S.forEach((s, k) => {
     const [a] = spanOf(k);
     box(h1, h1, a, a + 2, s.short, { bg: NAVY, fc: WHITE, b: true, sz: 11, al: 'center' });
-    ['Birim fiyat KDV\'li\nЦена за ед.', 'Toplam fiyat\nОбщая стоимость', 'Marka · teslim\nБренд · срок'].forEach((t, j) => box(h2, h2, a + j, a + j, t, { bg: HEAD, b: true, sz: 8, al: 'center' }));
+    ['Birim fiyat KDV\'li\nЦена за ед.', 'Toplam fiyat\nОбщая стоимость', 'Teklif detayı · teslim\nВ КП · срок'].forEach((t, j) => box(h2, h2, a + j, a + j, t, { bg: HEAD, b: true, sz: 8, al: 'center' }));
   });
   box(h1, h1, bc, bc + 2, 'En iyi fiyat · Лучшая цена', { bg: BEST, b: true, sz: 10, al: 'center' });
   ['Firma\nПоставщик ✓', 'Birim fiyat', '1. ile 2. fark\nРазница'].forEach((t, j) => box(h2, h2, bc + j, bc + j, t, { bg: BEST, b: true, sz: 8, al: 'center' }));
@@ -144,12 +144,14 @@ export async function buildTdfWorkbook(form: TdfForm, opts: { todayIso?: string;
       const p = ws.getCell(rr, a); p.value = Math.round(x.unitPrice * 100) / 100; p.numFmt = NUM;
       const t = ws.getCell(rr, a + 1); t.value = { formula: `C${rr}*${colL(a)}${rr}`, result: Math.round(x.total * 100) / 100 }; t.numFmt = NUM;
       const del = cellBrandNote(m, s.col);
-      ws.getCell(rr, a + 2).value = del;
-      maxLen = Math.max(maxLen, del.length * 0.9);
+      const offName = cellOfferedName(m, s.col);
+      const delText = [del, offName].filter(Boolean).join('\n');
+      ws.getCell(rr, a + 2).value = delText;
+      maxLen = Math.max(maxLen, delText.length * 0.9);
       const excluded = !!(x.warning && /Teknik fark|Birim farklı/.test(x.warning));
       if (!excluded && x.unitPrice > 0) comparableCols.push(`${colL(a)}${rr}`);
-      if (x.warning || x.convertedFrom) {
-        p.note = [x.warning, excluded ? 'Bu fiyat en iyi fiyat hesabına katılmadı.' : '', x.convertedFrom ? `Birim çevrildi: ${x.convertedFrom}` : ''].filter(Boolean).join('\n');
+      if (x.warning || x.convertedFrom || offName) {
+        p.note = [offName ? `Teklifteki ad: ${x.name}` : '', x.warning, excluded ? 'Bu fiyat bilgi amaçlı gösterildi; en iyi fiyat hesabına katılmadı.' : '', x.convertedFrom ? `Birim çevrildi: ${x.convertedFrom}` : ''].filter(Boolean).join('\n');
       }
       if (x.warning) { p.fill = fill(WARN); p.font = font({ bold: true, color: { argb: WARNF } }); }
     });

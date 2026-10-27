@@ -248,27 +248,52 @@ function unitFactor(from: string, to: string): number | null {
 const HOMO: Record<string, string> = { 'А': 'A', 'В': 'B', 'С': 'C', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H', 'О': 'O', 'Р': 'P', 'Т': 'T', 'Х': 'X' };
 const latinUpper = (s: string) => s.toUpperCase().replace(/[АВСЕКМНОРТХ]/g, ch => HOMO[ch] || ch);
 
+const REBAR_GRADE_RE = /^A(?:240|300|400|500|600|800|1000)[CС]?$/i;
+
+export function isRebarMaterial(name: string, grade?: string): boolean {
+  const s = String(name || '');
+  if (/(?:^|[^А-Яа-яЁёA-Za-z])(?:арм\.?|арматур[а-я]*|армирован[а-я]*|катанка)(?:$|[^А-Яа-яЁёA-Za-z])/i.test(s)) return true;
+  if (/(?:пруток|прутках)/i.test(s) && grade && REBAR_GRADE_RE.test(grade)) return true;
+  return false;
+}
+
 export function extractTdfSpecs(name: string): TdfSpecs {
   const s = String(name || '').replace(/\s+/g, ' ');
   const specs: TdfSpecs = {};
   const grade = s.match(/(?:^|[^A-Za-zА-Яа-я0-9])([AАaа]\s?-?\s?(?:240|300|400|500|600|800|1000)\s?[CСcс]?|[BВ]\s?\d{2}(?:[.,]\d)?\b|[MМ]\s?\d{3}\b|S\d{3}[A-Z0-9]*|С\d{3}\b)/);
   if (grade) specs.grade = latinUpper(grade[1]).replace(/[\s-]/g, '');
-  const dia = s.match(/(?<![A-Za-zА-Яа-яЁё])(?:Ø|ø|⌀|ф|Ф|d|д|D|диам\.?\s?)\s?=?\s?(\d+(?:[.,]\d+)?)/) || s.match(/(?:^|\s)(\d+(?:[.,]\d+)?)\s?(?:мм|mm)(?![а-яёa-z])(?!\s?[xх*×])/i);
-  if (dia) specs.diameter = dia[1].replace(',', '.');
-  const len = s.match(/(?:L\s?=?\s?|длин[аой]*\s?)(\d+(?:[.,]\d+)?)\s?(?:м|m)(?![а-яёa-z0-9²³])/i) || s.match(/\b(\d+(?:[.,]\d+)?)\s?(?:м|m)(?![а-яёa-z0-9²³])(?!\s?[23²³])/);
-  if (len) specs.length = len[1].replace(',', '.');
+  const rebar = isRebarMaterial(s, specs.grade);
+  const rebarDimMm = rebar ? s.match(/(?:^|[^\d.,])(\d{1,2}(?:[.,]\d+)?)\s?[xхХ×*]\s?(11700|11750|12000|6000|9000|3000)\b/) : null;
+  if (rebarDimMm) {
+    specs.diameter = rebarDimMm[1].replace(',', '.');
+    specs.length = String(parseFloat(rebarDimMm[2]) / 1000);
+  }
+  if (!specs.diameter) {
+    const dia = s.match(/(?<![A-Za-zА-Яа-яЁё])(?:Ø|ø|⌀|ф|Ф|d|д|D|диам\.?\s?)\s*=?\s*(\d+(?:[.,]\d+)?)/) || s.match(/(?:^|\s)(\d+(?:[.,]\d+)?)\s?(?:мм|mm)(?![а-яёa-z])(?!\s?[xх*×])/i);
+    if (dia) specs.diameter = dia[1].replace(',', '.');
+  }
+  if (!specs.length) {
+    const len = s.match(/(?:L\s*=?\s*|длин[аой]*\s*)(\d+(?:[.,]\d+)?)\s?(?:м|m)(?![а-яёa-z0-9²³])/i) || s.match(/\b(\d+(?:[.,]\d+)?)\s?(?:м|m)(?![а-яёa-z0-9²³])(?!\s?[23²³])/);
+    if (len) specs.length = len[1].replace(',', '.');
+    else if (rebar) {
+      const lenMm = s.match(/(?:^|[\s(])(11700|11750|12000|6000|9000|3000)(?:\s?(?:мм|mm))?(?=$|[\s),;])/i);
+      if (lenMm) specs.length = String(parseInt(lenMm[1], 10) / 1000);
+    }
+  }
   const ral = s.match(/RAL\s?(\d{4})/i);
   if (ral) specs.ral = ral[1];
   const dens = s.match(/(\d{2,4})\s?(?:кг\/м3|кг\/м³|kg\/m3|kg\/m³)/i) || s.match(/(?:плотн[а-яё]*\.?|yoğunluk)\s?(\d{2,4})/i);
   if (dens) specs.density = dens[1];
   const thick = s.match(/(?:толщ[а-яё]*\.?|s\s?=|t\s?=|kalınlık)\s?(\d+(?:[.,]\d+)?)/i) || s.match(/\b(\d+(?:[.,]\d+)?)\s?(?:мм|mm)\s?(?:толщ|лист)/i);
   if (thick) specs.thickness = thick[1].replace(',', '.');
-  const size = s.match(/(\d+(?:[.,]\d+)?)\s?[xхХ×*]\s?(\d+(?:[.,]\d+)?)(?:\s?[xхХ×*]\s?(\d+(?:[.,]\d+)?))?/);
-  if (size) {
-    const nums = [size[1], size[2], size[3]].filter(Boolean).map(x => parseFloat(x!.replace(',', '.'))).sort((a, b) => b - a);
-    specs.size = nums.slice(0, 2).map(n => String(n)).join('x');
+  if (!rebarDimMm) {
+    const size = s.match(/(\d+(?:[.,]\d+)?)\s?[xхХ×*]\s?(\d+(?:[.,]\d+)?)(?:\s?[xхХ×*]\s?(\d+(?:[.,]\d+)?))?/);
+    if (size) {
+      const nums = [size[1], size[2], size[3]].filter(Boolean).map(x => parseFloat(x!.replace(',', '.'))).sort((a, b) => b - a);
+      specs.size = nums.slice(0, 2).map(n => String(n)).join('x');
+    }
   }
-  const gost = s.match(/(?:ГОСТ|GOST)\s?([\d.-]+)/i);
+  const gost = s.match(/(?:ГОСТ|GOST)\s?(?:Р\s?)?([\d.-]+)/i);
   if (gost) specs.gost = gost[1].replace(/[.-]$/, '');
   return specs;
 }
@@ -277,13 +302,46 @@ const SPEC_LABELS: Record<keyof TdfSpecs, string> = {
   grade: 'sınıf', diameter: 'çap', length: 'boy', ral: 'RAL renk', density: 'yoğunluk', thickness: 'kalınlık', size: 'ebat', gost: 'ГОСТ'
 };
 
+export function normSpecVal(k: keyof TdfSpecs, v?: string): string {
+  if (!v) return '';
+  if (k === 'gost') return v.trim().replace(/-\d{2,4}$/, '');
+  if (k === 'grade') return v.trim().toUpperCase().replace(/^A240C$/, 'A240');
+  return v.trim();
+}
+
 /** İki satırın teknik farkları (ikisinde de olan ama farklı olan özellikler). */
 export function specDifferences(a: TdfSpecs, b: TdfSpecs): string[] {
   const out: string[] = [];
   (Object.keys(SPEC_LABELS) as Array<keyof TdfSpecs>).forEach(k => {
-    if (a[k] && b[k] && a[k] !== b[k]) out.push(`${SPEC_LABELS[k]} ${a[k]} ≠ ${b[k]}`);
+    if (a[k] && b[k] && normSpecVal(k, a[k]) !== normSpecVal(k, b[k])) {
+      out.push(`${SPEC_LABELS[k]} ${a[k]} ≠ ${b[k]}`);
+    }
   });
   return out;
+}
+
+export function compactOfferedName(raw: string): string {
+  return String(raw || '')
+    .replace(/Сталь\s+углеродистая\s+для\s+армирования\s+железобетонных\s+конструкций\s+периодического\s*профиля(?:\s+мерной\s+длины)?/gi, 'Сталь арм. пер. профиля')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function canonicalMaterialName(rawNames: string[], specs: TdfSpecs): string {
+  const clean = rawNames.map(n => String(n || '').trim()).filter(Boolean);
+  if (!clean.length) return '';
+  const unique = [...new Set(clean)];
+  const rebar = clean.some(n => isRebarMaterial(n, specs.grade));
+  const hasVerboseOrVariantRebar = rebar && (
+    unique.length > 1 ||
+    clean.some(n => n.length > 42 || /Сталь\s+углеродистая|Пруток\s+МД|Катанка|\d{4,5}/i.test(n))
+  );
+  if (hasVerboseOrVariantRebar && specs.diameter && specs.grade) {
+    const cyrGrade = specs.grade.replace(/A/g, 'А').replace(/C/g, 'С');
+    const lenPart = specs.length ? ` (${specs.length.replace('.', ',')} м)` : '';
+    return `Арматура ${cyrGrade} Ø${specs.diameter}${lenPart}`;
+  }
+  return unique[0];
 }
 
 const ABBREV: Array<[RegExp, string]> = [
@@ -300,7 +358,7 @@ export function tdfMaterialKey(name: string): string {
   let s = String(name || '');
   for (const [re, rep] of ABBREV) s = s.replace(re, rep);
   // Çap işaretli sayıyı tekleştir: "Ø8", "8 мм", "d8" → d8
-  s = s.replace(/(?<![A-Za-zА-Яа-яЁё])(?:Ø|ø|⌀|ф|Ф)\s?(\d)/g, 'd$1');
+  s = s.replace(/(?<![A-Za-zА-Яа-яЁё])(?:Ø|ø|⌀|ф|Ф)\s*(\d)/g, 'd$1');
   return materialFingerprint(s);
 }
 
@@ -319,9 +377,16 @@ function jaccard(a: string, b: string): number {
 
 /** Addaki ölçü sayıları (ГОСТ/ТУ numaraları hariç), yazım biçiminden bağımsız. */
 export function nameNumbers(name: string): Set<string> {
-  const s = String(name || '')
-    .replace(/(?:ГОСТ|GOST|ТУ|TU|СТО)\s?[\d.\-–]+/gi, ' ')
+  const raw = String(name || '');
+  const rebar = isRebarMaterial(raw, extractTdfSpecs(raw).grade);
+  let s = raw
+    .replace(/(?:ГОСТ|GOST|ТУ|TU|СТО)\s?(?:Р\s?)?[\d.\-–]+/gi, ' ')
+    .replace(/ст\.?\s?3\s?(?:сп|пс|кп)(?:\/(?:сп|пс|кп))?/gi, ' ')
     .replace(/(\d),(\d)/g, '$1.$2');
+  if (rebar) {
+    s = s.replace(/(?:^|[^\d.])(\d{1,2}(?:\.\d+)?)\s?[xхХ×*]\s?(11700|11750|12000|6000|9000|3000)\b/g, (_, d, mm) => ` ${d} ${parseInt(mm, 10) / 1000} `);
+    s = s.replace(/(?:^|[^\d.])(11700|11750|12000|6000|9000|3000)(?=$|[^\d.])/g, (_, mm) => ` ${parseInt(mm, 10) / 1000} `);
+  }
   const out = new Set<string>();
   (s.match(/\d+(?:\.\d+)?/g) || []).forEach(n => out.add(String(parseFloat(n))));
   return out;
@@ -329,7 +394,9 @@ export function nameNumbers(name: string): Set<string> {
 
 /** Kalemin cinsi: addaki ilk anlamlı kelime ("Фанера ФСФ 18 мм" → фанера). */
 export function headWord(name: string): string {
-  const w = String(name || '').toLowerCase().match(/[a-zа-яёçğıöşü]{3,}/i);
+  const raw = String(name || '');
+  if (isRebarMaterial(raw, extractTdfSpecs(raw).grade)) return materialFingerprint('арматура');
+  const w = raw.toLowerCase().match(/[a-zа-яёçğıöşü]{3,}/i);
   return w ? materialFingerprint(w[0]) : '';
 }
 
@@ -517,9 +584,13 @@ export function computeTdf(form: TdfForm, todayIso: string = new Date().toISOStr
           if (specDifferences(g.specs, w.specs).length) continue;
           if (!unitFactor(g.members[0].unit, w.unit) && !unitFactor(w.unit, g.members[0].unit)) continue;
           const sc = jaccard(g.fp, fp);
+          const sameRebar = g.head === 'apmatypa' && head === 'apmatypa'
+            && !!g.specs.diameter && g.specs.diameter === w.specs.diameter
+            && !!g.specs.grade && normSpecVal('grade', g.specs.grade) === normSpecVal('grade', w.specs.grade);
           const sameNums = numberTokens(g.fp) === numberTokens(fp) || (sameSet(g.nums, nums) && (nums.size > 0 || sc >= 0.6));
-          const ok = sameNums && (sc >= 0.6 || (g.head && g.head === head && sc >= 0.2));
-          if (ok && sc > bestScore) { bestScore = sc; found = g.key; match = sc >= 0.999 ? 'exact' : 'similar'; }
+          const ok = sameRebar || (sameNums && (sc >= 0.6 || (g.head && g.head === head && sc >= 0.2)));
+          const score = sameRebar ? Math.max(sc, 0.85) : sc;
+          if (ok && score > bestScore) { bestScore = score; found = g.key; match = sc >= 0.999 ? 'exact' : 'similar'; }
         }
       }
       if (found) {
@@ -532,10 +603,13 @@ export function computeTdf(form: TdfForm, todayIso: string = new Date().toISOStr
     }
     if (!groupByKey.has(w.key)) {
       groupByKey.set(w.key, groups.length);
-      groups.push({ key: w.key, members: [], fp, specs: w.specs, nums, head, match: match === 'similar' || match === 'exact' ? 'single' : match });
+      groups.push({ key: w.key, members: [], fp, specs: { ...w.specs }, nums, head, match: match === 'similar' || match === 'exact' ? 'single' : match });
     }
     const g = groups[groupByKey.get(w.key)!];
     g.members.push(w);
+    (Object.keys(SPEC_LABELS) as Array<keyof TdfSpecs>).forEach(k => {
+      if (!g.specs[k] && w.specs[k]) g.specs[k] = w.specs[k];
+    });
     if (g.members.length > 1 && (match === 'similar' || (match === 'exact' && g.match === 'single'))) g.match = match;
   }
 
@@ -598,10 +672,26 @@ export function computeTdf(form: TdfForm, todayIso: string = new Date().toISOStr
       cells[m.supplierKey] = cell;
       if (cell.quantity > 0) qtys.push(Math.round(cell.quantity * 1000) / 1000);
     }
-    // Teknik fark uyarısı (elle birleştirilmiş satırlarda)
+    // Satırın referans/çoğunluk teknik özellikleri: yalnızca çoğunluktan sapan hücre uyarı alır
     const memberCells = Object.values(cells).filter(Boolean) as TdfCell[];
+    const rowSpecs: TdfSpecs = { ...g.specs };
+    (Object.keys(SPEC_LABELS) as Array<keyof TdfSpecs>).forEach(k => {
+      const counts = new Map<string, { raw: string; count: number }>();
+      for (const c of memberCells) {
+        const val = c.specs[k];
+        if (!val) continue;
+        const nk = normSpecVal(k, val);
+        const cur = counts.get(nk);
+        if (cur) cur.count++;
+        else counts.set(nk, { raw: val, count: 1 });
+      }
+      if (counts.size) {
+        const best = [...counts.values()].sort((a, b) => b.count - a.count)[0];
+        rowSpecs[k] = best.raw;
+      }
+    });
     for (const c of memberCells) {
-      const diffs = memberCells.filter(o => o !== c).flatMap(o => specDifferences(o.specs, c.specs));
+      const diffs = specDifferences(rowSpecs, c.specs);
       if (diffs.length && !c.warning) c.warning = `Teknik fark: ${[...new Set(diffs)].join(', ')}`;
     }
     // Sipariş miktarı: kullanıcı > en sık tekrar eden > en büyük
@@ -613,12 +703,12 @@ export function computeTdf(form: TdfForm, todayIso: string = new Date().toISOStr
       orderQty = sorted[0]?.[0] || 0;
     }
     memberCells.forEach(c => { c.total = c.unitPrice * orderQty; });
-    const firstName = g.members[0]?.line.name || g.key;
+    const stdName = canonicalMaterialName(g.members.map(m => m.line.name), rowSpecs) || g.members[0]?.line.name || g.key;
     const brands = [...new Set(g.members.map(m => (m.line.brand || '').trim()).filter(Boolean))];
     return {
       key: g.key,
-      name: form.materialNames?.[g.key] || form.aiNames?.[g.key] || firstName,
-      specs: g.specs,
+      name: form.materialNames?.[g.key] || form.aiNames?.[g.key] || stdName,
+      specs: rowSpecs,
       brands,
       match: memberCells.length > 1 ? g.match : 'single',
       unit,
@@ -767,7 +857,7 @@ export function computeTdf(form: TdfForm, todayIso: string = new Date().toISOStr
     for (const s of suppliers) {
       const c = m.cells[s.key];
       if (c?.warning && /Teknik fark/.test(c.warning)) {
-        W('critical', `${shortSupplierName(s.name)}, "${m.name}" kaleminde farklı bir ürün teklif etti: ${c.name} (${c.warning.replace('Teknik fark: ', '')}).`, 'Bu fiyat kıyasa katılmadı. Proje bu farkı kabul etmiyorsa bu kalem için teklif geçersiz.', { supplierKey: s.key, materialKey: m.key });
+        W('critical', `${shortSupplierName(s.name)}, "${m.name}" kaleminde farklı bir ürün teklif etti: ${compactOfferedName(c.name)} (${c.warning.replace('Teknik fark: ', '')}).`, 'Fiyat tabloda bilgi amaçlı gösterildi, en ucuz hesabına katılmadı. Proje bu farkı kabul ediyorsa değerlendirilebilir.', { supplierKey: s.key, materialKey: m.key });
       } else if (c?.warning && /Birim farklı/.test(c.warning)) {
         W('warning', `${shortSupplierName(s.name)}, "${m.name}" kaleminde farklı birimle fiyat verdi.`, c.warning, { supplierKey: s.key, materialKey: m.key });
       }

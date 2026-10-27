@@ -10,7 +10,7 @@ import {
   computeTdf, DEFAULT_TDF_WEIGHTS, shortSupplierName, TdfForm, TdfLine, TdfMaterialRow, TdfOffer, TdfTerm,
   TdfTermKey, TDF_TERM_LABELS, tdfFormat, TdfWeights, termFields, termValueFromFields
 } from '../utils/tdfEngine';
-import { cellBrandNote, freightText, materialSpecText, offerDocLabel, TDF_LEVEL_LABEL, TDF_UNIT_LABEL } from '../utils/tdfReport';
+import { buildTdfReport, cellBrandNote, cellOfferedName, freightText, materialSpecText, offerDocLabel, TDF_LEVEL_LABEL, TDF_UNIT_LABEL } from '../utils/tdfReport';
 import { cleanReadWarning } from '../utils/tdfTerms';
 import { renderTdfHtml } from '../utils/tdfHtml';
 
@@ -632,11 +632,24 @@ function ComparisonStep({ form, computed, edit, aiBusy, aiError, onRunAi, matchB
 
   const suggestions = computed.mergeSuggestions.filter(s => !dismissed.includes(`${s.a}|${s.b}`));
   const nameOf = (k: string) => computed.materials.find(m => m.key === k)?.name || k;
+  const report = useMemo(() => buildTdfReport(form, computed), [form, computed]);
 
   if (!S.length) return <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">Önce teklif yükle; tablo burada oluşur.</div>;
 
   return (
     <div className="space-y-4">
+      {!!report.kpis.length && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          {report.kpis.map((k, idx) => (
+            <div key={idx} className={`rounded-xl border p-3.5 ${idx === 0 ? 'bg-emerald-50/70 border-emerald-300 border-t-4 border-t-emerald-600' : 'bg-white border-slate-200 border-t-4 border-t-slate-800'}`}>
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{k.k}</div>
+              <div className="text-lg font-extrabold font-mono text-slate-900 mt-0.5">{k.v}</div>
+              <div className="text-xs text-slate-500 mt-0.5">{k.h}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {computed.recommendation && (
         <div className="bg-emerald-50 border border-emerald-300 rounded-xl p-4">
           <div className="text-[11px] font-bold uppercase tracking-wide text-emerald-700">Sistemin önerisi</div>
@@ -648,10 +661,10 @@ function ComparisonStep({ form, computed, edit, aiBusy, aiError, onRunAi, matchB
       {S.length > 1 && (
         <div className="bg-white border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2">
           <div className="text-sm text-slate-700">
-            <span className="font-semibold">Aynı malzeme tek satırda.</span>{' '}
+            <span className="font-semibold">Aynı malzeme tek satırda standart adla gösterilir.</span>{' '}
             {form.aiMatchedAt && !form.aiMatchError
-              ? <span className="text-slate-500">Firmaların kalemleri yapay zekâyla eşleştirildi ({fmtDate(form.aiMatchedAt)}). Yanlış eşleşme varsa satırdaki <Split className="w-3 h-3 inline" /> ile ayır.</span>
-              : <span className="text-slate-500">Kalemler ad ve ölçülere göre eşleştirildi. Farklı yazılmış aynı ürünler için yapay zekâ eşleştirmesi kullanılabilir.</span>}
+              ? <span className="text-slate-500">Firmaların kalemleri eşleştirildi ({fmtDate(form.aiMatchedAt)}). Yanlış eşleşme varsa satırdaki <Split className="w-3 h-3 inline" /> ile ayır.</span>
+              : <span className="text-slate-500">Farklı yazılmış aynı ürünler teknik özelliklerine (çap, sınıf, boy, ГОСТ) göre otomatik eşleştirildi; firmanın yazdığı ad alt bilgi olarak görünür.</span>}
             {form.aiMatchError && <div className="text-xs text-amber-700 mt-0.5">Yapay zekâ eşleştirmesi yapılamadı: {form.aiMatchError}</div>}
           </div>
           <button onClick={onRunMatch} disabled={matchBusy} className="px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-xs font-bold flex items-center gap-1.5 disabled:opacity-50">
@@ -683,7 +696,7 @@ function ComparisonStep({ form, computed, edit, aiBusy, aiError, onRunAi, matchB
           <div className="flex gap-3 text-xs text-slate-500 items-center flex-wrap">
             <span><span className="inline-block w-3 h-3 rounded bg-emerald-100 border border-emerald-300 align-middle mr-1" />en düşük</span>
             <span><span className="inline-block w-3 h-3 rounded bg-rose-100 border border-rose-300 align-middle mr-1" />en yüksek</span>
-            <span><span className="inline-block w-3 h-3 rounded bg-amber-100 border-2 border-amber-500 align-middle mr-1" />uyarı (üstüne gel)</span>
+            <span><span className="inline-block w-3 h-3 rounded bg-amber-100 border-2 border-amber-500 align-middle mr-1" />teknik fark (bilgi amaçlı)</span>
           </div>
         </div>
         <div className="overflow-x-auto">
@@ -691,14 +704,14 @@ function ComparisonStep({ form, computed, edit, aiBusy, aiError, onRunAi, matchB
             <thead>
               <tr>
                 <th rowSpan={2} className="border border-slate-200 bg-slate-100 p-1.5">№</th>
-                <th rowSpan={2} className="border border-slate-200 bg-slate-100 p-1.5 text-left min-w-[180px]">Kalem</th>
+                <th rowSpan={2} className="border border-slate-200 bg-slate-100 p-1.5 text-left min-w-[200px]">Standart Kalem Adı</th>
                 <th rowSpan={2} className="border border-slate-200 bg-slate-100 p-1.5">Sipariş</th>
                 {S.map(s => <th key={s.key} colSpan={3} className="border border-slate-200 bg-slate-900 text-white p-1.5 whitespace-nowrap">{shortSupplierName(s.name)}</th>)}
                 <th colSpan={3} className="border border-slate-200 bg-yellow-100 p-1.5">En iyi fiyat</th>
                 <th rowSpan={2} className="border border-slate-200 bg-slate-100 p-1.5"></th>
               </tr>
               <tr>
-                {S.map(s => <React.Fragment key={s.key}><th className="border border-slate-200 bg-slate-100 p-1">Birim fiyat</th><th className="border border-slate-200 bg-slate-100 p-1">Toplam</th><th className="border border-slate-200 bg-slate-100 p-1">Marka · teslim</th></React.Fragment>)}
+                {S.map(s => <React.Fragment key={s.key}><th className="border border-slate-200 bg-slate-100 p-1">Birim fiyat</th><th className="border border-slate-200 bg-slate-100 p-1">Toplam</th><th className="border border-slate-200 bg-slate-100 p-1">Teklif detayı · teslim</th></React.Fragment>)}
                 <th className="border border-slate-200 bg-yellow-100 p-1">Firma</th><th className="border border-slate-200 bg-yellow-100 p-1">Fiyat</th><th className="border border-slate-200 bg-yellow-100 p-1">1.–2. fark</th>
               </tr>
             </thead>
@@ -834,11 +847,10 @@ const MatrixRow: React.FC<MatrixRowProps> = ({ m, i, computed, form, edit, onMer
       <td className="border border-slate-200 p-1.5 text-right">{i + 1}</td>
       <td className="border border-slate-200 p-1.5 min-w-[220px]">
         <input value={form.materialNames?.[m.key] ?? m.name} onChange={e => edit(f => { f.materialNames = { ...(f.materialNames || {}), [m.key]: e.target.value }; })} className="w-full font-semibold text-slate-900 bg-transparent outline-none focus:bg-white focus:ring-1 focus:ring-indigo-300 rounded px-0.5" aria-label="Kalem adı" />
-        {(spec || m.match === 'similar' || m.match === 'ai') && (
+        {(spec || m.match === 'ai') && (
           <div className="flex flex-wrap items-center gap-1 mt-0.5">
-            {spec && <span className="text-[10px] text-slate-500">{spec}</span>}
-            {m.match === 'similar' && <span className="text-[10px] px-1.5 rounded-full bg-amber-100 text-amber-800 font-semibold" title="Firmalar bu ürünü farklı yazmış; ölçüler aynı olduğu için tek satırda toplandı.">benzer adla eşleşti · kontrol et</span>}
-            {m.match === 'ai' && <span className="text-[10px] px-1.5 rounded-full bg-indigo-100 text-indigo-700 font-semibold">yapay zekâ eşleştirdi</span>}
+            {spec && <span className="text-[10px] text-slate-500 font-medium">{spec}</span>}
+            {m.match === 'ai' && <span className="text-[10px] px-1.5 rounded bg-indigo-50 text-indigo-700 font-semibold">YZ eşleştirdi</span>}
           </div>
         )}
       </td>
@@ -851,13 +863,23 @@ const MatrixRow: React.FC<MatrixRowProps> = ({ m, i, computed, form, edit, onMer
         if (!x) return <td key={s.key} colSpan={3} className="border border-slate-200 p-1.5 text-center text-slate-300">—</td>;
         const isLow = m.bestPrice !== null && Math.abs(x.unitPrice - m.bestPrice) < 0.005;
         const isHigh = comparableCount > 2 && m.worstPrice !== null && m.worstPrice !== m.bestPrice && Math.abs(x.unitPrice - m.worstPrice) < 0.005;
-        const cls = x.warning ? 'bg-amber-50 text-amber-800 font-bold ring-2 ring-inset ring-amber-500' : isLow ? 'bg-emerald-50 text-emerald-700 font-bold' : isHigh ? 'bg-rose-50 text-rose-700' : '';
+        const cls = x.warning ? 'bg-amber-50 text-amber-800 font-bold ring-1 ring-inset ring-amber-400' : isLow ? 'bg-emerald-50 text-emerald-700 font-bold' : isHigh ? 'bg-rose-50 text-rose-700' : '';
         const title = [x.name !== m.name ? `Teklifteki ad: ${x.name}` : '', x.brand ? `Marka: ${x.brand}` : '', x.warning || '', x.convertedFrom ? `Birim çevrildi: ${x.convertedFrom}` : ''].filter(Boolean).join('\n');
+        const bn = cellBrandNote(m, s);
+        const offName = cellOfferedName(m, s);
+        const warnShort = x.warning ? x.warning.replace(/^Teknik fark:\s*/i, '') : '';
         return (
           <React.Fragment key={s.key}>
-            <td className={`border border-slate-200 p-1.5 text-right font-mono whitespace-nowrap ${cls}`} title={title || undefined}>{rub(x.unitPrice)}{x.warning ? ' !' : ''}</td>
+            <td className={`border border-slate-200 p-1.5 text-right font-mono whitespace-nowrap ${cls}`} title={title || undefined}>
+              <div>{rub(x.unitPrice)}</div>
+              {warnShort && <div className="text-[9.5px] font-sans font-semibold text-amber-700 leading-tight mt-0.5">⚠ {warnShort} · bilgi amaçlı</div>}
+            </td>
             <td className="border border-slate-200 p-1.5 text-right font-mono whitespace-nowrap">{rub(x.total)}</td>
-            <td className="border border-slate-200 p-1.5 text-slate-500 max-w-[140px]">{cellBrandNote(m, s)}</td>
+            <td className="border border-slate-200 p-1.5 text-slate-500 max-w-[165px]" title={x.name !== m.name ? x.name : undefined}>
+              {bn && <div className="text-[10.5px] text-slate-600 leading-snug">{bn}</div>}
+              {offName && <div className="text-[9.5px] text-slate-400 truncate leading-snug">{offName}</div>}
+              {!bn && !offName && <span className="text-slate-300">—</span>}
+            </td>
           </React.Fragment>
         );
       })}

@@ -174,4 +174,52 @@ const cl = computeTdf(legacy, '2026-10-20');
 assert.ok(cl.scores.find(s => s.supplierKey === sk('ООО "ТРЕЙДМИ"'))!.payment > cf2.scores.find(s => s.supplierKey === sk('ООО "ТРЕЙДМИ"'))!.payment, 'vadeli ödeme avanstan yüksek puan alır');
 console.log('✓ nakliye dahil genel toplam ve öneri');
 
+// Citybay6 armatür yazım farkları: ГОСТ 34028 vs 34028-2016, 36х11700 vs Ø36 11,7м, А240 vs А240С, Катанка/Сталь углеродистая
+const citybay: TdfForm = {
+  id: 'cb', code: 'TDF-2026-0004', title: 'Citybay6', status: 'draft', createdAt: '', updatedAt: '',
+  offers: [
+    offer('dipos', 'ООО ПКФ "ДИПОС"', [
+      ['Арматура А500С ф36 11700 (ГОСТ 34028-2016)', 65, 54500],
+      ['Арматура А240 ф 8 ст3сп/пс 6000 (ГОСТ 34028-2016)', 5, 59000]
+    ]),
+    offer('tula', 'ООО "ТОРГОВЫЙ ДОМ ТУЛА-СТАЛЬ"', [
+      ['Арм. Пруток МД 36х11700 А500С ГОСТ 34028-2016', 65, 49500],
+      ['Арм. Пруток МД 8х6000 А240С ГОСТ 34028-2016', 5, 52500]
+    ]),
+    offer('bmz', 'ООО "ТОРГОВЫЙ ДОМ БМЗ"', [
+      ['Сталь углеродистая для армирования железобетонных конструкций периодическогопрофиля d 36 мм; А500С', 5, 49500],
+      ['Катанка 8мм А240; Ст 3сп (6м)', 15, 54500]
+    ]),
+    offer('uvm', 'ООО "УВМ-СТАЛЬ"', [
+      ['Арматура А500С Ø36 (11,7м ГОСТ 34028)', 65, 55900],
+      ['Арматура А240 Ø8 (11,7м)', 5, 57900]
+    ])
+  ]
+};
+const ccb = computeTdf(citybay, '2026-10-20');
+const row36 = ccb.materials.find(m => m.specs.diameter === '36')!;
+assert.ok(row36, 'Ø36 satırı bulunmalı');
+assert.strictEqual(row36.offerCount, 4, '4 firmanın farklı yazılmış Ø36 А500С kalemi otomatik tek satırda birleşmeli');
+assert.strictEqual(row36.name, 'Арматура А500С Ø36 (11,7 м)', 'standart ortak ad');
+assert.ok(Object.values(row36.cells).every(cell => !cell?.warning), 'ГОСТ 34028 vs 34028-2016 ve 36х11700 yazımı yanlış uyarı üretmemeli');
+assert.strictEqual(row36.bestPrice, 49500);
+// Ø8 А240 satırında UVM 11,7м teklifi elle birleştirildiğinde yalnızca UVM hücresi uyarı almalı, 6м veren 3 firma kıyaslanabilmeli
+const row8_6m = ccb.materials.find(m => m.specs.diameter === '8' && m.specs.length === '6')!;
+const row8_11m = ccb.materials.find(m => m.specs.diameter === '8' && m.specs.length === '11.7')!;
+assert.strictEqual(row8_6m.offerCount, 3, 'А240 ve А240С 6m olan 3 firma otomatik birleşmeli');
+assert.ok(Object.values(row8_6m.cells).every(cell => !cell?.warning), 'А240 vs А240С yanlış uyarı üretmemeli');
+citybay.materialOverrides = {
+  ...Object.fromEntries(Object.values(row8_6m.cells).map(c => [c!.lineId, row8_6m.key])),
+  ...Object.fromEntries(Object.values(row8_11m.cells).map(c => [c!.lineId, row8_6m.key]))
+};
+const ccbMerged = computeTdf(citybay, '2026-10-20');
+const merged8 = ccbMerged.materials.find(m => m.key === row8_6m.key)!;
+assert.strictEqual(merged8.offerCount, 4);
+assert.ok(merged8.cells[sk('ООО "УВМ-СТАЛЬ"')]?.warning?.includes('boy 6 ≠ 11.7'), 'yalnızca 11,7м veren UVM uyarı almalı');
+assert.ok(!merged8.cells[sk('ООО "ТОРГОВЫЙ ДОМ ТУЛА-СТАЛЬ"')]?.warning, '6м veren Tula uyarı almamalı');
+assert.ok(!merged8.cells[sk('ООО ПКФ "ДИПОС"')]?.warning, '6м veren ДиПОС uyarı almamalı');
+assert.ok(!merged8.cells[sk('ООО "ТОРГОВЫЙ ДОМ БМЗ"')]?.warning, '6м veren БМЗ uyarı almamalı');
+assert.strictEqual(merged8.bestPrice, 52500, '6м veren firmalar arasında en ucuz fiyat seçilmeli');
+console.log('✓ Citybay6 armatür eşleştirme, standart ad ve tekil hücre uyarısı');
+
 console.log('TDF motoru testleri geçti.');

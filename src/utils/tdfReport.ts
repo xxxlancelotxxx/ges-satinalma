@@ -4,7 +4,7 @@
  * böylece dört çıktı da aynı cümleleri ve aynı rakamları gösterir.
  */
 import {
-  TdfComputed, TdfForm, TdfMaterialRow, TdfSupplierCol, TdfTermKey, TDF_TERM_KEYS, TDF_TERM_LABELS,
+  compactOfferedName, TdfComputed, TdfForm, TdfMaterialRow, TdfSupplierCol, TdfTermKey, TDF_TERM_KEYS, TDF_TERM_LABELS,
   shortSupplierName, tdfFormat, TdfWarningLevel
 } from './tdfEngine';
 
@@ -59,7 +59,7 @@ export function termText(col: TdfSupplierCol, key: TdfTermKey): string {
 /** Kalemin teknik özellikleri tek satırda: "A500C · 12 mm · 11.7 m · 1525x1525". */
 export function materialSpecText(m: TdfMaterialRow): string {
   const sp = m.specs || {};
-  return [sp.grade, sp.size ? sp.size.replace('x', '×') : '', sp.thickness ? `kalınlık ${sp.thickness} mm` : '', sp.diameter ? `${sp.diameter} mm` : '',
+  return [sp.grade, sp.size ? sp.size.replace('x', '×') : '', sp.thickness ? `kalınlık ${sp.thickness} mm` : '', sp.diameter ? `Ø${sp.diameter} mm` : '',
     sp.length ? `${sp.length} m` : '', sp.density ? `${sp.density} kg/m³` : '', sp.ral ? `RAL ${sp.ral}` : '', sp.gost ? `ГОСТ ${sp.gost}` : '']
     .filter(Boolean).join(' · ');
 }
@@ -70,6 +70,14 @@ export function cellBrandNote(m: TdfMaterialRow, col: TdfSupplierCol): string {
   if (!c) return '';
   const d = (c.delivery || '').trim();
   return [c.brand ? c.brand : '', /^наличи$/i.test(d) ? 'в наличии' : d].filter(Boolean).join(' · ');
+}
+
+/** Firmanın teklifinde yazan orijinal kalem adı (ortak addan farklıysa kısaltılmış alt bilgi olarak). */
+export function cellOfferedName(m: TdfMaterialRow, col: TdfSupplierCol): string {
+  const c = m.cells[col.key];
+  if (!c || !c.name) return '';
+  if (c.name.trim() === m.name.trim()) return '';
+  return compactOfferedName(c.name);
 }
 
 /** Nakliye hücresi: ayrı bedel, fiyata dahil veya fabrika teslimde girilmemiş. */

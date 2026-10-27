@@ -1,92 +1,99 @@
-# Anomali Teşhisi, Piyasa Analizi ve Fatura İçi Fiyat Birebir Eşitleme Planı
+# Akıllı ve Profesyonel TDF (Teklif Değerlendirme Formu) Tasarımı ve Eşleştirme Motoru
 
-Anomali Teşhisi, Piyasa Analizi ve Fatura Geçmişi tablolarında görünen birim fiyatlar ile **"Fatura Gör"** butonuna tıklandığında açılan fatura detay ekranındaki birim fiyatların tüm sistem genelinde (%100 doğrulukla) birebir eşleşmesini sağlar ve Prizma ERP faturalarının gerçek içerik ve PDF belgeleriyle açılmasını kalıcı olarak çözer.
+Farklı tedarikçilerin aynı inşaat malzemesini (özellikle inşaat demiri / armatür, kontrplak, yalıtım vb.) farklı yazım biçimleriyle teklif etmesi nedeniyle oluşan yanlış "Kritik Teknik Fark" uyarılarını ortadan kaldırır; TDF ekranını ve çıktılarını (HTML, PDF, Excel) ilk bakışta anlaşılır, kurumsal ve yönetici dostu bir yapıya kavuşturur.
 
-## Kullanıcı Onayı ve Kritik Kararlar
+## Kullanıcı Onayları ve Kritik Kararlar
 
 > [!IMPORTANT]
-> Sistem genelinde yapılan canlı veri denetiminde (467 GES Arşivi faturası, 634 Prizma ERP faturası ve 3.416 malzeme geçmişi satırı) XPS Carbon Prof 100 mm örneğindeki gibi tablo fiyatı (`7.487,04 ₽` / `7.000,00 ₽`) ile fatura detay ekranı (`7.553,25 ₽`) arasındaki farkın nedenleri tespit edilmiş ve aşağıdaki kararlar doğrultusunda kalıcı çözüm kurgulanmıştır:
+> Aşağıdaki iki temel tasarım kararı yanıtlarınıza göre kesinleştirilmiştir:
 
-- **Onaylanan Karar 1 (Fiyat Bazı)**: Anomali ve fiyat geçmişi tablolarında yapay `%20 -> %22` KDV yeniden ölçeklemesi yapılmayacak; faturadaki **gerçek KDV dahil ödenen birim fiyat** birebir gösterilecektir.
-- **Onaylanan Karar 2 (Üst Özet Kartları)**: Anomali detay penceresinin üst özet alanında **En Düşük Birim Fiyat (Baz Fatura)**, **En Yüksek Birim Fiyat (Tepe Fatura)** ve **Son Fatura Birim Fiyatı (Güncel Alım)** ayrı kartlar halinde net olarak gösterilecektir.
+- **Onaylanan Karar 1 (Standart Ortak Kalem Adı)**: Farklı firmaların farklı şekillerde yazdığı aynı malzemeler için tabloda temiz ve standart bir ortak ad (ör. `Арматура А500С Ø36 · 11,7 м · ГОСТ 34028`) gösterilecek; tedarikçilerin kendi tekliflerindeki orijinal yazımları ise hücre ipucunda ve alt bilgisinde korunacaktır.
+- **Onaylanan Karar 2 (Gerçek Teknik Farkların İzole Edilmesi)**: Yazım biçimi farkları (`ГОСТ 34028` ile `ГОСТ 34028-2016`, `36х11700` ile `Ø36 11,7м`, `А240` ile `А240С`, `Катанка 8мм А240` ile `Арматура А240 Ø8`) kesinlikle teknik fark sayılmayacaktır. Gerçek bir teknik fark olduğunda (ör. 3 firma `6 m` teklif ederken 1 firmanın `11,7 m` teklif etmesi), satırın çoğunluk/referans özelliği baz alınarak **yalnızca farklı teklif veren firmanın hücresi** uyarılacak, doğru teklif veren diğer firmaların hücreleri kirletilmeyecektir.
 
 ---
 
-## 1. Genel Bakış ve Kök Neden Çözümü
+## 1. Genel Bakış ve Temel Çözüm
 
-- **Ne Yapar**:
-  1. **Prizma ERP Faturalarının Tam Bağlantısı (1.586 Satır)**: XPS Carbon Prof 100 mm örneğindeki `1964` (`7.487,04 ₽`), `1978` (`7.000,00 ₽`), `1887` (`7.553,25 ₽`), `1647` (`7.553,25 ₽`), `1066` (`7.553,25 ₽`) ve `465` (`6.250,00 ₽`) gibi Prizma ERP kaynaklı faturalara tıklandığında uyarı kartının tepe fiyatını (`7.553,25 ₽`) koyan hatalı yedek (fallback) mekanizma kaldırılır; doğrudan ilgili Prizma faturasının gerçek kalemleri, gerçek birim fiyatı ve orijinal `Счет на оплату` PDF belgesi açılır.
-  2. **Gerçek KDV Dahil Fiyatın Korunması (59 Satır)**: Faturada gerçek KDV dahil fiyatı (`grossUnitPrice`) belli olan kalemlerin `%20` KDV'den `%22`'ye yapay olarak çarpılması ve zaten KDV'si ayrıştırılmış kalemlerin çapraz KDV kontrolünde ikinci kez bölünüp çarpılması engellenir.
-  3. **En Düşük, En Yüksek ve Son Fatura Ayrımı**: Şantiyeler arası fiyat farkı (`JOBSITE_PRICE_GAP`) uyarılarında geçmişteki en yüksek fiyatlı faturanın (`7.553,25 ₽`, Haziran) yanlışlıkla "Son Fatura Birim Fiyatı" olarak yazılması düzeltilir; en son tarihli fatura (`7.487,04 ₽`, Ekim) ile en yüksek ve en düşük faturalar ayrı ayrı gösterilir.
-- **Hedef Kullanıcılar**: Satınalma yöneticileri, şantiye şefleri ve maliyet kontrol ekibi.
-- **Temel Kazanım**: Tabloda hangi rakam yazıyorsa faturanın içine girildiğinde de kuruşu kuruşuna aynı rakam ve gerçek fatura belgesi görülür.
+- **Sorunun Kaynağı**:
+  1. Mevcut TDF motoru `Арм. Пруток МД 36х11700 А500С ГОСТ 34028-2016` ifadesindeki `36х11700` ölçüsünü "levha ebadı (`size: 11700x36`)" sanıyor, `Ø36` çap ve `11,7 m` boy olarak çözümleyemiyordu.
+  2. `ГОСТ 34028-2016` (yıl ekli) ile `ГОСТ 34028` (yıl eksiz) standartlarını veya `А240` ile `А240С` düz demir sınıflarını birbirinden farklı sanarak her satırda **Kritik Teknik Fark** üretiyordu.
+  3. Bir satırda tek bir firma farklı özellik verdiğinde, motor her hücreyi diğer tüm hücrelerle çapraz kıyasladığı için satırdaki **bütün firmaları** "Teknik fark: kıyasa katılmadı" olarak işaretleyip karşılaştırmayı bozuyordu.
+- **Hedef Kitle**: Satınalma şefleri, satınalma müdürleri ve üst yönetim (onay makamı).
+- **Sağlanan Değer**: Sıfır sahte uyarı, %100 doğru çap/boy/sınıf/GOST eşleşmesi, temiz standart kalem isimlendirmesi ve tek bakışta kazanan firmayı, pazarlık indirimini ve gerçek uyarıları gösteren kurumsal TDF tablosu.
 
 ---
 
 ## 2. Kullanıcı Deneyimi ve Görsel Tasarım
 
-- **Kullanıcı Akışı**:
-  1. Kullanıcı **Anomali Teşhisi** veya **Birim Fiyat Kıyaslama** ekranında bir malzemenin detay penceresini açar.
-  2. Üst bölümde **4 net özet kart** yer alır:
-     - **En Düşük Birim Fiyat (Baz)**: Ör. `6.250,00 ₽ / m³` (`Fatura 465 • 2026-04-09 • Nuri Buga`)
-     - **En Yüksek Birim Fiyat (Tepe)**: Ör. `7.553,25 ₽ / m³` (`Fatura 1066 • 2026-06-26 • Nuri Buga`)
-     - **Son Fatura Birim Fiyatı (Güncel)**: Ör. `7.487,04 ₽ / m³` (`Fatura 1964 • 2026-10-13 • Nuri Buga`)
-     - **Fiyat Farkı & Mali Etki**: En düşük baz ile tepe/son alım arasındaki yüzdesel sapma ve toplam ruble etkisi.
-  3. Alt kısımdaki **Tüm Zamanların Fatura Geçmişi** tablosunda her satırın yanında duruma göre **En Düşük Baz**, **En Yüksek Fiyat** ve **Son Alım** rozetleri gösterilir.
-  4. Kullanıcı tablodaki herhangi bir satırda (`1964`, `1978` vb.) **"Fatura Gör"** butonuna tıkladığında, o faturanın gerçek Prizma veya GES Arşivi kaydı (`7.487,04 ₽`, `7.000,00 ₽` vb.) ve orijinal PDF faturası açılır.
+- **Adım Adım Kullanıcı Akışı**:
+  1. **Özet ve Karar Kartları**: Ekranın ve çıktının en üstünde 4 net KPI kartı (Önerilen Plan & Kazanan Firma, Tek Firma En Ucuz Tam Teklif, En Yüksek Teklif İle Fark, Pazarlıkla Kazanılan İndirim) ve hemen altında yeşil vurguyla **Sistemin Satınalma Önerisi** yer alır.
+  2. **Temiz ve Standart Fiyat Karşılaştırma Matrisi**:
+     - Her satırda malzemenin otomatik üretilmiş temiz standart adı (ör. `Арматура А500С Ø36 · 11,7 м`) ve altında düzenli teknik özellik rozetleri (`A500C · Ø36 mm · 11,7 m · ГОСТ 34028`) yer alır.
+     - Kalemler inşaat demiri gibi gruplarda çapa göre düzenli sıralanır (`Ø40 → Ø36 → Ø32 → ... → Ø8 A500C → Ø8 A240`).
+     - Her firma sütununda birim fiyat ve toplam tutar `tabular-nums` (rakamlar alt alta hizalı) olarak gösterilir; en ucuz fiyatlar zümrüt yeşili (`#0B7A4B`), en pahalılar soluk mercan, gerçek teknik fark olan tekil hücre ise kehribar (`#D97706`) bilgi etiketiyle vurgulanır.
+  3. **Gruplanmış ve Özlü Uyarı Paneli**:
+     - Aynı sebepten kaynaklanan uyarılar 30 ayrı satır halinde alt alta dizilmez; firma bazında gruplanmış, temiz ve aksiyon odaklı tekil bildirimler halinde sunulur.
 - **Görsel Kimlik ve Tema**:
-  - *Estetik Yönelim*: Finansal denetim netliği sağlayan kurumsal veri arayüzü.
-  - *Renk Paleti*: En düşük baz fiyat için zümrüt yeşili (`emerald`), en yüksek tepe fiyat için kırmızı/kehribar (`rose`/`amber`), güncel son fatura için çivit/mavi (`indigo`) vurgu tonları.
-  - *Tipografi*: Tüm birim fiyatlar ve toplam tutarlar `tabular-nums` (hizalı rakam) formatında, KDV durumu (`KDV Dahil Ödenen`) açıkça belirtilerek sunulur.
+  - *Estetik Yönelim*: Kurumsal mühendislik ve finansal tablo disiplini (yüksek okunabilirlik, tek katmanlı kart derinliği, gereksiz rozet kalabalığından arındırılmış hiyerarşi).
+  - *Renk Paleti*:
+    - Arka plan ve yüzeyler: Temiz beyaz (`#FFFFFF`) ve açık arduvaz (`#F8FAFC`), tablo başlıklarında kurumsal lacivert (`#102C54`).
+    - Vurgu ve durum renkleri: En iyi fiyat ve öneri için zümrüt yeşili (`#16A34A` / `#E2F5EC`), en iyi fiyat özet bloğu için sıcak altın sarısı (`#FFEB9C`), dikkat/fark hücreleri için kehribar (`#D97706` / `#FFF3D6`), gerçek kritik çelişkiler için koyu kırmızı (`#DC2626` / `#FDE8E6`).
+  - *Tipografi ve Tablo Disiplini*: Tüm fiyat, miktar ve yüzdelerde `tabular-nums` kullanılarak basamakların kusursuz dikey hizalanması sağlanır.
 
 ---
 
-## 3. Temel Mimari Kararlar ve Gerekçeleri
+## 3. Temel Ürün Kararları ve Teknik Yaklaşım
 
-- **Karar 1: Birleşik Fatura Çözümleme Havuzu (GES Arşivi + Prizma ERP)**
-  - *Seçilen Yaklaşım*: Firestore'daki `invoices` (467 kayıt) ve `prizma_invoices` (634 kayıt) veritabanında izole kalmaya devam ederken, arayüzde fatura detay çözümleme haritası her iki kaynağı da (`invoiceId` -> `invoiceNumber + supplier` -> `invoiceNumber` öncelik sırasıyla) tarar.
-  - *Neden*: GES Arşivi sayımlarını (`invoices: 467, discounts: 261`) bozmadan 1.586 Prizma fatura satırının tamamının gerçek fatura verisi ve PDF'i ile açılmasını sağlar.
-- **Karar 2: Fatura İçi KDV Dahil Gerçek Fiyatın (`paidGrossUnitPrice`) Esas Alınması**
-  - *Seçilen Yaklaşım*: Fatura kaleminde doğrulanmış KDV dahil birim fiyat mevcut olduğunda karşılaştırma motoru bu fiyatı doğrudan korur; yalnızca fiziksel birim dönüşümü (ör. paket -> m³, ton -> kg) varsa standart birime çevirir ve faturadaki orijinal birim fiyatını da yanında tutar.
-  - *Neden*: `%20` KDV'li eski faturaların `%22` ile çarpılarak faturada yazmayan sanal rakamlar üretmesini ve kullanıcıda "fatura içi ile tablo uyuşmuyor" algısı oluşmasını tamamen ortadan kaldırır.
+- **Karar 1: İnşaat Demiri (Armatür) ve Teknik Özellik Normalizasyonu**
+  - *Seçilen Yaklaşım*:
+    - `Арм. Пруток МД 36х11700`, `Сталь углеродистая для армирования... в d 32 мм`, `Катанка 8мм А240 (6м)`, `Арматура А500С ф 8 11700`, `Арматура А500С Ø36 (11,7м)` ifadelerinin tamamı aynı ortak teknik modele (`kategori: арматура`, `sınıf: A500C / A240`, `çap: 36 mm`, `boy: 11.7 m`, `ГОСТ: 34028`) dönüştürülecek.
+    - Milimetre cinsinden yazılan boylar (`11700`, `6000`, `12000`) otomatik olarak metreye (`11.7`, `6`, `12`) çevrilecek; `36х11700` ifadesinin levha ebadı değil `Ø36 mm × 11,7 m` boyunda demir çubuk olduğu tanınacak.
+    - GOST numaralarındaki yıl uzantıları (`34028-2016` → `34028`) ve eşdeğer düz demir sınıfları (`А240С` → `А240`) normalize edilerek sahte fark üretmesi engellenecek.
+  - *Neden*: Tedarikçiler kendi ERP sistemlerindeki stok adlarını kullanır; satınalma uzmanının bunları tek tek elle düzeltmesine gerek kalmadan sistem aynı malzeme olduğunu ilk anda anlamalıdır.
+- **Karar 2: Satır Bazlı Referans (Çoğunluk) Özelliğe Göre Fark Tespiti**
+  - *Seçilen Yaklaşım*: Bir satırdaki hücreler birbirleriyle rastgele kıyaslanmak yerine, satırın **referans (çoğunluk / talep) teknik özelliği** belirlenir. Yalnızca bu referanstan sapan firmanın hücresine (ör. 3 firma `6 m` verirken `11,7 m` veren 1 firmaya) uyarı eklenir; diğer 3 firmanın fiyatı normal şekilde en iyi fiyat yarışına girer.
+  - *Neden*: Tek bir firmanın farklı boy teklif etmesi yüzünden doğru teklif veren diğer tüm firmaların "kıyasa katılmadı" olarak devre dışı kalması tamamen önlenir.
+- **Karar 3: Standart Ortak Kalem Adı Üretimi**
+  - *Seçilen Yaklaşım*: Aynı satırda birleşen kalemler için malzemenin cinsine ve çıkarılan teknik özelliklerine göre okunaklı standart ad (ör. `Арматура А500С Ø36 · 11,7 м` veya `Арматура А240 Ø8 · 6 м`) otomatik üretilir; kullanıcı isterse üzerine tıklayıp özel ad yazabilir.
 
 ---
 
 ## 4. Teknik Mimari ve Veri Akışı
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                   VERİ KAYNAKLARI (Firestore İzole)                     │
-│   ┌────────────────────────────┐     ┌──────────────────────────────┐   │
-│   │ GES Arşivi (467 Fatura)    │     │ Prizma ERP (634 Fatura)      │   │
-│   └─────────────┬──────────────┘     └──────────────┬───────────────┘   │
-└─────────────────┼───────────────────────────────────┼───────────────────┘
-                  │                                   │
-                  ▼                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│          KARŞILAŞTIRMA & ANOMALİ MOTORU (Gerçek KDV Dahil Fiyat)        │
-│  • Doğrulanmış grossUnitPrice / netUnitPrice kalemlerde çapraz KDV      │
-│    bölme/çarpma (Step A/B) devre dışı bırakılır                         │
-│  • Tablo birim fiyatı = Faturadaki gerçek KDV dahil birim fiyat         │
-│  • Her geçmiş satırına invoiceId, prizmaDemandId, invoiceFileId eklenir │
-└─────────────────────────────────┬───────────────────────────────────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│            ANOMALİ TEŞHİSİ & PİYASA ANALİZİ DETAY PENCERESİ             │
-│  ┌──────────────────────┬──────────────────────┬─────────────────────┐  │
-│  │ En Düşük Birim Fiyat │ En Yüksek Birim Fiyat│ Son Fatura Fiyatı   │  │
-│  │ (Baz Fatura & Tarih) │ (Tepe Fatura & Tarih)│ (Güncel Alım & No)  │  │
-│  └──────────────────────┴──────────────────────┴─────────────────────┘  │
-│                                 │                                       │
-│                    "Fatura Gör" │ (invoiceId / prizmaDemandId)          │
-│                                 ▼                                       │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │ FATURA DETAY PENCERESİ (Gerçek Kalemler + Prizma/GES PDF Önizleme)│  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                     TDF Teklif Belgeleri (PDF / Excel)                   │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│             1. Akıllı Teknik Özellik & Kalem Normalizasyonu              │
+│  • Demir/Armatür kalıpları: "36х11700", "ф36 11700", "в d 36 мм", "Ø36"  │
+│    ──► Çap: 36 mm, Boy: 11.7 m (11700 mm → 11.7 m), Sınıf: A500C         │
+│  • GOST & Sınıf Eşdeğerliği: "ГОСТ 34028-2016" ≡ "ГОСТ 34028"            │
+│    "А240С" ≡ "А240", "Катанка 8мм А240" ≡ "Арматура А240 Ø8"             │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│            2. Otomatik Satır Eşleştirme & Standart Ad Üretici            │
+│  • Aynı cins + aynı çap + aynı sınıf kalemleri tek satırda toplar        │
+│  • Standart ortak ad üretir: "Арматура А500С Ø36 · 11,7 м (ГОСТ 34028)"  │
+│  • Her firmanın kendi belgesindeki orijinal adını alt bilgi olarak tutar │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│          3. Çoğunluk (Referans) Bazlı Fark ve Fiyat Kıyas Motoru         │
+│  • Satırın referans özelliğini (çoğunluk çap/sınıf/boy) belirler         │
+│  • Yalnızca referanstan sapan firmanın hücresini uyarır                  │
+│  • Doğru teklif veren firmalar arasında En İyi Fiyat ve Planı hesaplar   │
+└───────────────┬────────────────────┴───────────────────┬─────────────────┘
+                ▼                                        ▼
+┌───────────────────────────────────┐    ┌─────────────────────────────────┐
+│   Etkileşimli TDF Ekranı (UI)     │    │  Kurumsal Çıktılar (HTML/PDF/   │
+│  • Yönetici Özet & Öneri Kartları │    │  Excel)                         │
+│  • Hizalı Karşılaştırma Matrisi   │    │  • Birebir aynı standart adlar  │
+│  • Gruplanmış Net Uyarı Listesi   │    │  • Formüllü Excel & A3 PDF      │
+└───────────────────────────────────┘    └─────────────────────────────────┘
 ```
 
-### Durum ve Etkileşim Eşleştirmesi
-- **Fatura Detay Açılışı**: Satırdaki `invoiceId` veya `invoiceNumber + supplier` üzerinden gerçek fatura nesnesi bulunur. İstisnai olarak kayıt bulunamazsa dahi uyarı kartının tepe fiyatı (`currentPrice`) **asla** kullanılmaz; tıklanan satırın kendi `unitPrice`, `netUnitPrice`, `grossUnitPrice`, `quantity`, `supplier` ve `date` bilgileriyle birebir gösterim yapılır.
-- **Prizma PDF Görüntüleme**: Prizma kaynaklı faturalarda `prizmaDemandId` / `invoiceFileId` üzerinden orijinal PDF (`Счет на оплату`) doğrudan fatura detay penceresinde yüklenir.
+- **Mevcut Citybay6 Kaydının Otomatik İyileştirilmesi**:
+  - Motor güncellendiğinde `Citybay6` (`TDF-2026-0004`) dahil mevcut tüm TDF kayıtları yeni motorla otomatik hesaplanacak; 32 adet sahte kritik uyarı sıfırlanacak, tüm demir çapları (`Ø40`, `Ø36`, `Ø32`, `Ø28`, `Ø25`, `Ø20`, `Ø16`, `Ø14`, `Ø12`, `Ø8 A500C`, `Ø8 A240`) temiz standart adlarıyla ve doğru en iyi fiyat hesaplarıyla görüntülenecektir.
