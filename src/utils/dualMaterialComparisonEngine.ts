@@ -7,7 +7,7 @@ import {
   extractTechnicalStandardAndGrade,
   formatTechnicalVariantBadges
 } from './materialGroupIntegrity';
-import { normalizeCategoryName } from './categoryClassifier';
+import { normalizeCategoryName, CANONICAL_28_CATEGORIES } from './categoryClassifier';
 import { clusterSameProductRows } from './sameMaterialGuard';
 
 export type DualComparisonLens = 'MODE_1_APPLE_TO_APPLE' | 'MODE_2_BRAND_EQUIVALENT';
@@ -854,7 +854,7 @@ const ORIGINAL_PRODUCT_FAMILY_RULES: Array<{
     titleRu: 'Арматура строительная рифленая (ГОСТ 34028)',
     titleTr: 'Nervürlü İnşaat Demiri (GOST 34028)',
     isCommodity: true,
-    pattern: /арматур[аы]?\s*(?:а500|a500|а240|a240|а400|рифлен|гладк|ст3|35гс|25г2с)|\bарматура\b/i
+    pattern: /арматур[аы]?\s*(?:[аa]\s*500|[аa]\s*240|[аa]\s*400|рифлен|гладк|ст3|35гс|25г2с)|\bарматура\b|сталь\s+углеродистая\s+для\s+армирования|для\s+армирования\s+железобетонных\s+конструкций\s+периодического\s+профиля/i
   },
   {
     familyKey: 'COMMODITY_STEEL_PIPE_PROFILE',
@@ -2060,7 +2060,7 @@ export function getSynchronizedAppleToAppleComparisons(
   if (!Array.isArray(comparisons) || comparisons.length === 0) return [];
   const baseComparisons = comparisons
     .filter(isNonServiceMaterialComparison)
-    .map(c => ({ ...c, category: normalizeCategoryName(c.category, c.materialName) }));
+    .map(c => ({ ...c, category: (CANONICAL_28_CATEGORIES as readonly string[]).includes(c.category) ? c.category : normalizeCategoryName(c.category, c.materialName) }));
 
   const sourceFiltered: MaterialComparison[] = [];
   baseComparisons.forEach(c => {

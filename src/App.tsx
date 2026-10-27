@@ -509,7 +509,7 @@ function AppContent() {
     try {
       const res = await fetch('/api/jobsites', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(jobsite)
       });
       if (res.ok) {
@@ -524,7 +524,7 @@ function AppContent() {
     try {
       const res = await fetch('/api/supervisors', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(supervisor)
       });
       if (res.ok) {
@@ -539,7 +539,7 @@ function AppContent() {
     try {
       const res = await fetch(`/api/supervisors/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(supervisor)
       });
       if (res.ok) {
@@ -554,7 +554,7 @@ function AppContent() {
     try {
       const res = await fetch(`/api/jobsites/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(jobsite)
       });
       if (res.ok) {
@@ -597,7 +597,7 @@ function AppContent() {
     try {
       const res = await fetch('/api/personnel', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(pers)
       });
       if (res.ok) {
@@ -612,7 +612,7 @@ function AppContent() {
     try {
       const res = await fetch(`/api/personnel/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify(pers)
       });
       if (res.ok) {

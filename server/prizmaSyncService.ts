@@ -105,6 +105,11 @@ export function cleanRawMaterialName(raw: string): string {
 
   // 4. Remove Prizma administrative instructions in parentheses
   s = s.replace(/\(\s*(?:excel\s*dosyas[ıi]n[ae]\s*g[öo]re[^)]*|ad[ıi]na\s+[^)]*|adet|saha\s*genel[^)]*|ofis\s*i[çc]in[^)]*|fatura\s*i[çc]in[^)]*|it\s*sipari[şs][^)]*|kamp\s*ofis[^)]*|villa\s*i[çc]in[^)]*)\s*\)/gi, ' ');
+  s = s.replace(/\s+Счет\s*№\s*\S+\s+от\s+\d{1,2}\s+[а-яёa-z]+\s+\d{4}\s*(?:г\.?|g\.?)\s+Страница\s+\d+.*$/i, '');
+  s = s.replace(/\s+Всего\s*:\s*[\d\s.,]+\s+Итого\s*:\s*[\d\s.,]+(?:В\s*т\.?\s*ч\.?\s*НДС.*)?$/i, '');
+  s = s.replace(/\s*\(№[А-ЯЁA-Z]\.[\d.\s]+(?:Bar|Бар)\s*\d+\)\s*В\s+наличии\.?\s*[А-ЯЁA-Z]{2,3}\d+\s*\d*/gi, ' ');
+  s = s.replace(/\s+(?:под\s+заказ\s+в\s+наличии\s*,?\s*комплектация\s+до\s+\d+\s*раб\.?\s*дн\.?|под\s+заказ(?:\s+от\s+\d+\s+до\s+\d+\s*раб\.?\s*дн\.?|\s+\d+(?:\s*-\s*\d+)?\s*раб\.?\s*дн\.?)?|в\s+наличии(?:\s+в\s+наличии)?|\b1-2\s*дня)(?=\s*(?:\([^)]*\)|\[[^\]]*\])*[\s/|:;,\\-]*$)/gi, '');
+  s = s.replace(/\bProfesyonelьный(?:\s+Profesyonel)?\b/gi, 'Profesyonel');
 
   // 5. Clean extra punctuation at start/end
   s = s.replace(/^[\s/|:;,\\-]+|[\s/|:;,\\-]+$/g, '').replace(/\s{2,}/g, ' ').trim();

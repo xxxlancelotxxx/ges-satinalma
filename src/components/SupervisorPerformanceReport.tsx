@@ -207,7 +207,7 @@ export const SupervisorPerformanceReport: React.FC<Props> = ({
     const cleanPin = enteredPin.trim();
     if (!cleanPin) return;
 
-    if (cleanPin === REPORT_PIN || cleanPin === '1234') {
+    if (cleanPin === REPORT_PIN) {
       setIsUnlocked(true);
       setPinError('');
       setEnteredPin('');

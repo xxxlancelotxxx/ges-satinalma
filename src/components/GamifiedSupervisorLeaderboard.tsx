@@ -95,10 +95,10 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
   };
 
   const categoryTabs: Array<{ id: LeaderboardCategory; label: string; icon: any; desc: string }> = [
-    { id: 'MVP', label: 'Genel MVP', icon: Trophy, desc: 'Tüm metriklerin 0-100 normalize ağırlıklı toplamı' },
+    { id: 'MVP', label: 'Performans Endeksi', icon: Trophy, desc: 'Tüm metriklerin 0-100 normalize ağırlıklı toplamı' },
     { id: 'FINANCIAL_SAVINGS', label: 'İndirim Oranı & Tasarruf', icon: Coins, desc: 'Alınan indirim oranı yüzdesi (%85) ve istikrarlı reel nakit tasarrufu (%15)' },
-    { id: 'GOL', label: 'Bireysel GOL Krallığı', icon: Zap, desc: 'Şefin bizzat masaya oturup kopardığı indirim sayısı ve azmi' },
-    { id: 'ASIST', label: 'Asist Krallığı', icon: Users, desc: 'Ekip uzmanlarının kazandırdığı indirim işlemleri' },
+    { id: 'GOL', label: 'Doğrudan Müzakere', icon: Zap, desc: 'Şefin doğrudan yürüttüğü müzakere ve indirim sayısı' },
+    { id: 'ASIST', label: 'Ekip Katkısı', icon: Users, desc: 'Bağlı satınalma uzmanlarının kazandırdığı indirim işlemleri' },
     { id: 'NEGOTIATION_ROUNDS', label: 'Müzakere Turu', icon: Flame, desc: 'İşlem başına düşen ortalama pazarlık tur sayısı' },
     { id: 'NETWORK_EXPANSION', label: 'Tedarik Ağı', icon: Building2, desc: 'Sisteme kazandırılan yeni onaylı firma sayısı' },
   ];
@@ -118,9 +118,9 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
               </div>
               <div>
                 <h2 className="text-base sm:text-lg font-black tracking-tight text-slate-900 flex items-center gap-2">
-                  <span>Şefler Arası Tasarruf & Rekabet Sıralaması</span>
+                  <span>Satınalma Şefleri Performans ve Tasarruf Endeksi</span>
                   <span className="text-[10px] px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-bold">
-                    Dinamik Efor Motoru
+                    Kurumsal Değerlendirme Modeli
                   </span>
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
@@ -175,7 +175,7 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
 
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
               <div className="bg-slate-800 p-2.5 rounded-lg border border-slate-700">
-                <div className="text-[10px] text-slate-400 font-bold uppercase">Bireysel Gol Krallığı</div>
+                <div className="text-[10px] text-slate-400 font-bold uppercase">Doğrudan Müzakere</div>
                 <div className="text-base font-black text-indigo-400 font-mono mt-0.5">
                   %{Math.round((weights.individualGoals ?? 0.25) * 100)}
                 </div>
@@ -191,7 +191,7 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
               </div>
 
               <div className="bg-slate-800 p-2.5 rounded-lg border border-slate-700">
-                <div className="text-[10px] text-slate-400 font-bold uppercase">Ekip Asisti & Liderlik</div>
+                <div className="text-[10px] text-slate-400 font-bold uppercase">Ekip Katkısı & Koordinasyon</div>
                 <div className="text-base font-black text-sky-400 font-mono mt-0.5">
                   %{Math.round((weights.teamAssists ?? 0.20) * 100)}
                 </div>
@@ -490,7 +490,7 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
                     <th className="py-3 px-3 text-center min-w-[90px]">
                       <span className="flex items-center justify-center space-x-1">
                         <Trophy className="w-3.5 h-3.5 text-amber-500" />
-                        <span>MVP</span>
+                        <span>Endeks</span>
                       </span>
                     </th>
                     <th className="py-3 px-3 text-right min-w-[170px]">
@@ -499,8 +499,8 @@ export const GamifiedSupervisorLeaderboard: React.FC<Props> = ({
                         <span className="text-[10px] font-normal text-slate-400">İndirimli Faturalar & Alınan İskonto</span>
                       </div>
                     </th>
-                    <th className="py-3 px-3 text-center min-w-[95px]">Bireysel Gol</th>
-                    <th className="py-3 px-3 text-center min-w-[90px]">Ekip Asisti</th>
+                    <th className="py-3 px-3 text-center min-w-[95px]">Doğrudan İşlem</th>
+                    <th className="py-3 px-3 text-center min-w-[90px]">Ekip Katkısı</th>
                     <th className="py-3 px-3 text-center min-w-[95px]">Pazarlık Turu</th>
                     <th className="py-3 px-3 text-center min-w-[90px]">Yeni Firma</th>
                     <th className="py-3 px-3 text-right w-16">Detay</th>

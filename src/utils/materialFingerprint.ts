@@ -37,6 +37,11 @@ function stripDiacritics(s: string): string {
 export function materialFingerprint(raw?: string | null): string {
   if (!raw) return '';
   let s = stripDiacritics(String(raw).toLowerCase());
+  s = s.replace(/\s+счет\s*№\s*\S+\s+от\s+\d{1,2}\s+[а-яa-z]+\s+\d{4}\s*(?:г\.?|g\.?)\s+страница\s+\d+.*$/i, '');
+  s = s.replace(/\s+всего\s*:\s*[\d\s.,]+\s+итого\s*:\s*[\d\s.,]+(?:в\s*т\.?\s*ч\.?\s*ндс.*)?$/i, '');
+  s = s.replace(/\s*\(№[а-яa-z]\.[\d.\s]+(?:bar|бар)\s*\d+\)\s*в\s+наличии\.?\s*[а-яa-z]{2,3}\d+\s*\d*/gi, ' ');
+  s = s.replace(/\s+(?:под\s+заказ\s+в\s+наличии\s*,?\s*комплектация\s+до\s+\d+\s*раб\.?\s*дн\.?|под\s+заказ(?:\s+от\s+\d+\s+до\s+\d+\s*раб\.?\s*дн\.?|\s+\d+(?:\s*-\s*\d+)?\s*раб\.?\s*дн\.?)?|в\s+наличии(?:\s+в\s+наличии)?|\b1-2\s*дня)(?=\s*(?:\([^)]*\)|\[[^\]]*\])*[\s/|:;,\\-]*$)/gi, '');
+  s = s.replace(/\bprofesyonelьный(?:\s+profesyonel)?\b/gi, 'profesyonel');
 
   s = s.replace(/[авекмнорстух]/g, ch => CYRILLIC_LATIN_HOMOGLYPHS[ch] || ch);
 

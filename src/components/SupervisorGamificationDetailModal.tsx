@@ -84,7 +84,7 @@ export const SupervisorGamificationDetailModal: React.FC<Props> = ({
             {/* Bileşik MVP Skoru */}
             <div className="w-full sm:w-auto bg-slate-800/90 rounded-xl p-4 border border-slate-700 text-center sm:text-right shrink-0">
               <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
-                Bileşik MVP Skoru
+                Performans Endeksi Skoru
               </div>
               <div className="text-3xl sm:text-4xl font-black text-amber-400 font-mono mt-0.5">
                 {profile.mvpScore}
@@ -191,9 +191,9 @@ export const SupervisorGamificationDetailModal: React.FC<Props> = ({
 
               {/* 4. Ekip Asisti */}
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5">
-                <div className="text-[11px] font-bold text-slate-500 uppercase">Ekip Asisti</div>
+                <div className="text-[11px] font-bold text-slate-500 uppercase">Ekip Katkısı</div>
                 <div className="text-base font-black text-slate-900 font-mono mt-1">
-                  {raw.teamAssistsCount} <span className="text-xs font-normal text-slate-500">Asist</span>
+                  {raw.teamAssistsCount} <span className="text-xs font-normal text-slate-500">İşlem</span>
                 </div>
                 <div className="text-[11px] text-slate-500 mt-0.5 truncate">
                   Katkı: {formatRuble(raw.teamAssistsSavings)}
@@ -256,7 +256,7 @@ export const SupervisorGamificationDetailModal: React.FC<Props> = ({
                           </span>
                           {deal.orderOrigin === 'asist' && (
                             <span className="text-[10px] px-1.5 py-0.2 rounded bg-sky-100 text-sky-800 font-bold">
-                              Asist: {deal.performedByName || 'Ekip'}
+                              Personel: {deal.performedByName || 'Ekip'}
                             </span>
                           )}
                         </div>
@@ -321,7 +321,7 @@ export const SupervisorGamificationDetailModal: React.FC<Props> = ({
 
                       <div className="text-right shrink-0">
                         <span className="inline-block px-2 py-0.5 rounded bg-sky-50 text-sky-700 text-xs font-mono font-bold border border-sky-200">
-                          {member.assistsCount} Asist
+                          {member.assistsCount} İşlem
                         </span>
                         <div className="text-[10px] text-slate-500 font-mono mt-0.5">
                           {formatRuble(member.savingsContributed)}

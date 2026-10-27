@@ -41,6 +41,22 @@ const cases: Array<[string, string, string?]> = [
   ['Емкость для воды пластиковая "ЕвроКуб" (1000 л.)', 'Şantiye Tesis & Konteyner'],
   ['Пистолет для монтажной пены пластик с метал.носом, без регулятора', 'El Aletleri & Hırdavat'],
   ['Замок врезной 2014 для межкомнатной двери под фиксатор хром 1 ключ', 'Sarf Malzeme & Hırdavat'],
+  ['Vetonit Мультикомфорт гипсовая плита 2500x1200x12.5 УК ( 1 пал. / 48 шт./ 144 м2)', 'Yalıtım & Alçıpan', 'Darbe/Yangın/Suya Dayanıklı Alçıpan Levha DFH3IR (Sapfir) 12.5 mm (1.2x2.5 m) [Marka: Vetonit (Ветонит) • Seri: Мультикомфорт • 144 m²/Rulo • Ölçü 12.5x1200x2500]'],
+  ['Vetonit Аква Оптима гипсовая плита 2500x1200x12.5 (1 пал. 50 шт./ 150 м2)', 'Yalıtım & Alçıpan', 'Suya Dayanıklı Alçıpan Levha Gyproc Optima [Standart] GKLV 12.5 mm (1.2x2.5 m)'],
+  ['Бетон товарный БСГ (14x400, 14*400)', 'El Aletleri & Hırdavat', 'SDS Beton Matkap Ucu SDS-max (14x400 mm) (Adet)'],
+  ['Носимая р/с Hytera BP515 U(1) (SC00973) 400-470 МГц, Стакан ЗУ 1А (CH10A07)', 'Ölçüm, Harita & Saha Ekipmanları', 'Hytera BP515 U(1) El Telsizi'],
+  ['Доска магнитно-маркерная 120х240 см КОМУС в алюм. проф., лак', 'Ofis & Kırtasiye', 'Manyetik Yazı Tahtası 120x240 cm Komus Alüminyum Çerçeveli, Lake'],
+  ['Подушка для смачивания пальцев гелевая ATTACHE 25г Россия', 'Ofis & Kırtasiye', 'Parmak Islatma Jeli / Süngeri Jel ATTACHE 25 gr'],
+  ['Yarım Gövde Mastik Tabancası', 'El Aletleri & Hırdavat'],
+  ['KVT NIO-06 «Profi» İzoleli Tornavida Seti', 'El Aletleri & Hırdavat'],
+  ['İç Cephe Sıva Filesi (Стеклосетка 5x5 mm, 75 g/m², 50 m² Rulo) [Markasız / Standart Spesifikasyon]', 'Yalıtım & Alçıpan'],
+  ['Сталь углеродистая для армирования железобетонных конструкций периодического профиля в d 20 мм А 500С', 'İnşaat Demiri'],
+  ['City9 Box XS Sıva Üstü Dağıtım Kutusu 2 Modül, Şeffaf Kapaklı', 'Elektrik & Otomasyon'],
+  ['57-300-050-09 Наконечник алюм. опресс. ТА 50-10-9 (100шт/уп)(КВТ) 41500 1-2 дня', 'Elektrik & Otomasyon'],
+  ['Cablexpert Стяжки пластиковые 100 mm х 2.5 mm Beyaz (100 Adet), NYT-100x2.5', 'Sarf Malzeme & Hırdavat'],
+  ['Vetonit Марко Про армирующая бумажная лента для стыков 50м', 'Yalıtım & Alçıpan', 'Kendinden Yapışkanlı Derz Filesi Bandı 50mm x 45m [Marka: Vetonit (Ветонит)]'],
+  ['0307 Kaynakçı Maskesi "Хамелеон" Ф1 Monolit (20 Adet)', 'Kaynak Malzemeleri'],
+  ['VPK E-tron 50/220/6/10 Yüksek Frekanslı Entegre Konvertörlü Beton Vibratörü (Adet)', 'El Aletleri & Hırdavat'],
 ];
 
 let failed = 0;

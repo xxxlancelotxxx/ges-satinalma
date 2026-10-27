@@ -1,5 +1,5 @@
 import { useAuth } from '../context/AuthContext';
-import { normalizeCategoryName, CANONICAL_CATEGORIES, sortCategoriesByPriority, ensureRussianOriginalName } from '../utils/categoryClassifier';
+import { normalizeCategoryName, CANONICAL_CATEGORIES, CANONICAL_28_CATEGORIES, sortCategoriesByPriority, ensureRussianOriginalName } from '../utils/categoryClassifier';
 import { analyzeMaterialSegment } from '../utils/materialSegmentIntelligence';
 import {
   DualComparisonLens,
@@ -445,7 +445,7 @@ export const MaterialPriceComparison: React.FC<Props> = ({
         lowerName.includes('tasima') ||
         lowerName.includes('sevkiyat');
       return !isService;
-    }).map(c => ({...c, category: normalizeCategoryName(c.category, c.materialName)}));
+    }).map(c => ({...c, category: (CANONICAL_28_CATEGORIES as readonly string[]).includes(c.category) ? c.category : normalizeCategoryName(c.category, c.materialName)}));
   }, [comparisons]);
 
   // Counts for each source toggle. They count the same apple-to-apple groups the list shows

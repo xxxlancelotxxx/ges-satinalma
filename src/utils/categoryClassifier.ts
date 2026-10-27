@@ -1182,7 +1182,7 @@ const HEAD_NOUN_LEXICON: Array<[RegExp, string]> = [
   // Temizlik
   [/чистящ\S*\s+средств|моющ\S*\s+средств|средство\s+для\s+удаления\s+накипи|профхим|антисептик\s+кожн|дозатор\s+(?:для\s+жидкого\s+мыла|профи)|водосгон|губка\s+для\s+уборки|вафельное\s+полотенце|ветошь|салфетниц|(?:^|\s)коврик/, 'Temizlik & Hijyen Malzemeleri'],
   // Mutfak
-  [/(?:^|\s)стакан\s|набор\s+чайный|доска\s+разделочн|набор\s+ножей|держатель\s+д\/ножей|точилка\s+для\s+ножей/, 'Gıda & Mutfak Malzemeleri'],
+  [/(?:^|\s)стакан(?!\s*зу)\s|набор\s+чайный|доска\s+разделочн|набор\s+ножей|держатель\s+д\/ножей|точилка\s+для\s+ножей/, 'Gıda & Mutfak Malzemeleri'],
   // Bilgi işlem
   [/модуль\s+памяти|гарнитура|фьюзер|для\s+puty|brother\s+d\d/, 'Bilgi İşlem & IT'],
   // Ofis
@@ -1297,13 +1297,13 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   // 2.1 Bilgi İşlem & IT (Exclude air freshener/gas/anchor/silicone/faucet cartridges, voltage monitoring relays, and wide-format plotter paper rolls!)
   const isNonItCartridge = hasRx(/oda\s*kokusu|air\s*wick|first\s*fresh|gaz\s*kartu|toua|ankraj|химанкер|хим\.\s*анкер|хим\s*анкер|kimyasal\s*dübel|kimyasal\s*dubel|hit-hy|hit-re|hilti|fischer|mungo|silikon|герметик|epoksi|эпоксид|mastik|мастик|filtre|аквафор|гейзер|барьер|pürmüz|горелк|смесител|керам.*картридж|кран|душ|batarya|musluk|респиратор|противогаз/i);
   const isVoltageMonitorRelay = hasRx(/gerilim\s*monit|реле\s*контрол|meandr|меандр|фаз/i);
-  const isPlotterPaperRoll = hasRx(/бумага\s*широкоформатн|plotter\s*kağıd/i) || ((has('plotter') || has('плоттер')) && (has('бумага') || has('kağıd') || has('kağıt')) && !has('кассета') && !has('kaset'));
+  const isPlotterPaperRoll = hasRx(/бумага\s*широкоформатн|plotter\s*kağıd|plotter.*rulo\s*kağıd|mühendislik\s*rulo\s*kağıd|fotokopi\s*\/\s*yazıcı\s*kağıd|yazıcı\s*kağıd|80\s*g\/m².*500\s*yaprak/i) || ((has('plotter') || has('плоттер')) && (has('бумага') || has('kağıd') || has('kağıt')) && !has('кассета') && !has('kaset'));
   if (
     !isVoltageMonitorRelay && !isPlotterPaperRoll && (
       has('bilgi işlem') || has('bilgisayar') || has('klavye') || has('клавиатур') ||
-      has('yazıcı') || has('принтер') || has('мфу ') || has('plotter') || has('плоттер') || has('kyocera') ||
+      ((has('yazıcı') || has('принтер')) && !has('kağıd') && !has('kağıt') && !has('бумага')) || has('мфу ') || has('plotter') || has('плоттер') || has('kyocera') ||
       has('televizyon') || has('телевизор') || has('ноутбук') || has('notebook') || has('laptop') ||
-      has('thinkbook') || has('vivobook') || has('ekran temizleme') || has('digma') || has('logitech') ||
+      has('thinkbook') || has('vivobook') || has('digma') || has('logitech') ||
       has('canon lbp') || has('canon pfi') || has('tp-link') || has('d-link') || has('keenetic') ||
       has('mikrotik') || has('ubiquiti') || has('коммутатор') || has('маршрутизатор') || has('роутер') ||
       has('network switch') || has('poe switch') || has('gigabit switch') ||
@@ -1311,7 +1311,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
       has('ssd ') || has(' ssd') || has('apacer') || has('kingston') || has('crucial') ||
       has('rj-45') || has('rj45') || has('патч-корд') || has('patch cord') ||
       has('displayport') || has('hdmi') || has('geforce') || has('ryzen') || has('intel core') ||
-      has('термопленк') || has('fırın filmi') || has('тестер тоновой прозвонки сети') ||
+      has('термопленк') || has('fırın filmi') || has('тестер тоновой прозвонки сети') || has('ağ ve kablo test cihazı') || has('3pk-nt023') ||
       has('kesintisiz güç kaynağı') || has('источник бесперебойного питания') || hasRx(/\bибп\b|\bups\b.*(?:\d+\s*va|\d+\s*w|powercom|apc|ippon|cyberpower)/i) ||
       ((has('monitör') || has('монитор')) && !has('gerilim') && !has('реле')) ||
       (!isNonItCartridge && (has('toner') || has('тонер') || hasRx(/картридж|kartuş|pfi-\d+|tk-\d+|cf\d{3}|ce\d{3}/i)))
@@ -1321,7 +1321,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   }
 
   // 2.2 Temizlik & Hijyen Malzemeleri (Exclude wire brushes, paint brushes, carbon brushes, entrance grates, and torque wrenches!)
-  const isTechnicalBrushOrTorque = hasRx(/металл|корщетк|проволоч|крацовк|зачистн|ушм|tel\s*fırça|çanak\s*fırça|saçak\s*fırça|burgu\s*fırça|угольн|графитов|электрощетк|kömür\s*fırça|karbon\s*fırça|малярн|радиаторн|макловиц|kestirme\s*fırça|boya\s*fırça|radyatör\s*fırça|badana\s*fırça|paspas\s*ızgarası|грязезащитн.*решетк|tork\s*anahtar|динамометрич|термопистолет|fon\s*makinas|отбойного\s*молотка|молотка\s*отбойного/i);
+  const isTechnicalBrushOrTorque = hasRx(/металл|корщетк|проволоч|крацовк|зачистн|ушм|tel\s*fırça|çanak\s*fırça|saçak\s*fırça|burgu\s*fırça|угольн|графитов|электрощетк|kömür\s*fırça|karbon\s*fırça|малярн|радиаторн|макловиц|kestirme\s*fırça|boya\s*fırça|radyatör\s*fırça|badana\s*fırça|paspas\s*ızgarası|грязезащитн.*решетк|tork\s*anahtar|динамометрич|термопистолет|fon\s*makinas|отбойного\s*молотка|молотка\s*отбойного|пылесос\s*строительн|inşaat\s*tipi\s*süpürge|faraş\s*kürek|ray\s*çeliği|совков\S*\s*лопат|лопат\S*\s*совков|^\s*шоколадн/i);
   const isSlakedLime = hasRx(/известь\s+гашеная|карбонатно-известков|sönmüş\s*kireç/i);
   if (
     !isTechnicalBrushOrTorque && !isSlakedLime && (
@@ -1331,7 +1331,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
       has('kağıt havlu') || has('полотенца бумажн') || has('полотенце бумажн') || has('veiro') ||
       has('tuvalet kağıdı') || has('туалетная бумага') || has('бумага туалетная') ||
       has('ıslak mendil') || has('ıslak havlu') || has('влажные салфетк') || has('салфетки бумажн') || has('салфетки хозяйствен') ||
-      has('klozet bloğu') || has('блок для унитаза') || has('бреф ') || has('bref') || has('çamaşır suyu') || has('белизна') || has('domestos') || has('санокс') || has('средство для сантехники') || has('универсальное чистящее средство') ||
+      has('klozet bloğu') || has('блок для унитаза') || has('бреф ') || has('bref') || has('çamaşır suyu') || has('белизна') || has('domestos') || has('санокс') || has('sanox') || has('sanoks') || has('banyo temizleyici') || has('ekran temizleme mendil') || has('средство для сантехники') || has('универсальное чистящее средство') ||
       has('klor tozu') || has('хлорная известь') || has('известь хлорная') || has('хлорные таблетк') || has('гипохлорит') ||
       (has('paspas') && !has('ızgara')) || has('швабр') || has('моп ') || has('насадка моп') || has('vileda') ||
       has('çamaşır kurutma') || has('сушилка для белья') ||
@@ -1351,10 +1351,10 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
 
   // 2.3 Gıda & Mutfak Malzemeleri (Strictly exclude construction knives, machine blades, diamond cups, wire cup brushes, spatulas, electrical plugs, and plumbing water heaters!)
   const isConstructionBladeOrBoiler = hasRx(
-    /кабел|kablo|maket|falçata|строительн|монтажн|secura|jokari|станок|станка|makina|makine|demir\s*kesme|арматур|рубанк|planya|testere|пильн|шпател|скребок|sıyırıcı|алмазн|шлифовальн|зачистн|корщетк|щетк|fırça|taşlama|elmas|диск|круг|коронк|panç|pürmüz|горелк|kaynak|сварочн|гипсокартон|alçıpan|kırıcı|matkap|водонагревател|termosifon|boyler|ballu|каучук|заземл|ip44|ip54|16а|32а/i
+    /кабел|kablo|maket|falçata|строительн|монтажн|secura|jokari|станок|станка|makina|makine|demir\s*kesme|арматур|рубанк|planya|testere|пильн|шпател|скребок|sıyırıcı|алмазн|шлифовальн|зачистн|корщетк|щетк|fırça|taşlama|elmas|диск|круг|коронк|panç|pürmüz|горелк|kaynak|сварочн|гипсокартон|alçıpan|kırıcı|matkap|водонагревател|termosifon|boyler|ariston|термекс|thermex|ballu|каучук|заземл|ip44|ip54|16а|32а/i
   );
   if (
-    !isConstructionBladeOrBoiler && (
+    (!isConstructionBladeOrBoiler || hasRx(/kahve\s*makine|кофемашин|кофеварк/i)) && (
       hasRx(/(?:^|[^a-zа-яё])(?:çay|cay|чай)(?![a-zа-яё])/i) ||
       has('kahve') || has('кофе') || has('nescafe') ||
       has('şeker') || has('сахар') ||
@@ -1365,7 +1365,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
       has('karton bardak') || has('kağıt bardak') || has('plastik bardak') || has('cam bardak') || has('kupa bardak') || has('чайная пара') || has('стакан бумажн') || has('стакан одноразов') || has('кружка ') || has('fincan') ||
       has('tabak') || has('тарелк') || has('бокс одноразовый') ||
       has('çatal') || has('kaşık') || has('вилка столов') || has('вилка одноразов') || has('ложка столов') || has('ложка чайн') || has('ложка одноразов') ||
-      has('yemek bıçağı') || has('mutfak bıçağı') || has('нож столовый') || has('нож кухонный') ||
+      has('yemek bıçağı') || has('mutfak bıçağı') || has('нож столовый') || has('нож кухонный') || has('kesme tahtası') || has('доска разделочн') || has('pet konteyner') || has('up-rks') || has('помпа для воды') || has('ael-080') ||
       has('şekerlik') || has('tepsi') || has('saklama kabı') || has('органайзер для кухни') || has('контейнер пэт') || has('şeffaf pet kap') || has('ekmek sepeti') ||
       has('doğrama tezgahı') || has('mutfak tezgahı') || has('стол разделочный') || has('стол производственный') || has('luxstahl') || has('assum') || has('kobor') ||
       has('buzdolabı') || has('холодильник') || has('mikrodalga') || has('микроволнов') ||
@@ -1407,14 +1407,14 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
       has('geb364') || has('gmp111') || has('nedo') || has('rgk ') || has('alco-screen') || has('alkol test') || has('алкотестер') ||
       has('lazer işaretçi') || has('лазерная указка') || has('yeşil lazer') ||
       has('slamp takımı') || has('форма стальная') || has('3 фк') ||
-      has('telsiz') || has('рация') || has('радиостанц') || has('turbosky') || has('retekess') || has('baofeng')
+      has('telsiz') || has('рация') || has('радиостанц') || has('носимая р/с') || has('hytera') || has('turbosky') || has('retekess') || has('baofeng')
     )
   ) {
     return 'Ölçüm, Harita & Saha Ekipmanları';
   }
 
   // 2.6 Şantiye Mobilya & Yaşam Donanımı (Exclude fire blankets and rockwool blanket insulation!)
-  const isRockwoolOrFireBlanket = hasRx(/yangın|пожарн|taşyünü|tasyunu|cam\s*yünü|cam\s*yunu|izolasyon|yalıtım|утеплител|минват|базальт|yorgan\s*tipi/i);
+  const isRockwoolOrFireBlanket = hasRx(/yangın|пожарн|taşyünü|tasyunu|cam\s*yünü|cam\s*yunu|izolasyon|yalıtım|утеплител|минват|базальт|yorgan\s*tipi|смачивания\s*пальцев|parmak\s*ıslatma|вентиляц|вытяжн|havalandırma|baca|davlumbaz|aisi\s*\d+|sn\d{3}/i);
   if (
     !isRockwoolOrFireBlanket && (
       has('ranza') || has('кровать') || has('кровати') || has('yatak') || has('матрас') || has('yastık') || has('подушк') ||
@@ -1521,7 +1521,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
 
   // 2.13 İnşaat Demiri (Exclude plumbing/sanitary valves "запорная/сливная арматура")
   if (
-    (has('арматур') || has('inşaat demir') || has('nervürlü demir') || has('demir nervürlü') || has('a500c') || has('а500с') || has('a240') || has('а240') || has('пруток арматур')) &&
+    (has('арматур') || has('inşaat demir') || has('nervürlü demir') || has('demir nervürlü') || has('для армирования железобетонных') || has('периодического профиля') || hasRx(/(?:^|[^a-zа-яё0-9])[aаbв]\s*500\s*[cс]?(?![a-zа-яё0-9])/i) || has('a500c') || has('а500с') || has('a240') || has('а240') || has('пруток арматур')) &&
     !has('запорн') && !has('сливн') && !has('трубопроводн') && !has('сантех') && !has('шаров') && !has('кран ') && !has('vana') && !has('valf') &&
     !has('фиксатор') && !has('сетка') && !has('file') && !has('hasır') &&
     !has('çelik mapa') && !has('закладн') && !has('муфта') && !has('manşon') && !has('ванночка') && !has('скоба') &&
@@ -1531,7 +1531,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   }
 
   // 2.14 İş Güvenliği & KKD (Must run before Naylon/Yalıtım so nylon gloves and boot liners are KKD; exclude heat-shrink cable boots, power tools, and lifting slings!)
-  const isHeatShrinkOrPowerTool = has('термоусаживаем') || has('термоусадочн') || has('кабельн') || hasRx(/пила\s+циркулярн|пила\s+дисков|дисковая\s+пила|daire\s+testere|перфоратор|ушм|болгарк|шуруповерт|зажим\s+троса|зажим\s+для\s+стальных\s+канатов|кроват|ranza/i);
+  const isHeatShrinkOrPowerTool = has('термоусаживаем') || has('термоусадочн') || has('кабельн') || hasRx(/пила\s+циркулярн|пила\s+дисков|дисковая\s+пила|daire\s+testere|перфоратор|ушм|болгарк|шуруповерт|зажим\s+троса|зажим\s+для\s+стальных\s+канатов|кроват|ranza|kaynakçı\s*maske|kaynak\s*maske|маска\s*сварщик|щиток\s*сварщик|хамелеон/i);
   const isLiftingSling = hasRx(/строп\s*(?:текстильн|канатн|цепн)|чалки|bez\s*sapan|çelik\s*sapan|zincir\s*sapan|sapan\s*çelik|sapan\s*bez|\bстп\b|\b4ск\b|\b2ск\b|\b1ск\b/i);
   if (
     !isHeatShrinkOrPowerTool && !isLiftingSling && (
@@ -1551,7 +1551,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   }
 
   // 2.15 Elektrik & Otomasyon (Exclude welding cables/holders, soldering irons, hot-air guns, wireless mice/keyboards, and rust converters!)
-  const isWeldingOrToolOrChem = hasRx(/сварочн|kaynak|электрододержател|клемма заземления сварочн|клемма\s+заземления\s+кз|паяльник|havya|строительный фен|термопистолет|преобразователь\s*ржавчин|pas\s*sökücü|ножницы\s*секторн|набор\s*индикаторн.*отверт|насадка\s*для\s*скрутки|указк|işaretçi/i);
+  const isWeldingOrToolOrChem = hasRx(/сварочн|kaynak|электрододержател|клемма заземления сварочн|клемма\s+заземления\s+кз|klemensi\s*кз|topraklama\s*pensesi|паяльник|havya|строительный фен|термопистолет|преобразователь\s*ржавчин|pas\s*sökücü|ножницы\s*секторн|набор\s*индикаторн.*отверт|насадка\s*для\s*скрутки|указк|işaretçi|kahve\s*makine|кофемашин|кофеварк|su\s*ısıtıcı|termosifon|водонагревател|boyler|ariston|термекс|thermex|konvektör\s*ısıtıcı|конвектор|ballu|пылесос|süpürge|kapı\s*kolu|круглая\s*розетка|дверн|высоковольтный\s*провод.*4111/i);
   if (
     !isWeldingOrToolOrChem && (
       has('труба для кабел') || has('kablo borusu') || has('гофра') || (has('koruge') && !has('канализац') && !has('дренаж')) ||
@@ -1565,9 +1565,9 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
       has('автоматический выключател') || has('выключатель автоматическ') || has('дифавтомат') || has(' узо ') || has('выключател') || has('розетк') || has('вилка силовая') || has('вилка электрич') || has('вилка каучуков') || has('однофазная вилка') || has('вилка 025') || has('удлинител') || has('seyyar uzatma') ||
       has('светильник') || has('armatür') || has('lamba') || has('ampul') || has('лампа светодиодн') || has('fener') || has('фонарь') ||
       has('sigorta') || has('şalter') || has('priz') || has('kontaktör') || has('пускатель') || has(' реле ') || has('фотореле') || has('gerilim monitörü') ||
-      has('buat') || has('коробка распаячн') || has('коробка распределительн') || has('коробка ответвительн') || has('подрозетник') ||
+      has('buat') || has('sıva üstü dağıtım') || has('sıva altı dağıtım') || has('dağıtım kutusu') || has('city9 box') || has('коробка распаячн') || has('коробка распределительн') || has('коробка ответвительн') || has('подрозетник') ||
       has('kablo tavası') || has('kablo kanalı') || has('лоток кабельный') || has('кабель-канал') ||
-      has('kablo papucu') || has('kablo pabucu') || has('наконечник кабельн') || has('наконечник медн') || has('гильза кабельн') || has('муфта кабельн') || has('бирка кабельн') || has('хомут-стяжк') || has('хомут стяжк') ||
+      has('kablo papucu') || has('kablo pabucu') || has('наконечник кабельн') || has('наконечник медн') || has('наконечник алюм') || has('наконечник трубчат') || has('наконечник штифтов') || has('izoleli yüksük') || has('yüksük terminal') || has('ншпи') || has('ншви') || has('тмл-') || has('гильза кабельн') || has('муфта кабельн') || has('бирка кабельн') || has('хомут-стяжк') || has('хомут стяжк') ||
       has('çivi tabancası boru sabitleme klipsi') || has('lehim teli') || has('припой') || has('паяльная паста')
     )
   ) {
@@ -1575,15 +1575,15 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   }
 
   // 2.16 Yalıtım & Alçıpan (Exclude drywall saw, drywall screws, boot liners, concrete curing compound "Тент", and packaging stretch film!)
-  const isDrywallToolOrScrew = hasRx(/ножовка|пила|testere|bıçak|саморез|vida|болт|cıvata|civata|dübel|дюбель|миксер|шпатель|rulo|валик|диск|круг|сверло|коронка|фрез|rende|makas|утеплитель\s+нтп|утеплитель\s+в\s+сапог/i);
-  const isCuringCompoundOrRetardant = hasRx(/пленкообразующ|синол|пропитк|огнебиозащит|kür\s*malzeme|сетка\s*кладочн|duvar\s*örgü\s*file/i);
+  const isDrywallToolOrScrew = hasRx(/ножовка|пила|testere|bıçak|саморез|vida|болт|cıvata|civata|dübel|дюбель|миксер|шпатель|boya\s*rulo|rulo\s*fırça|parmak\s*rulo|малярн\S*\s*валик|валик\s*(?:малярн|велюр|полиакрил|искусствен|для\s*краск|с\s*ручк)|бюгель|диск|круг|сверло|коронка|фрез|rende|makas|утеплитель\s+нтп|утеплитель\s+в\s+сапог/i);
+  const isCuringCompoundOrRetardant = hasRx(/пленкообразующ|синол|пропитк|огнебиозащит|kür\s*malzeme|сетка\s*кладочн|duvar\s*örgü\s*file|керамзит|keramzit|köpüğü\s*temizleyici|очиститель\s*пены/i);
   if (
     !isDrywallToolOrScrew && !isCuringCompoundOrRetardant && (
       has('геотекстил') || has('geotekstil') || has('теплоизоляц') || has('дорнит') || has('dornit') || has('иглопробивн') ||
       has('изоляция для труб') || has('boru yalıtımı') || has('энергофлекс') || has('energoflex') ||
       has('минват') || has('базальт') || has('утеплител') || has('техноникол') || has('технофас') || has('техноблок') || has('роклайт') || has('rockwool') || has('isover') || has('ursa') ||
       has('пеноплэкс') || has('penoplex') || has('пенопласт') || has('пенополистирол') ||
-      has('гипсокартон') || has('гкл') || has('гклв') || has('гвл') || has('гсп ') || has('сапфир') || has('vetonit multicomfort') || has('ветонит мультикомфорт') || has('gyproc') ||
+      has('гипсокартон') || has('гипсовая плита') || has('гипсовые плиты') || has('аква оптима') || has('гкл') || has('гклв') || has('гвл') || has('гсп ') || has('сапфир') || has('vetonit multicomfort') || has('ветонит мультикомфорт') || has('gyproc') ||
       has('профиль стоечный') || has('профиль направляющий') || has('профиль потолочный') || has('профиль строительный пс') || has('профиль строительный пн') || has('alçıpan profili') || has('alçıpan tavan') || has('knauf tavan') || has('tavan u profili') || has('tavan c profili') || has('подвес прямой') || has('соединитель краб') || has('для ua профиля') ||
       has('мембран') || has('пароизоляци') || has('гидроизоляци') || has('ветрозащит') || has('изоспан') || has('плантер') || has('planter') || has('sikaplan') || has('sika sealing tape') || has('лента уплотнительная') ||
       has('гидрошпонка') || has('waterstop') || has('su tutucu bant') || has('инъекционн') || has('enjeksiyon hortumu') || has('бентонитов') ||
@@ -1592,7 +1592,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
       has('eps ') || has('xps') || has('strafor') || has('köpük levha') ||
       has('yalıtım') || has('izolasyon') ||
       has('тент пвх') || has('тент строительн') || has('тент утеплен') || has('тент тарпаулин') || has('полог ') || has('тарпаулин') || has('tarpaulin') || has('branda') ||
-      has('pvc fileli köşe profili') || has('pvc fileli damlalık') || has('угол перфорированный') || has('профиль-капельник') || has('sıva filesi') || has('сетка фасадн') || has('сетка штукатурн') || has('стеклосетк') ||
+      has('pvc fileli köşe profili') || has('pvc fileli damlalık') || has('угол перфорированный') || has('профиль-капельник') || has('sıva filesi') || has('derz filesi bandı') || has('лента для стыков') || has('серпянка') || has('köşe koruma profili') || has('delikli köşe profili') || has('su ile şişen') || has('enjeksiyon pakeri') || has('сетка фасадн') || has('сетка штукатурн') || has('стеклосетк') ||
       ((has('naylon') || has('пленка полиэтилен') || has('плёнка полиэтилен') || has('пленка техническ')) &&
         !has('перчатк') && !has('eldiven') && !has('стрейч') && !has('streç') && !has('упаковочн') && !has('ambalaj') && !has('ламинирован'))
     )
@@ -1636,7 +1636,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
       has('стойка телескопическ') || has('стойка объемн') || has('teleskopik direk') ||
       has('щит линейн') || has('щит универсальн') || has('щит углов') || has('щит шарнирн') ||
       has('kalıp') || has('iskele') || has('doka') || has('peri ') ||
-      has('tayrot') || has('tie-rod') || has('tie rod') || has('tij ') || has('винт стяжной') || has('гайка стяжная') || has('стяжной болт') ||
+      has('tayrot') || ((has('tie-rod') || has('tie rod')) && !has('paspay') && !has('konik')) || (has('tij ') && !has('din 975') && !has('dişli saplama') && !has('резьбов')) || has('винт стяжной') || has('гайка стяжная') || has('стяжной болт') ||
       has('baumak') || has('горизонтальный элемент') || has('диагональный элемент') || has('вставка соединительная') ||
       has('каплок') || has('cuplock') || has('başlangıç ayağı') || has('домкрат винтовой') || has('башмак опорный') ||
       has('payanda') || has('подкос') || has('замок клиновой') || has('замок универсальный') || has('краб для опалубки') ||
@@ -1657,7 +1657,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
       has('металлопрокат') || has('çelik kiriş') || has('ipe ') || has('hea ') || has('heb ') || has('upn ') ||
       has('filmaşin') || has('катанка') || has('kangal demir') || has('çelik şerit') || has('лента стальная') ||
       has('hasır çelik') || has('çelik hasır') || has('kaynaklı çelik hasır') || has('сетка сварная') || has('сетка арматурн') || has('сетка кладочн') || hasRx(/сетка\s+\d+\s*[xх*×]\s*\d+/i) ||
-      has('u profil') || has('çelik mapa') || has('закладная деталь') || has('анкерная плита') || has('пластина стальная') || has('металлоконструкц') || has('металлические конструкции') || has('çelik konstrüksiyon') ||
+      has('u profil') || has('çelik mapa') || has('закладная деталь') || has('анкерная плита') || has('пластина стальная') || has('металлоконструкц') || has('металлические конструкции') || has('çelik konstrüksiyon') || has('korkuluk tipik bölüm') || has('korkuluk dikmesi') || has('ограждение лестничн') || has('стойка ограждения') ||
       (has('duvar paneli') && has('çelik')) || (has('панель') && has('сталь'))
     )
   ) {
@@ -1670,14 +1670,14 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
     !isOfficeBoardOrClip && (
       has('доска обрезная') || has('доска необрезная') || has('доска строганная') || has('доска строительн') || has('пиломатериал') ||
       has('kereste') || has('kalas') || has('tahta') || has('lata') ||
-      has(' брус ') || has('брусок') || has('osb') || has('осп-') || has('ahşap takoz') || has('ahşap kama')
+      has(' брус ') || has('брусок') || has('osb') || has('осп-') || has('duralit levha') || has('двп ') || has('dvp tsn') || has('ahşap takoz') || has('ahşap kama')
     )
   ) {
     return 'Ahşap & Kereste';
   }
 
   // 2.22 Kimyasallar & Boya (Run BEFORE Hazır Beton so epoxy putty "Шпатлевка эпоксидная", primers "Бетоноконтакт / Ceresit CT 19", rust converters, and linoleum glue are properly classified!)
-  const isPaintMachineOrTool = hasRx(/компрессор|kompresör|миксер|karıştırıcı\s*uç|краскопульт|boya\s*tabancası|пистолет\s*для\s*пены|köpük\s*tabancası|пистолет\s*для\s*герметик|silikon\s*tabancası|фен\s*строительн|термопистолет|правило\s*алюмин|mastar|конверт|zarf/i);
+  const isPaintMachineOrTool = hasRx(/компрессор|kompresör|миксер|karıştırıcı\s*uç|краскопульт|boya\s*tabancası|пистолет\s*для\s*пены|köpük\s*tabancası|пистолет\s*для\s*герметик|silikon\s*tabancası|mastik\s*tabanca|sosis\s*tabanca|фен\s*строительн|термопистолет|правило\s*алюмин|mastar|конверт|zarf|доска\s*магнитно|магнитно-маркерн|yazı\s*tahtası|boyacı\s*aydınlatma|lossew|korkuluğu|ограждени|тарпаулин|tarpaulin|branda|technonicol\s*no\.?\s*08|техноникол|sika\s*sealing\s*tape/i);
   const isCementitiousGroutOrMortar = !hasRx(/эпоксид|epoksi|sikadur/i) && hasRx(/grout|граут|akıcı\s*harç|tamir\s*harc|шпаклевк.*цемент|штукатурк.*цемент|стяжк|наливной\s*пол|tesviye\s*şap/i);
   if (
     !isPaintMachineOrTool && !isCementitiousGroutOrMortar && (
@@ -1699,7 +1699,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   }
 
   // 2.23 Hazır Beton, Çimento & Agrega & Kuru Harç / Şap (Never match bare 'sap' or 'alçıpan' or screws/saws!)
-  const isConcreteDrillOrScrewOrSaw = hasRx(/бур |сверло|диск|круг|алмазн|коронка|пика|зубило|keski|matkap|пила|testere|саморез|vida\b|болт|шпатель|spatula|бетоноконтакт|betonokontakt|бетоновод|бетоносмесител|harç\s*karma|гипсокартон|alçıpan|хомут|стяжка\s*(?:ленточн|кабельн|нейлон|пластик)|kablo\s*bağı|karıştırıcı|миксер|mikser|кельм|мастерок|правило\s*алюмин|mastar|filesi|сетка|стеклосетк|эпоксид|epoksi|sikadur|malası|(?:^|\s)mala(?:\s|$)|гладилк|теплоизоляц|труба|пескоуловител/i);
+  const isConcreteDrillOrScrewOrSaw = hasRx(/бур |сверло|диск|круг|алмазн|коронка|пика|зубило|keski|matkap|пила|testere|саморез|vida\b|болт|шпатель|spatula|бетоноконтакт|betonokontakt|бетоновод|бетоносмесител|harç\s*karma|harç\/malzeme\s*kasası|harç\s*kasası|тара\s*для\s*раствор|бадья|гипсокартон|гипсовая\s*плита|alçıpan|çimento\s*esaslı\s*yonga\s*levha|цсп|хомут|стяжк[аи]?\s*(?:ленточн|кабельн|нейлон|пластик|полиамид|желт|черн|бел)|полиамид\s*6\.6|sapiselco|cablexpert|sıva\s*üstü|sıva\s*altı|dağıtım\s*kutusu|derz\s*filesi|лента\s*для\s*стыков|серпянк|kablo\s*bağı|karıştırıcı|миксер|mikser|кельм|мастерок|правило\s*алюмин|mastar|filesi|сетка|стеклосетк|эпоксид|epoksi|sikadur|malası|(?:^|\s)mala(?:\s|$)|гладилк|теплоизоляц|труба|пескоуловител/i);
   if (
     !isConcreteDrillOrScrewOrSaw && (
       has('бетон в') || has('бетон товарн') || has('grobeton') || has('hazır beton') ||
@@ -1723,7 +1723,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
   if (
     !hasRx(/клетк|kafes/i) && (
     has('электрод') || has('elektrod') || has('elektrot') || has('askaynak') || has('esab') || has('lb-52u') || has('уони') ||
-    has('kaynak makinesi') || has('kaynak teli') || has('kaynak pensesi') || has('kaynak maskesi') || has('kaynak kablosu') || has('kaynak örtüsü') ||
+    has('kaynak makinesi') || has('kaynak teli') || has('kaynak pensesi') || has('kaynak maskesi') || has('kaynakçı maskesi') || has('маска сварщика') || has('хамелеон') || has('набор для сварки пластиковых') || has('plastik ürün kaynak seti') || has('svarpom') || has('kaynak kablosu') || has('kaynak örtüsü') ||
     has('сварочн') || has('сварка') || has('сварщик') || has('электрододержател') || has('клемма заземления') ||
     has('пропан') || has('propan') || has('кислород') || has('oksijen tüpü') || has('oksijen saati') || has('oksijen regülatör') || has('hamlaç') || has('hamlac') ||
     has('горелка газов') || has('горелка кровельн') || has('резак пропан') || has('pürmüz') || has('şaloma') || has('редуктор бпо') || has('редуктор бко'))
@@ -1787,7 +1787,7 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
 
   // 2.28 Sarf Malzeme & Hırdavat (Fasteners, self-drilling screws "саморез с буром", cutting/grinding discs, buckets, locks, hinges, rigging hardware, packaging films, tapes)
   if (
-    has('саморез') || has('дюбель') || has('болт') || has('винт нержавеющ') || has('винт с потайн') || has('гайк') || has('шайб') || has('шпильк') || has('гвозд') || has('заклепк') ||
+    !hasRx(/tornavida|отвертк|vidalama|шуруповерт|гвоздодер|sökü\s*demiri|levye|el\s*arabası|тачка\s*строительн|sapan|строп|yangın\s*panosu|пожарный\s*щит|bara\s*izolatör|изолятор\s*sm|ankraj\s*saplama|анкерн.*шпильк|kapı\s*kasası|коробка\s*дверн|dpt\s*kapı|dpg|kablo\s*dübel\s*kelepçe|дюбель-хомут/i) && (has('саморез') || has('дюбель') || has('болт') || has('винт нержавеющ') || has('винт с потайн') || has('гайк') || has('шайб') || has('шпильк') || has('гвозд') || has('заклепк') ||
     has('vida') || has('samorez') || has('cıvata') || has('somun') || has('pul ') || has('rondela') || has('dübel') || has('çivi') || has('perçin') || has('saplama') ||
     has('диск отрезной') || has('круг отрезной') || has('диск зачистной') || has('круг зачистной') || has('kesici taş') || has('kesme taşı') || has('taşlama diski') || has('taşlama taşı') ||
     has('замок навесной') || has('замок врезной') || has('личинка замка') || has('цилиндровый механизм') || has('петля дверн') || has('петля приварн') || has('засов') || has('шпингалет') || has('доводчик дверн') || has('ручка дверн') ||
@@ -1795,11 +1795,11 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
     has('ведро строительн') || has('таз строительн') || has('емкость прямоугольн') || has('бадья') || has('тара металлическая') || has('kova') || has('harç kovası') || has('harç teknesi') ||
     has('канат стальной') || has('трос стальной') || has('цепь короткозвен') || has('цепь длиннозвен') || has('талреп') || has('зажим для троса') || has('зажим для стальных канатов') || has('коуш') || has('скоба такелажн') || has('карабин пожарн') || has('рым-болт') || has('рым-гайк') ||
     has('çelik halat') || has('zincir') || has('gerdirme') || has('klemens halat') || has('radansa') || has('kanca') || has('karabina') || has('aybolt') ||
-    has('хомут кабельн') || has('стяжка кабельн') || has('kablo bağı') || has('cırt kelepçe') || has('хомут сантехнич') || has('boru kelepçesi') ||
+    has('хомут кабельн') || has('стяжка кабельн') || has('стяжки пластиковые') || has('полиамид 6.6') || has('kablo bağı') || has('cırt kelepçe') || has('хомут сантехнич') || has('boru kelepçesi') ||
     has('скотч малярн') || has('лента малярн') || has('maskeleme bandı') || has('kağıt bant') || has('лента армирован') || has('серпянк') ||
     has('koli bandı') || has('скотч прозрачн') || has('скотч упаковочн') ||
     has('стрейч') || has('streç film') || has('мешки полипропилен') || has('moloz çuvalı') || has('çuval') ||
-    has('колесо для тачки') || has('колесо промышленн') || has('tekerlek')
+    has('колесо для тачки') || has('колесо промышленн') || has('tekerlek'))
   ) {
     return 'Sarf Malzeme & Hırdavat';
   }
@@ -1822,11 +1822,11 @@ export function normalizeCategoryName(rawCategory?: string, materialName?: strin
     has('anahtar kombine') || has('tork anahtar') || has('t anahtar') || has('boru anahtarı') || has('kurbağacık') || has('allen') || has('alyans') || has('lokma') || has('торцевая головка') ||
     has('отвертк') || has('tornavida') || has('пассатижи') || has('плоскогубц') || has('бокорезы') || has('кусачки') || has('клещи') || has('pense') || has('kerpeten') || has('yan keski') || has('пресс гидравлический ручной') ||
     has('нож строительн') || has('нож сегментн') || has('лезвия для ножа') || has('лезвие для ножа') || has('maket bıçağı') || has('maket bıçağına') || has('falçata') || has('ножницы по металлу') || has('sac makası') || has('sac kesme makası') || has('болторез') || has('demir makası') ||
-    has('пистолет для пены') || has('пистолет для герметик') || has('köpük tabancası') || has('silikon tabancası') || has('заклепочник') || has('perçin tabancası') || has('степлер строительн') || has('zımba tabancası') ||
+    has('пистолет для пены') || has('пистолет для герметик') || has('köpük tabancası') || has('silikon tabancası') || has('mastik tabancası') || has('sosis tabancası') || has('заклепочник') || has('perçin tabancası') || has('степлер строительн') || has('zımba tabancası') ||
     has('шпатель') || has('гладилка') || has('кельма') || has('терка строительн') || has('правило трапециевидн') || has('правило алюмин') || has('spatula') || has('mastar') || hasRx(/(?:^|[^a-zа-яёğüşıöç])mala(?:sı|lar)?(?![a-zа-яёğüşıöç])/i) ||
     has('тачка строительн') || has('тележка') || has('el arabası') || has('japon arabası') ||
     has('лестница') || has('стремянк') || has('merdiven') ||
-    has('строп текстильн') || has('строп канатн') || has('строп цепн') || has('чалки') || has('bez sapan') || has('çelik sapan') || has('zincir sapan') || has('лебедк') || has('таль ручн') || has('домкрат гидравлич')
+    has('строп текстильн') || has('строп канатн') || has('строп цепн') || has('чалки') || has('bez sapan') || has('çelik sapan') || has('zincir sapan') || has('лебедк') || has('таль ручн') || has('домкрат гидравлич') || has('beton vibratör') || has('beton iç vibratör') || has('harici vibratör') || has('вибратор глубин') || has('вибратор площад') || has('vpk e-tron') || has('vpk 6000') || has('perdah diski') || has('диск затирочн') || has('ножницы секторн') || has('kt 207d') || has('gal 1880') || has('teknik cımbız')
   ) {
     return 'El Aletleri & Hırdavat';
   }
@@ -1901,7 +1901,7 @@ export function classifyMaterialStrict(text?: string): string | null {
  * Bu metinler gerçek ürünü tarif etmez (örn. bir matkap ucunun "Бетон товарный БСГ ГОСТ 7473 (14*400)"
  * olarak kaydedilmesi) → kategori kararında orijinal satır olarak kullanılamaz.
  */
-const SYNTHETIC_ORIGINAL_RE = /бетон\s+товарный\s+бсг\s+гост\s*7473\s*\(|рулетка\s+измерительная\s*\/\s*уровень\s+строительный|хозяйственно-бытовое\s+обеспечение|канцелярские\s+и\s+офисные\s+товары|строительно-монтажный\s+материал\s*\/\s*тмц|диск\s+отрезной\s*\/\s*круг\s+шлифовальный|розетка\s+электрическая\s*\/\s*вилка|щит\s+распределительный\s*\/\s*коробка\s+монтажная|труба\s+полипропиленовая\s*\/\s*пвх|оборудование\s+стройплощадки,\s*мебель|смесь\s+сухая\s+(?:ремонтная|штукатурная)\s*\/|гипсокартонный\s+лист\s*\(гкл\s*\/|^\s*(?:спецификаци[яи]|список|товар|материал[ыа]?)\s*$/i;
+const SYNTHETIC_ORIGINAL_RE = /бетон\s+товарный\s+бсг\s*(?:гост\s*\d+\s*)?\(|рулетка\s+измерительная\s*\/\s*уровень\s+строительный|хозяйственно-бытовое\s+обеспечение|канцелярские\s+и\s+офисные\s+товары|строительно-монтажный\s+материал\s*\/\s*тмц|диск\s+отрезной\s*\/\s*круг\s+шлифовальный|розетка\s+электрическая\s*\/\s*вилка|щит\s+распределительный\s*\/\s*коробка\s+монтажная|труба\s+полипропиленовая\s*\/\s*пвх|оборудование\s+стройплощадки,\s*мебель|смесь\s+сухая\s+(?:ремонтная|штукатурная)\s*\/|гипсокартонный\s+лист\s*\(гкл\s*\/|^\s*(?:спецификаци[яи]|список|товар|материал[ыа]?)\s*$/i;
 
 export function isGenuineOriginalLine(originalName?: string): boolean {
   const o = String(originalName || '').trim();

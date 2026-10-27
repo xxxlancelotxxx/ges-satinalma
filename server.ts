@@ -3243,7 +3243,11 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
       primaryText.includes('a240') ||
       primaryText.includes('а240') ||
       primaryText.includes('a400') ||
-      primaryText.includes('а400')
+      primaryText.includes('а400') ||
+      primaryText.includes('для армирования железобетонных') ||
+      primaryText.includes('периодического профиля') ||
+      /(?:^|[^a-zа-яё0-9])[aаbв]\s*500\s*[cс]?(?![a-zа-яё0-9])/i.test(primaryText) ||
+      /(?:^|[^a-zа-яё0-9])[aа]\s*(?:240|400)\s*[cс]?(?![a-zа-яё0-9])/i.test(primaryText)
     )
   ) {
     const d = extractRebarDiameter(primaryText);
@@ -7583,7 +7587,7 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
       parts.forEach((part, idx) => {
         const isForeignType = part.signature.type && part.signature.type !== hostType;
         // Grup adı başka bir parçanın satırından geldiyse (ör. 4,8x25 adı altında 4,8x35 satırı) parçanın kendi adını kullan
-        const partNames = part.entries.map((e: any) => String(e.item?.materialName || '').trim()).filter(Boolean);
+        const partNames = part.entries.map((e: any) => cleanRawMaterialName(String(e.item?.materialName || '').trim())).filter(Boolean);
         const ownName = partNames.length > 0 && partNames.every((n: string) => n === partNames[0]) ? partNames[0] : '';
         const partBase = ownName && !part.entries.some((e: any) => String(e.item?.materialName || '').trim() === grp.canonName) ? ownName : grp.canonName;
         const missingLabelTokens = part.label

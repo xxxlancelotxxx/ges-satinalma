@@ -2,7 +2,7 @@ import * as XLSX from 'xlsx';
 import { formatRuble } from './format';
 import { processItem } from './aiDecisionEngine';
 import { areVendorsEqual } from './vendorNormalizer';
-import { CANONICAL_28_CATEGORIES, normalizeCategoryName, sortCategoriesByPriority } from './categoryClassifier';
+import { CANONICAL_28_CATEGORIES, normalizeCategoryName, resolveItemCategory, sortCategoriesByPriority } from './categoryClassifier';
 import { getCategorySpendingSummary, verifyProcurementDataIntegrity, isPrizmaAutoSyncedInvoice, getDashboardSpendItems, resolveSpendJobsite, toProcurementFilterOptions } from './procurementAnalyticsCore';
 import { detectSuperIntelligentProcurementAnomalies } from './aiForensicAuditor';
 import { isLowPriorityConsumable } from './lowPriorityConsumables';
@@ -208,7 +208,7 @@ export function getTopPriceDifferenceMaterials(
       const pct = r.priceDifferencePercentage || Number((((r.maxUnitPrice - r.minUnitPrice) / r.minUnitPrice) * 100).toFixed(1));
       if (pct < 3) return false;
       if (category && category !== 'ALL') {
-        const normCat = normalizeCategoryName(r.category, r.materialName).toLowerCase().trim();
+        const normCat = ((CANONICAL_28_CATEGORIES as readonly string[]).includes(r.category) ? r.category : normalizeCategoryName(r.category, r.materialName)).toLowerCase().trim();
         const targetCat = normalizeCategoryName(category).toLowerCase().trim();
         if (normCat !== targetCat && (r.category || '').toLowerCase().trim() !== category.toLowerCase().trim()) {
           return false;
@@ -391,7 +391,7 @@ export function exportDashboardToExcel(data: any): void {
 export { exportDashboardToHtml, generateDashboardHtmlReport } from './dashboardHtmlReport';
 
 export function classifyItemCategory(materialName?: string, originalName?: string, supplier?: string, category?: string): string {
-  return normalizeCategoryName(category, materialName || originalName);
+  return resolveItemCategory({ originalName, materialName, rawCategory: category });
 }
 
 function j0(e: any ): any {return e?gY.has(e.toLowerCase().trim()):!0}
@@ -408,7 +408,7 @@ function ps(e: any ): any {
   if(a.length>0){
     const r=new Map;
     a.forEach((c: any)=>{
-      const f=normalizeCategoryName(c.category, c.materialName || c.originalName);
+      const f=resolveItemCategory({ originalName: c.originalName, materialName: c.materialName, rawCategory: c.category, manualCategory: c.categoryManual ? c.category : undefined });
       const m=Number(c.totalPrice)||Number(c.unitPrice)*Number(c.quantity)||1;
       r.set(f,(r.get(f)||0)+m);
     });

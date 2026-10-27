@@ -807,7 +807,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </div>
               <div>
                 <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
-                  Genel Bakış ve Dashboard
+                  Yönetici Kontrol Paneli
                 </h1>
                 <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
                   Tüm şantiyelerin satınalma harcamaları, şefler arası tasarruf performansı ve rekabet tablosu
@@ -863,7 +863,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
             </span>
-            <span className="font-bold text-indigo-900">🎯 Şeffaf Performans & Şefler Arası Rekabet:</span>
+            <span className="font-bold text-indigo-900">Kurumsal Şeffaflık İlkesi:</span>
             <span className="text-slate-600">
               Tüm satınalma şeflerinin tasarruf başarıları herkese açıktır. Rekabeti güçlendirmek ve daha yüksek indirimleri teşvik etmek amacıyla tüm veriler listelenmektedir.
             </span>
@@ -1178,7 +1178,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             }`}
           >
             <Boxes className="w-4 h-4 text-amber-600" />
-            <span>🧱 Özel Malzeme Analizi (Demir, Gazblok, İzolasyon)</span>
+            <span>Özel Malzeme Analizi (Demir, Gazbeton, Yalıtım)</span>
             <span className="px-2 py-0.5 text-[10px] font-black rounded-full bg-amber-100 text-amber-900">
               YENİ
             </span>
@@ -1231,11 +1231,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="font-bold text-sm sm:text-base text-white">
-                  Yapay Zeka Karar & Canlı Sekme Senkronizasyon Masası
+                  Yönetici Karar Özeti & Hızlı Erişim Masası
                 </h3>
                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  Elma-Elma (%100 Mutabakat)
+                  Doğrulanmış Fatura Verisi
                 </span>
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-500/20 text-indigo-200 border border-indigo-400/30 font-mono">
                   28 Standart Kategori • {categorySpendingData.length} Aktif
@@ -1479,7 +1479,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </p>
             </div>
             <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-rose-300 font-semibold">
-              <span>4 Denetim Motoru Aktif</span>
+              <span>Canlı Fiyat & Sapma Denetimi</span>
               <span className="group-hover:translate-x-0.5 transition-transform shrink-0">Radarı Aç →</span>
             </div>
           </div>
