@@ -1,12 +1,18 @@
 import { DiscountRecord, MaterialComparison, InvoiceRecord } from '../types';
 import { formatRuble } from './format';
 import {
-  convertMaterialUnit,
-  normalizeStandardUnit
-} from './constructionUnitConverter';
-import {
-  isExemptFromBenchmarkAudit
+  isExemptFromBenchmarkAudit,
+  isLowPriorityConsumable
 } from './auditRiskEngine';
+import {
+  convertUnitPriceStrict,
+  isExactUnitConversion,
+  isPlausibleSameMaterialPriceRatio,
+  isSameMaterialLine,
+  parsePurchaseDate,
+  vendorKeyForMatching,
+  cleanDocumentNumber
+} from './sameMaterialMatcher';
 export { isExemptFromBenchmarkAudit };
 
 export type ForensicRiskLevel = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
@@ -162,6 +168,10 @@ export function runForensicAudit(
   let sameVendorPrevDate = '';
 
   const priceRatio = agreedPrice > 0 && offerPrice > agreedPrice ? (offerPrice / agreedPrice) : 1;
+  const isSingleItemInvoice = items.length === 1;
+  const recDateMs = parsePurchaseDate(record.orderDate || record.date || record.created_at) || 0;
+  const recInvNoClean = cleanDocumentNumber(record.invoiceNo);
+  const recVendorKey = vendorKeyForMatching(vendorName);
 
   if (items.length > 0 && comparisons.length > 0) {
     for (const it of items) {
@@ -173,6 +183,11 @@ export function runForensicAudit(
       if (exemption.isExempt) {
         exemptItemsCount++;
         exemptionDetails.push(`🛡️ '${rawName}': ${exemption.label}`);
+        continue;
+      }
+
+      // Düşük öncelikli ofis/mutfak/temizlik sarf malzemelerini ana adli fiyat şişirme alarmına sokma
+      if (items.length > 1 && isLowPriorityConsumable(rawName, itCategory)) {
         continue;
       }
 
@@ -198,51 +213,62 @@ export function runForensicAudit(
         continue;
       }
 
-      const conv = convertMaterialUnit({
-        materialName: rawName,
-        category: itCategory,
-        fromUnit: itUnit,
-        toUnit: benchmarkUnit,
-        unitPrice: itPrice,
-        quantity: itQty
-      });
+      // Yalnızca kesin metrik birim dönüşümü (tahmine dayalı dönüşüm yasak)
+      const strictConvertedPrice = convertUnitPriceStrict(itPrice, itUnit, benchmarkUnit);
+      if (strictConvertedPrice === null || !(strictConvertedPrice > 0)) continue;
 
-      const unitsMatch = conv.conversionApplied || normalizeStandardUnit(itUnit) === normalizeStandardUnit(benchmarkUnit);
-      if (!unitsMatch) continue; // Farklı ve çevrilemeyen birimleri (ör. Adet vs Ton) ASLA kıyaslama!
+      const conversionApplied = Math.abs(strictConvertedPrice - itPrice) > 0.0001;
+      const effectiveClosingUnit = Number(strictConvertedPrice.toFixed(2));
+      // Çok kalemli faturalarda fatura geneli indirim oranını tekil kaleme uydurma; yalnızca tek kalemli faturada veya kalem bazlı ilk fiyat varsa kullan
+      const explicitItemInitial = Number((it as any).offerUnitPrice || (it as any).initialUnitPrice || 0);
+      const effectiveInitialUnit = explicitItemInitial > 0
+        ? (convertUnitPriceStrict(explicitItemInitial, itUnit, benchmarkUnit) || explicitItemInitial)
+        : (isSingleItemInvoice ? Number((effectiveClosingUnit * priceRatio).toFixed(2)) : effectiveClosingUnit);
 
-      const effectiveClosingUnit = conv.conversionApplied ? conv.convertedUnitPrice : itPrice;
-      const effectiveInitialUnit = effectiveClosingUnit * priceRatio;
-      const curDateMs = record.orderDate ? new Date(record.orderDate).getTime() : 0;
-
-      // Bu faturanın kendisi hariç ve bu faturadan ÖNCE veya aynı dönemde alınmış geçmiş alımların ortalamasını hesapla
+      // Bu faturanın kendisi hariç, doğrulanmış, aynı malzeme ve makul fiyat oranındaki geçmiş alımların ortalamasını hesapla
       const otherHistory = (comp.history || []).filter(h => {
-        if (String(h.invoiceNumber || '').trim().toLowerCase() === String(record.invoiceNo || '').trim().toLowerCase()) return false;
-        if (curDateMs > 0 && h.date) {
-          const hMs = new Date(h.date).getTime();
-          if (hMs > curDateMs + 15 * 86400000) return false;
+        if ((h as any).invoiceLinesVerified === false || (h as any).isPdfVerified === false) return false;
+        if (!isExactUnitConversion(h as any)) return false;
+        const hInvClean = cleanDocumentNumber(h.invoiceNumber);
+        if (recInvNoClean && hInvClean && recInvNoClean === hInvClean) return false;
+        if (recDateMs > 0 && h.date) {
+          const hMs = parsePurchaseDate(h.date) || 0;
+          if (hMs > recDateMs + 15 * 86400000) return false;
         }
-        return Number(h.unitPrice || 0) > 0;
+        const hPrice = Number(h.normalizedUnitPrice ?? h.unitPrice ?? 0);
+        if (!(hPrice > 0)) return false;
+        if (!isPlausibleSameMaterialPriceRatio(effectiveClosingUnit, hPrice)) return false;
+        if (it.originalName && h.originalName) {
+          const sameCheck = isSameMaterialLine(
+            { originalName: it.originalName, materialName: rawName, category: itCategory },
+            { originalName: h.originalName, materialName: comp.materialName, category: comp.category }
+          );
+          if (!sameCheck.same) return false;
+        }
+        return true;
       });
       if (otherHistory.length === 0) continue;
 
-      const benchmarkAvg = otherHistory.reduce((s, h) => s + Number(h.unitPrice || 0), 0) / otherHistory.length;
-      const benchmarkMin = Math.min(...otherHistory.map(h => Number(h.unitPrice || 0)).filter(p => p > 0));
+      const benchmarkAvg = otherHistory.reduce((s, h) => s + Number(h.normalizedUnitPrice ?? h.unitPrice ?? 0), 0) / otherHistory.length;
+      const benchmarkMin = Math.min(...otherHistory.map(h => Number(h.normalizedUnitPrice ?? h.unitPrice ?? 0)).filter(p => p > 0));
 
       // Aynı tedarikçiden bu faturadan DAHA ÖNCE kaça alınmış kontrol et (sadece aynı malzeme için!)
       const vendorPrevPurchases = otherHistory
         .filter(h => {
-          if ((h.supplier || '').toLowerCase().trim() !== vendorName.toLowerCase()) return false;
-          if (curDateMs > 0 && h.date) {
-            return new Date(h.date).getTime() <= curDateMs;
+          const hVendorKey = vendorKeyForMatching(h.supplier);
+          if (!recVendorKey || !hVendorKey || hVendorKey !== recVendorKey) return false;
+          if (recDateMs > 0 && h.date) {
+            const hMs = parsePurchaseDate(h.date) || 0;
+            return hMs > 0 && hMs <= recDateMs;
           }
           return true;
         })
-        .sort((a, b) => new Date(b.date || '').getTime() - new Date(a.date || '').getTime());
+        .sort((a, b) => (parsePurchaseDate(b.date) || 0) - (parsePurchaseDate(a.date) || 0));
 
       let itemSameVendorPrevPrice = 0;
       let itemSameVendorPrevDate = '';
       if (vendorPrevPurchases.length > 0) {
-        const prevP = Number(vendorPrevPurchases[0].unitPrice || 0);
+        const prevP = Number(vendorPrevPurchases[0].normalizedUnitPrice ?? vendorPrevPurchases[0].unitPrice ?? 0);
         if (prevP > 0 && effectiveClosingUnit > prevP * 1.12) {
           itemSameVendorPrevPrice = prevP;
           itemSameVendorPrevDate = vendorPrevPurchases[0].date || '';
@@ -251,7 +277,9 @@ export function runForensicAudit(
 
       if (benchmarkAvg > 0) {
         const closingDiffPct = ((effectiveClosingUnit - benchmarkAvg) / benchmarkAvg) * 100;
-        const initialDiffPct = ((effectiveInitialUnit - benchmarkAvg) / benchmarkAvg) * 100;
+        const initialDiffPct = effectiveInitialUnit > effectiveClosingUnit
+          ? ((effectiveInitialUnit - benchmarkAvg) / benchmarkAvg) * 100
+          : 0;
         const vendorHikePct = itemSameVendorPrevPrice > 0 ? ((effectiveClosingUnit - itemSameVendorPrevPrice) / itemSameVendorPrevPrice) * 100 : 0;
 
         if (closingDiffPct > worstClosingDiffPct || initialDiffPct > worstInitialInflationPct || vendorHikePct > 12) {
@@ -263,7 +291,7 @@ export function runForensicAudit(
             worstBenchmarkAvg = benchmarkAvg;
             worstBenchmarkMin = benchmarkMin;
             worstUnit = benchmarkUnit;
-            worstConvNote = conv.conversionApplied ? ` (${itPrice} ₽/${itUnit} → ${effectiveClosingUnit} ₽/${benchmarkUnit})` : '';
+            worstConvNote = conversionApplied ? ` (${itPrice} ₽/${itUnit} → ${effectiveClosingUnit} ₽/${benchmarkUnit})` : '';
             sameVendorPrevPrice = itemSameVendorPrevPrice;
             sameVendorPrevDate = itemSameVendorPrevDate;
           }
@@ -398,19 +426,18 @@ export function runForensicAudit(
   };
 
   if (allDiscounts && allDiscounts.length > 0 && !hasTdfLink) {
-    const orderTime = new Date(record.orderDate || record.created_at || Date.now()).getTime();
-    const vNameClean = vendorName.toLowerCase().trim();
-    const recInvNo = String(record.invoiceNo || '').trim().toLowerCase();
+    const orderTime = parsePurchaseDate(record.orderDate || record.date || record.created_at) || new Date(record.orderDate || record.created_at || Date.now()).getTime();
+    const vKey = recVendorKey || vendorName.toLowerCase().trim();
 
     // Yalnızca FARKLI fatura numarasına sahip gerçek ayrı siparişleri say (mükerrerleri sayma!)
     const nearbyDistinctOrders = allDiscounts.filter(d => {
       if (d.id === record.id || (d as any).isDeleted) return false;
-      const dInvNo = String(d.invoiceNo || '').trim().toLowerCase();
-      if (recInvNo && dInvNo && recInvNo === dInvNo) return false; // Aynı faturayı iki kez sayma!
-      const dTime = new Date(d.orderDate || d.created_at || Date.now()).getTime();
-      const dVName = (d.vendorName || '').toLowerCase().trim();
+      const dInvNo = cleanDocumentNumber(d.invoiceNo);
+      if (recInvNoClean && dInvNo && recInvNoClean === dInvNo) return false; // Aynı faturayı iki kez sayma!
+      const dTime = parsePurchaseDate(d.orderDate || d.date || d.created_at) || new Date(d.orderDate || d.created_at || Date.now()).getTime();
+      const dVKey = vendorKeyForMatching(d.vendorName) || (d.vendorName || '').toLowerCase().trim();
       const hoursDiff = Math.abs(orderTime - dTime) / (1000 * 60 * 60);
-      return hoursDiff <= 72 && dVName === vNameClean && d.jobsiteId === record.jobsiteId;
+      return hoursDiff <= 72 && Boolean(vKey && dVKey && dVKey === vKey) && d.jobsiteId === record.jobsiteId;
     });
 
     const totalCombined = nearbyDistinctOrders.reduce((s, d) => s + (Number(d.agreedPrice) || 0), agreedPrice);
@@ -482,11 +509,14 @@ export function runForensicAudit(
 
   if (allDiscounts && allDiscounts.length >= 6 && discountPct >= 20) {
     const sNameClean = supervisorName.toLowerCase().trim();
-    const vNameClean = vendorName.toLowerCase().trim();
+    const vKey = recVendorKey || vendorName.toLowerCase().trim();
     const buyerDiscounts = allDiscounts.filter(d => !(d as any).isDeleted && (d.supervisorName || '').toLowerCase().trim() === sNameClean);
 
     if (buyerDiscounts.length >= 6) {
-      const vendorDiscounts = buyerDiscounts.filter(d => (d.vendorName || '').toLowerCase().trim() === vNameClean);
+      const vendorDiscounts = buyerDiscounts.filter(d => {
+        const dVKey = vendorKeyForMatching(d.vendorName) || (d.vendorName || '').toLowerCase().trim();
+        return Boolean(vKey && dVKey && dVKey === vKey);
+      });
       const concentrationRate = (vendorDiscounts.length / buyerDiscounts.length) * 100;
       if (concentrationRate >= 75) {
         riskScore += 15;

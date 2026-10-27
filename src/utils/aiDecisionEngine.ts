@@ -1359,6 +1359,30 @@ export function processItem(
     classification.category = 'Yalıtım & Alçıpan';
     classification.subCategory = 'Geotekstil Keçe & Cephe Donatı Filesi';
   }
+  // G2. XPS ISI YALITIM LEVHASI (Пеноплэкс Комфорт / Основа / Гео С / ТехноНИКОЛЬ Carbon Prof)
+  else if (
+    /пеноплэкс|пеноплекс|penoplex|penopleks|техноплекс|tehnopleks|\bxps\b|экструдирован.*пенополистирол|экструзионн.*пенополистирол/i.test(combined) &&
+    !/клей|пена|крепеж|дюбель|testere|ножовка|сендвич[\s-]*панел|сэндвич[\s-]*панел|sandwich[\s-]*panel/i.test(combined)
+  ) {
+    const xpsThick =
+      combined.match(/\b118[05]\s*[*xх×]\s*58[05]\s*[*xх×]\s*(20|30|35|40|50|60|80|100|120|150)\b/)?.[1] ||
+      combined.match(/\b58[05]\s*[*xх×]\s*118[05]\s*[*xх×]\s*(20|30|35|40|50|60|80|100|120|150)\b/)?.[1] ||
+      combined.match(/(?:^|[^0-9])(20|30|35|40|50|60|80|100|120|150)\s*(?:мм|mm)(?![a-zа-яё])/i)?.[1] ||
+      '50';
+    if (/carbon\s*prof|карбон\s*проф/i.test(combined)) {
+      canonicalName = `XPS Isı Yalıtım Levhası ТехноНИКОЛЬ Carbon Prof ${xpsThick} mm [Premium]`;
+    } else if (/profiplex|профиплекс/i.test(combined)) {
+      canonicalName = `XPS Isı Yalıtım Levhası Profiplex Extra 250 ${xpsThick} mm [Ekonomik]`;
+    } else if (/(?:^|[^а-яa-zё])(?:гео|geo)(?![а-яa-zё])|фундамент/i.test(combined)) {
+      canonicalName = `XPS Isı Yalıtım Levhası Пеноплэкс Гео С ${xpsThick} mm [Ağır Yük / Temel Serisi]`;
+    } else if (/(?:^|[^а-яa-zё])(?:основа|osnova)(?![а-яa-zё])/i.test(combined)) {
+      canonicalName = `Penoplex / XPS Isı Yalıtım Levhası Пеноплэкс Основа ${xpsThick} mm [Genel Yapı Serisi]`;
+    } else {
+      canonicalName = `Penoplex / XPS Isı Yalıtım Levhası Пеноплэкс Комфорт ${xpsThick} mm [Standart]`;
+    }
+    classification.category = 'Yalıtım & Alçıpan';
+    classification.subCategory = 'Isı & Ses Yalıtımı';
+  }
   // H. ALÇIPAN LEVHA (Sadece gerçek alçıpan plakalar; profil, agraf, vida, testere, freze, müdahale kapağı ve açıklama notları hariç!)
   else if (
     /гипсокартон|alçıpan|alcipan|\bгкл(?:в|о)?\b|\bgkl(?:v|o)?\b/i.test(combined) &&

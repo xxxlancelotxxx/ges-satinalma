@@ -354,7 +354,10 @@ export function rebarBarKey(p: MaterialMatchProfile): string {
   const diameter = p.identity.rebarDiameter;
   if (!diameter) return '';
   const grade = [...(p.identity.grades.get('a') || [])].sort().join('/') || '?';
-  return `REBAR::${diameter}::${grade}`;
+  const form = /бухт|моток|мотк|kangal/i.test(text)
+    ? 'COIL'
+    : (/\b6000\b|(?:^|[^0-9.,])6\s*(?:м|m)(?![0-9а-яa-z])/i.test(text) ? 'BAR6M' : 'BAR');
+  return `REBAR::${diameter}::${grade}::${form}`;
 }
 
 // Malzeme kimliği taşımayan kelime kökleri (stok durumu, "дл." kısaltması)

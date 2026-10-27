@@ -487,14 +487,18 @@ export function resolveCanonicalBrandFromOriginal(
 } {
   const primaryText = String(originalName || '').trim();
   const secondaryText = String(fallbackMaterialName || '').trim();
-  const deepInfo = extractOriginalBrandAndSeries(primaryText || secondaryText);
+  const deepPrimary = extractOriginalBrandAndSeries(primaryText || secondaryText);
+  const deepSecondary = (deepPrimary.brandKey === 'GENERIC' && secondaryText && secondaryText !== primaryText)
+    ? extractOriginalBrandAndSeries(secondaryText)
+    : deepPrimary;
+  const deepInfo = deepPrimary.brandKey !== 'GENERIC' ? deepPrimary : deepSecondary;
   const searchTargets = primaryText ? [primaryText, `${primaryText} ${secondaryText}`] : [secondaryText];
 
   for (const target of searchTargets) {
     if (!target) continue;
     for (const rule of CANONICAL_BRAND_RULES) {
       if (rule.patterns.some(p => p.test(target))) {
-        let subSeries = deepInfo.seriesLabel;
+        let subSeries = deepInfo.seriesLabel || deepPrimary.seriesLabel;
         if (!subSeries && rule.subSeriesPatterns) {
           const hit = rule.subSeriesPatterns.find(sp => sp.pattern.test(target));
           if (hit) subSeries = hit.seriesName;
@@ -509,12 +513,27 @@ export function resolveCanonicalBrandFromOriginal(
     }
   }
 
+  // Explicit [Marka: X] tag in secondaryText if originalName had no brand
+  const explicitMarkaMatch = secondaryText.match(/\[Marka:\s*([^\]]+)\]/i);
+  if (explicitMarkaMatch && (!deepInfo.brandKey || deepInfo.brandKey === 'GENERIC')) {
+    const explicitLabel = explicitMarkaMatch[1].trim();
+    const explicitKey = explicitLabel.toUpperCase().replace(/[^A-ZА-ЯЁ0-9]+/gi, '_').replace(/^_+|_+$/g, '');
+    if (explicitKey && explicitKey !== 'STANDART' && explicitKey !== 'MARKASIZ') {
+      return {
+        brandKey: explicitKey,
+        brandDisplay: explicitLabel,
+        subSeries: deepInfo.seriesLabel || deepPrimary.seriesLabel,
+        tier: 'STANDARD'
+      };
+    }
+  }
+
   // Fallback to 3-layer dynamic brand & series extractor (handles unknown Latin/Cyrillic/quoted brands)
   if (deepInfo.brandKey && deepInfo.brandKey !== 'GENERIC') {
     return {
       brandKey: deepInfo.brandKey,
       brandDisplay: deepInfo.brandLabel || deepInfo.brandKey,
-      subSeries: deepInfo.seriesLabel,
+      subSeries: deepInfo.seriesLabel || deepPrimary.seriesLabel,
       tier: deepInfo.tier === 'COMMODITY' ? 'STANDARD' : deepInfo.tier
     };
   }
@@ -1203,8 +1222,15 @@ export function buildMode1AppleToAppleComparisons(
         const writings = Array.from(new Set(subHistory.map(h => h.originalName).filter(Boolean))) as string[];
         const grossStats = computeGrossStats(subHistory);
 
-        const baseCleanName = comp.materialName.replace(/\s*—\s*\[.*\]$/i, '').trim();
-        const thSuffix = firstSig.thicknessMm && !new RegExp(`\\b${firstSig.thicknessMm}\\s*(?:mm|мм)\\b`, 'i').test(baseCleanName)
+        const baseCleanName = comp.materialName
+          .replace(/\s*—\s*\[.*\]$/i, '')
+          .replace(/\s*\[Marka:\s*[^\]]+\]/gi, '')
+          .trim();
+        const hasThicknessAlready = firstSig.thicknessMm && (
+          new RegExp(`(?:^|[^0-9xх×*])${firstSig.thicknessMm}\\s*(?:mm|мм)\\b`, 'i').test(baseCleanName) ||
+          new RegExp(`[*xх×]\\s*${firstSig.thicknessMm}\\s*(?:mm|мм)?\\b`, 'i').test(baseCleanName)
+        );
+        const thSuffix = firstSig.thicknessMm && !hasThicknessAlready
           ? ` (${firstSig.thicknessMm} mm)`
           : '';
         const mode1Name = bKey.startsWith('DIGER_BELIRTILMEMIS') && !firstSig.subBrandOrSeries
@@ -1898,7 +1924,7 @@ export const isGesArchiveHistoryRecord = (h: any): boolean => {
  */
 function extractExplicitPackPieceCount(text?: string): number | null {
   if (!text) return null;
-  const match = text.match(/(?:\(|\b)(\d{2,4})\s*(?:шт|adet|pcs)(?:\)|\b|\/уп)/i);
+  const match = text.match(/(?:\(|^|[^0-9])(\d{2,4})\s*(?:шт|adet|pcs)\s*(?:\)|\/(?:уп|кор|пак|ящ)|(?![a-zа-яё0-9]))/i);
   if (!match) return null;
   const count = parseInt(match[1], 10);
   if (count >= 10 && count <= 5000) return count;

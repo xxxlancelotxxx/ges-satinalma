@@ -909,6 +909,18 @@ const BRAND_AND_SUBBRAND_RULES: Array<{
     brandLabel: 'Русский',
     tier: 'STANDARD',
     pattern: /сахар.*русский/i
+  },
+  {
+    brandKey: 'ERA',
+    brandLabel: 'ЭРА (ERA)',
+    tier: 'STANDARD',
+    pattern: /(?:^|[^а-яa-zё])(?:эра|era)(?![а-яa-zё])/i
+  },
+  {
+    brandKey: 'TOR',
+    brandLabel: 'TOR',
+    tier: 'STANDARD',
+    pattern: /(?:^|[^а-яa-zё])tor(?![а-яa-zё])/i
   }
 ];
 
@@ -935,7 +947,10 @@ const PRODUCT_SERIES_RULES: Array<{
   { seriesKey: 'TEHNOBLOK_STANDART', seriesLabel: 'Техноблок Стандарт', pattern: /техноблок\s*стандарт|tehnoblok\s*standart/i },
   { seriesKey: 'TEHNOBLOK', seriesLabel: 'Техноблок', pattern: /техноблок|tehnoblok/i },
   { seriesKey: 'CARBON_PROF', seriesLabel: 'Carbon Prof', pattern: /carbon\s*prof|carbonproof|карбон\s*проф/i },
-  { seriesKey: 'GEO_S', seriesLabel: 'Гео С', pattern: /гео\s*с(?![а-яa-z])|geo\s*c(?![a-z])/i },
+  { seriesKey: 'GEO_S', seriesLabel: 'Гео С', pattern: /гео\s*с(?![а-яa-z])|geo\s*c(?![a-z])|(?:пеноплэкс|пеноплекс)\s*гео/i },
+  { seriesKey: 'OSNOVA_XPS', seriesLabel: 'Основа', pattern: /(?:пеноплэкс|пеноплекс)\s*основа/i },
+  { seriesKey: 'FUNDAMENT_XPS', seriesLabel: 'Фундамент', pattern: /(?:пеноплэкс|пеноплекс)\s*фундамент/i },
+  { seriesKey: 'STENA_XPS', seriesLabel: 'Стена', pattern: /(?:пеноплэкс|пеноплекс)\s*стена/i },
   { seriesKey: 'KOMFORT_XPS', seriesLabel: 'Комфорт', pattern: /пеноплэкс\s*комфорт|пеноплекс\s*комфорт/i },
   { seriesKey: 'FUNDAMENT', seriesLabel: 'Фундамент ЭПП', pattern: /техноэласт\s*фундамент|техноеласт\s*фундамент/i },
   { seriesKey: 'EPP_3.5', seriesLabel: 'ЭПП 3.5 мм', pattern: /эпп\s*3[.,]5\b/i },
@@ -961,8 +976,8 @@ const PRODUCT_SERIES_RULES: Array<{
   { seriesKey: 'VILEDA_PRO_BLUE', seriesLabel: 'Professional (Синие)', pattern: /vileda\s*profes.*син/i },
   { seriesKey: 'DELTA_BASEBALL_DIAMOND', seriesLabel: 'Baseball Diamond V UP', pattern: /baseball\s+diamond/i },
   { seriesKey: 'DELTA_DIAMOND_STD', seriesLabel: 'Diamond V UP', pattern: /(?<!baseball\s)diamond\s+v\s+up/i },
-  { seriesKey: 'KRAGI_INSULATED', seriesLabel: 'Утепленные мехом', pattern: /краги.*утеплен|утепленные\s+искусственным\s+мехом/i },
-  { seriesKey: 'KRAGI_UNINSULATED', seriesLabel: 'Без утепления', pattern: /краги.*без\s*утеплен/i },
+  { seriesKey: 'KRAGI_UNINSULATED', seriesLabel: 'Без утепления', pattern: /краги.*без\s*утеплен|без\s*утеплен.*краги/i },
+  { seriesKey: 'KRAGI_INSULATED', seriesLabel: 'Утепленные мехом', pattern: /краги.*(?<!без\s)утеплен|утепленные\s+искусственным\s+мехом/i },
   { seriesKey: 'PLASH_BUTTONS', seriesLabel: 'На кнопках', pattern: /на\s*кнопках/i },
   { seriesKey: 'PLASH_VELCRO', seriesLabel: 'На липучках', pattern: /на\s*липучках/i },
   { seriesKey: 'ZHILET_TIP1T', seriesLabel: 'Тип 1Т', pattern: /жилет.*тип\s*1\s*т/i },

@@ -1434,14 +1434,61 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
       it.originalName || it.originalMaterialName || it.materialName || ''
     );
 
-    const qty = Number(it.quantity) || 1;
-    const rawUnitPrice = Number(it.unitPrice) || 0;
+    let qty = Number(it.quantity) || 1;
+    let rawUnitPrice = Number(it.unitPrice) || 0;
     const rawTotalPrice = Number(it.totalPrice) || 0;
+    let effectiveUnit = String(it.unit || 'Adet').trim() || 'Adet';
+    let storedNetOverride = Number(it.unitPriceNet) || 0;
+    let storedGrossOverride = Number(it.grossUnitPrice) || 0;
+
+    const combinedItemText = `${normMat} ${origRu}`.toLowerCase();
+    const unitTrimLower = effectiveUnit.toLowerCase();
+
+    // 1. Demir / Kangal / Bağ Teli satırlarında kg miktarı ve ₽/kg birim fiyatı "Ton" birimiyle kaydedilmişse (örn. СБ.П-42450019 & СП/П-22390042: 15.000 kg @ 49,50 ₽ = 742.500 ₽) -> 15 Ton @ 49.500 ₽/Ton
+    const isSteelTonCandidate = /арматур|пруток|катанка|проволока|inşaat\s*demir|insaat\s*demir|bağ\s*teli|bag\s*teli|filmaşin|filmasin|çelik\s*tel|celik\s*tel/i.test(combinedItemText);
+    const isTonUnit = /^(?:ton|t|т|тн|тонн[аы]?)$/i.test(unitTrimLower);
+    if (isSteelTonCandidate && isTonUnit && rawUnitPrice >= 15 && rawUnitPrice <= 400 && qty >= 200) {
+      qty = Number((qty / 1000).toFixed(4));
+      rawUnitPrice = Number((rawUnitPrice * 1000).toFixed(2));
+      if (storedNetOverride >= 15 && storedNetOverride <= 450) {
+        storedNetOverride = Number((storedNetOverride * 1000).toFixed(2));
+      }
+      if (storedGrossOverride >= 15 && storedGrossOverride <= 500) {
+        storedGrossOverride = Number((storedGrossOverride * 1000).toFixed(2));
+      }
+    }
+
+    // 2. m³ biriminde ondalık virgül kayması nedeniyle miktar 1000x büyüyüp birim fiyat 1000x küçülmüşse (örn. УТ-18424: 73,181 m³ -> 73181 m³ @ 7,89 ₽/m³) -> 73.181 m³ @ 7.890 ₽/m³
+    const isM3Unit = /^(?:m³|m3|м3|м³|куб\.?\s*м|м\.?\s*куб)$/i.test(unitTrimLower);
+    if (isM3Unit && rawUnitPrice >= 1.5 && rawUnitPrice <= 45 && qty >= 500) {
+      qty = Number((qty / 1000).toFixed(4));
+      rawUnitPrice = Number((rawUnitPrice * 1000).toFixed(2));
+      if (storedNetOverride >= 1.5 && storedNetOverride <= 55) {
+        storedNetOverride = Number((storedNetOverride * 1000).toFixed(2));
+      }
+      if (storedGrossOverride >= 1.5 && storedGrossOverride <= 65) {
+        storedGrossOverride = 0; // KDV oranıyla net üzerinden tam kuruş hesaplanır
+      }
+    }
+
+    // 3. Gazbeton blok satırlarında brüt sevkiyat ağırlığı (kg) "Ton" olarak yazılıp açıklama içinde açık palet adedi ("64 пал") varsa (örn. ЕР-5733)
+    const isAeratedBlock = /блок\s*istkult|газобетон|газосиликат|gazbeton|ytong|bonolit|poritep/i.test(combinedItemText);
+    if (isAeratedBlock && rawUnitPrice > 0 && rawUnitPrice < 50 && qty > 1000 && rawTotalPrice > 50000) {
+      const palMatch = combinedItemText.match(/(?:^|\s)(\d{1,3})\s*(?:пал|подд|palet)(?![a-zа-яё])/i);
+      const palQty = palMatch ? Number(palMatch[1]) : 0;
+      if (palQty > 0 && (rawTotalPrice / palQty) >= 3000 && (rawTotalPrice / palQty) <= 35000) {
+        qty = palQty;
+        effectiveUnit = 'palet';
+        rawUnitPrice = Number((rawTotalPrice / palQty).toFixed(2));
+        storedNetOverride = rawUnitPrice;
+        storedGrossOverride = 0;
+      }
+    }
+
     const impliedUnit = (qty > 0 && rawTotalPrice > 0) ? (rawTotalPrice / qty) : 0;
     const itemImpliedRatio = (impliedUnit > 0 && rawUnitPrice > 0) ? (impliedUnit / rawUnitPrice) : 1;
     const isItemImpliedNet = itemImpliedRatio >= 1.185 && itemImpliedRatio <= 1.235;
 
-    const combinedItemText = `${normMat} ${origRu}`.toLowerCase();
     const isMedicalExempt = /медицин|термометр|тонометр|носилки|жгут|бинт|аптечк|анализатор|кушетк|шины|шприц|параван|muayene/i.test(combinedItemText);
 
     let effectiveVatPct = invoiceLevelVat;
@@ -1456,7 +1503,7 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
       else effectiveVatPct = invoiceLevelVat;
     }
 
-    const unitLower = String(it.unit || '').toLowerCase().trim();
+    const unitLower = effectiveUnit.toLowerCase().trim();
     const isSummaryPackageRow = unitLower === 'sipariş/hizmet' || unitLower === 'paket/hizmet' || unitLower === 'pakethizmet' || String(it.id || '').startsWith('dsc_');
 
     let unitPriceNet = rawUnitPrice;
@@ -1468,7 +1515,7 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
       grossUnitPrice = rawUnitPrice;
     } else if (isStoredNetActuallyGross) {
       const storedVatPct = Number(it.vatPercentage) > 0 ? Number(it.vatPercentage) : (effectiveVatPct > 0 ? effectiveVatPct : invoiceLevelVat);
-      grossUnitPrice = Number(Number(it.unitPriceNet).toFixed(2));
+      grossUnitPrice = Number((storedNetOverride || Number(it.unitPriceNet)).toFixed(2));
       unitPriceNet = storedVatPct > 0
         ? Number((grossUnitPrice / (1 + storedVatPct / 100)).toFixed(2))
         : grossUnitPrice;
@@ -1477,9 +1524,11 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
       unitPriceNet = effectiveVatPct > 0
         ? Number((grossUnitPrice / (1 + effectiveVatPct / 100)).toFixed(2))
         : grossUnitPrice;
-    } else if (it.isNetNormalized && it.unitPriceNet > 0 && it.grossUnitPrice > 0 && !isIpMalyavin) {
-      grossUnitPrice = Number(Number(it.grossUnitPrice).toFixed(2));
-      unitPriceNet = Number(Number(it.unitPriceNet).toFixed(2));
+    } else if (it.isNetNormalized && storedNetOverride > 0 && (storedGrossOverride > 0 || effectiveVatPct >= 0) && !isIpMalyavin) {
+      unitPriceNet = Number(storedNetOverride.toFixed(2));
+      grossUnitPrice = storedGrossOverride > 0
+        ? Number(storedGrossOverride.toFixed(2))
+        : Number((unitPriceNet * (1 + effectiveVatPct / 100)).toFixed(2));
       // Eğer belgeden okunan satırda KDV oranı > 0 olmasına rağmen net fiyat brüt fiyata eşit kalmışsa düzelt
       if (effectiveVatPct > 0 && Math.abs(unitPriceNet - grossUnitPrice) < 0.01) {
         unitPriceNet = Number((grossUnitPrice / (1 + effectiveVatPct / 100)).toFixed(2));
@@ -1515,6 +1564,8 @@ function normalizeSingleInvoicePricingAndFreight(inv: any, pMatch?: any): any {
 
     return {
       ...it,
+      quantity: qty,
+      unit: effectiveUnit,
       materialName: normMat,
       originalName: origRu,
       originalMaterialName: origRu,
@@ -4136,8 +4187,39 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
 
   // 3.6 GAZBETON BLOK, GAZBETON LENTO (Перемычка), 1NF TUĞLA & GAZBETON YAPIŞTIRICISI (Rende/Рубанок, Dübel, Mala ve Testere hariç!)
   if (/(?:^|[^а-яё])черенок/i.test(effectiveOrig || primaryText)) {
+    const chSrc = `${effectiveOrig || ''} ${primaryText}`.toLowerCase();
+    if (/телескопич|удлинител.*валик|металлич.*\b(?:200|250|300)\s*см/i.test(chSrc)) {
+      return {
+        materialName: 'Teleskopik Metal Boya Rulosu Uzatma Sapı (Телескопический черенок)',
+        category: 'Boya & Kimyasallar'
+      };
+    }
+    if (/молотк/i.test(chSrc)) {
+      return {
+        materialName: 'Ahşap Çekiç Sapı (Черенок для молотка)',
+        category: 'El Aletleri & Hırdavat'
+      };
+    }
+    if (/кувалд/i.test(chSrc)) {
+      return {
+        materialName: 'Ahşap Balyoz Sapı (Черенок для кувалды)',
+        category: 'El Aletleri & Hırdavat'
+      };
+    }
+    if (/кирк/i.test(chSrc)) {
+      return {
+        materialName: 'Ahşap Kazma Sapı (Черенок для кирки)',
+        category: 'El Aletleri & Hırdavat'
+      };
+    }
+    if (/щетк|метл|швабр|резьб/i.test(chSrc)) {
+      return {
+        materialName: 'Ahşap Temizlik Fırçası / Süpürge Sapı (Черенок для щетки / метлы)',
+        category: 'Temizlik & Hijyen Malzemeleri'
+      };
+    }
     return {
-      materialName: 'Ahşap Kürek / Alet Sapı (Черенок)',
+      materialName: 'Ahşap Kürek Sapı (Черенок для лопаты)',
       category: 'El Aletleri & Hırdavat'
     };
   }
@@ -4422,7 +4504,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     else if (/\b150\b/.test(primaryText)) density = 150;
     return { materialName: `Dornit Geotekstil Keçe ${density} g/m² (Rulo)`, category: 'Yalıtım & Alçıpan' };
   }
-  if (/пеноплэкс|пеноплекс|penoplex|penopleks|техноплекс|tehnopleks|\bxps\b|экструдирован.*пенополистирол|экструзионн.*пенополистирол|izolasyon\s*levhas[ıi]\s*penopleks/i.test(primaryText) && !/клей|пена|крепеж|дюбель|testere|ножовка/i.test(primaryText)) {
+  if (/пеноплэкс|пеноплекс|penoplex|penopleks|техноплекс|tehnopleks|\bxps\b|экструдирован.*пенополистирол|экструзионн.*пенополистирол|izolasyon\s*levhas[ıi]\s*penopleks/i.test(primaryText) && !/клей|пена|крепеж|дюбель|testere|ножовка|сендвич[\s-]*панел|сэндвич[\s-]*панел|sandwich[\s-]*panel/i.test(primaryText)) {
     const xpsSrc = (effectiveOrig && /\b(20|30|35|40|50|60|80|100|120|150)\b/.test(effectiveOrig)) ? effectiveOrig : primaryText;
     const parenOverride = combined.match(/\(\s*(20|30|35|40|50|60|80|100|120|150)\s*(?:мм|mm)(?![a-zа-яё])/i)?.[1];
     const xpsThick =
@@ -4446,9 +4528,21 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
         category: 'Yalıtım & Alçıpan'
       };
     }
-    if (/гео\b|geo\b|фундамент/i.test(combined)) {
+    if (/(?:^|[^а-яa-zё])(?:гео|geo)(?![а-яa-zё])|фундамент/i.test(combined)) {
       return {
         materialName: `XPS Isı Yalıtım Levhası Пеноплэкс Гео С ${xpsThick} mm [Ağır Yük / Temel Serisi]`,
+        category: 'Yalıtım & Alçıpan'
+      };
+    }
+    if (/(?:^|[^а-яa-zё])(?:основа|osnova)(?![а-яa-zё])/i.test(combined)) {
+      return {
+        materialName: `Penoplex / XPS Isı Yalıtım Levhası Пеноплэкс Основа ${xpsThick} mm [Genel Yapı Serisi]`,
+        category: 'Yalıtım & Alçıpan'
+      };
+    }
+    if (/(?:^|[^а-яa-zё])(?:экстрим|ekstrim|45\s*с)(?![а-яa-zё])/i.test(combined)) {
+      return {
+        materialName: `XPS Isı Yalıtım Levhası Пеноплэкс Экстрим ${xpsThick} mm [Ekstra Mukavemetli]`,
         category: 'Yalıtım & Alçıpan'
       };
     }
@@ -4811,8 +4905,11 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     };
   }
   if (/краги|сварщик.*перчат|перчат.*спилк|kaynakçı\s*eldiven|kaynakci\s*eldiven|eldiven\s*kaynak/i.test(primaryText)) {
+    const isInsulatedKragi = /(?<!без\s)утеплен|зимн|мех|kışlık|kislik|yalıtımlı/i.test(combined) && !/без\s*утеплен/i.test(combined);
     return {
-      materialName: 'Isıya Dayanıklı Deri Kaynakçı Eldiveni (Краги спилковые)',
+      materialName: isInsulatedKragi
+        ? 'Kışlık Yalıtımlı Deri Kaynakçı Eldiveni (Краги спилковые утепленные)'
+        : 'Isıya Dayanıklı Deri Kaynakçı Eldiveni (Краги спилковые)',
       category: 'İş Güvenliği & KKD'
     };
   }
@@ -4865,7 +4962,7 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     };
   }
   if (/сапоги.*(?:эва|eva|пвх|pvc|резин)|(?:^|[^a-zа-яё])(?:çizme|cizme)(?![a-zа-яё])/i.test(primaryText) && !/içliği|утеплитель\s*нтп/i.test(primaryText)) {
-    const isWinterBoot = /утепл|зимн|kışlık|kislik|чулк|мех/i.test(primaryText);
+    const isWinterBoot = /утепл|зимн|морозостойк|-50|-40|-30|(?:^|[^a-zа-яё])(?:эва|eva)(?![a-zа-яё])|kışlık|kislik|чулк|мех/i.test(combined);
     if (isWinterBoot) {
       return {
         materialName: 'Kışlık Termal İş Çizmesi (Сапоги утепленные ЭВА / ПВХ)',
@@ -5402,9 +5499,15 @@ function smartNormalizeItem(item: any, existingCatalog: string[] = []): { materi
     }
   }
   if (
-    (/зубило|пика\b|kırıcı.*(?:keski|delici|murç|uc)|kirici.*(?:keski|uc)|(?:plus|max)\s*(?:düz\s*)?keski/i.test(combined)) &&
-    (/sds|отбойн|перфоратор|\b(?:14|18|25)\s*[*xх×]\s*(?:250|400|450|600)\b|\b(?:14|18)\s*[*xх×]\s*(?:20|25|40)\s*[*xх×]\s*(?:250|400)\b/i.test(combined))
+    (/зубило|пика(?![а-яa-zё])|kırıcı.*(?:keski|delici|murç|uc)|kirici.*(?:keski|uc)|(?:plus|max)\s*(?:düz\s*)?keski/i.test(combined)) &&
+    (/sds|отбойн|перфоратор|п-?11|\b(?:14|18|25)\s*[*xх×]\s*(?:250|400|450|600)\b|\b(?:14|18)\s*[*xх×]\s*(?:20|25|40)\s*[*xх×]\s*(?:250|400)\b/i.test(combined))
   ) {
+    if (/п-?11|отбойн.*молотк|l[\s=-]*290/i.test(combined) && !/sds/i.test(combined)) {
+      return {
+        materialName: 'Kırıcı Çekiç Sivri Murç Ucu (Пика П-11 L=290 mm)',
+        category: 'El Aletleri & Hırdavat'
+      };
+    }
     const isMax = /sds[\s-]*max|\b18\s*[*xх×]|\b25\s*[*xх×]\s*400/i.test(combined);
     const sdsType = isMax ? 'SDS-max' : 'SDS-plus';
     const isPoint = /пика|sivri|murç|murc|delici\s*kırıcı\s*uç/i.test(combined) && !/зубило|yassı|düz\s*keski/i.test(combined);
@@ -7856,6 +7959,37 @@ async function computeMaterialComparisons(): Promise<{ data: any[]; quotaExceede
       }
 
       if (history.length === 0) return;
+
+      // Koli/Paket (örn. "360шт/кор", "(100шт)") fiyatının "Adet" grubunda tekil adet fiyatıyla (örn. 932,20 ₽/koli vs 2,80 ₽/adet) çarpışmasını önle
+      const isPieceBench = /^(?:adet|шт|ad|birim)$/i.test(String(benchmarkUnit || '').trim());
+      if (isPieceBench && history.length >= 2) {
+        const rawMinGross = Math.min(...history.map(h => Number(h.unitPrice) || 0).filter(p => p > 0));
+        if (rawMinGross > 0) {
+          for (const h of history) {
+            const packText = `${h.originalName || ''} ${h.rawOriginalName || ''} ${h.rawMaterialName || ''}`;
+            const packMatch = packText.match(/(?:\(|^|[^0-9])(\d{2,4})\s*(?:шт|adet|pcs)\s*(?:\)|\/(?:уп|кор|пак|ящ)|(?![a-zа-яё0-9]))/i);
+            const packCount = packMatch ? parseInt(packMatch[1], 10) : 0;
+            if (packCount >= 10 && packCount <= 5000 && h.unitPrice > rawMinGross * (packCount * 0.25)) {
+              const perPieceGross = Number((h.unitPrice / packCount).toFixed(2));
+              const perPieceNet = Number((h.unitPriceNet / packCount).toFixed(2));
+              const totalPieces = Number((h.quantity * packCount).toFixed(2));
+              h.conversionApplied = true;
+              h.conversionFormula = `1 Koli/Paket (${packCount} adet) = ${h.unitPrice.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽ → ${perPieceGross} ₽/adet`;
+              h.conversionFactor = 1 / packCount;
+              h.unitPrice = perPieceGross;
+              h.grossUnitPrice = perPieceGross;
+              h.paidGrossUnitPrice = perPieceGross;
+              h.normalizedUnitPrice = perPieceGross;
+              h.normalizedGrossUnitPrice = perPieceGross;
+              h.unitPriceNet = perPieceNet;
+              h.normalizedNetUnitPrice = perPieceNet;
+              h.quantity = totalPieces;
+              h.normalizedQuantity = totalPieces;
+            }
+          }
+          totalNormalizedQuantity = history.reduce((s, h) => s + (Number(h.quantity) || 0), 0);
+        }
+      }
 
       const normalizedPrices = history.map(h => h.unitPrice);
       const minUnitPrice = Math.min(...normalizedPrices);

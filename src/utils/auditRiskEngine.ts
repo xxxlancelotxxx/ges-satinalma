@@ -140,6 +140,11 @@ export function isExemptFromBenchmarkAudit(
   };
 }
 
+export function isLowPriorityConsumable(materialNameOrDescription?: string, category?: string): boolean {
+  const text = `${materialNameOrDescription || ''} ${category || ''}`.toLowerCase();
+  return /fairy|deterjan|bulaşık|bulasik|sabun|мыло|моющее\s*средство|туалетн.*бумаг|tuvalet\s*kağıd|kağıt\s*havlu|салфетк|peçete|çay\b|чай\b|kahve|кофе|şeker|сахар|içme\s*suyu|вода\s*питьев|bardak|стакан\s*однораз|çöp\s*poşet|мешк.*мусор|kırtasiye|ofis\s*&\s*kırtasiye|temizlik\s*&\s*hijyen/i.test(text);
+}
+
 export interface AuditEvaluationInput {
   offerPrice?: number;
   agreedPrice?: number;

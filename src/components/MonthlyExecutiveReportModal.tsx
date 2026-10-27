@@ -6,6 +6,7 @@ import { formatRuble } from '../utils/format';
 import { getGenuineNegotiationRoundCount } from '../utils/negotiationStages';
 import { dedupeSyncedInvoices, isPrizmaAutoSyncedInvoice } from '../utils/dashboardStats';
 import { normalizeCategoryName } from '../utils/categoryClassifier';
+import { getSynchronizedAppleToAppleComparisons } from '../utils/dualMaterialComparisonEngine';
 import * as XLSX from 'xlsx';
 import {
   Building2,
@@ -156,7 +157,8 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
   invoices = [],
   jobsites = [],
   supervisors = [],
-  personnel = []
+  personnel = [],
+  comparisons = []
 }) => {
   const { language } = useLanguage();
   const isRu = language === 'ru';
@@ -164,13 +166,28 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
   // Active view tab inside Executive Report
   const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'CATEGORIES' | 'SUPERVISORS' | 'JOBSITES' | 'RECORD_DEALS' | 'MATERIALS'>('OVERVIEW');
 
+  const parseToYearMonth = (rawVal?: string): string => {
+    if (!rawVal || typeof rawVal !== 'string') return '';
+    const s = rawVal.trim();
+    const isoMatch = s.match(/^(\d{4})-(\d{2})/);
+    if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}`;
+    const dotMatch = s.match(/^(\d{2})[./-](\d{2})[./-](\d{4})/);
+    if (dotMatch) return `${dotMatch[3]}-${dotMatch[2]}`;
+    return s.length >= 7 ? s.slice(0, 7) : '';
+  };
+
   // Helper: Extract valid Year-Month from any date representation
-  const getRecordMonth = (d: { date?: string; invoiceDate?: string; orderDate?: string; created_at?: string; createdAt?: string }): string => {
-    const raw = d.date || d.invoiceDate || d.orderDate || d.created_at || d.createdAt || '';
-    if (typeof raw === 'string' && raw.length >= 7) {
-      return raw.slice(0, 7);
-    }
-    return '';
+  const getRecordMonth = (d: { date?: string; invoiceDate?: string; orderDate?: string; finalNegotiationDate?: string; created_at?: string; createdAt?: string; uploadDate?: string }): string => {
+    return (
+      parseToYearMonth(d.date) ||
+      parseToYearMonth(d.invoiceDate) ||
+      parseToYearMonth(d.orderDate) ||
+      parseToYearMonth(d.finalNegotiationDate) ||
+      parseToYearMonth(d.uploadDate) ||
+      parseToYearMonth(d.created_at) ||
+      parseToYearMonth(d.createdAt) ||
+      ''
+    );
   };
 
   // Sadece GES platformu modüllerinden (Yeni Satınalma İndirim Girişi, TDF, AI Fatura) girilen faturalar (Prizma referans faturaları hariç)
@@ -179,29 +196,40 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
     return deduped.filter(inv => !inv.isDeleted && !inv.isPermanentlyDeleted && !isPrizmaAutoSyncedInvoice(inv));
   }, [invoices, discounts]);
 
-  // 1. Available Months Derivation
-  const availableMonths = useMemo(() => {
-    const monthSet = new Set<string>();
+  // 1. Available Months Derivation & Active Default Month Selection
+  const { availableMonths, bestDefaultMonth } = useMemo(() => {
+    const monthCounts = new Map<string, number>();
 
     discounts.forEach(d => {
       if (d.isDeleted || d.isPermanentlyDeleted) return;
       const ym = getRecordMonth(d);
-      if (ym) monthSet.add(ym);
+      if (ym) monthCounts.set(ym, (monthCounts.get(ym) || 0) + 1);
     });
 
     platformInvoices.forEach(inv => {
-      const ym = (inv.date || inv.uploadDate || '').slice(0, 7);
-      if (ym) monthSet.add(ym);
+      const ym = getRecordMonth(inv);
+      if (ym) monthCounts.set(ym, (monthCounts.get(ym) || 0) + 1);
     });
 
-    return Array.from(monthSet).sort().reverse();
+    const sortedMonths = Array.from(monthCounts.keys()).sort().reverse();
+    const currentCalMonth = new Date().toISOString().slice(0, 7);
+
+    // Güncel takvim ayında kayıt varsa doğrudan güncel ayı seç; yoksa bugüne en yakın aktif ayı seç (gelecek tarihli tekil hatalı kayıtları atla)
+    let chosen = sortedMonths[0] || currentCalMonth;
+    if (monthCounts.has(currentCalMonth) && (monthCounts.get(currentCalMonth) || 0) >= 1) {
+      chosen = currentCalMonth;
+    } else {
+      const latestActive = sortedMonths.find(m => m <= currentCalMonth && (monthCounts.get(m) || 0) >= 3);
+      if (latestActive) {
+        chosen = latestActive;
+      }
+    }
+
+    return { availableMonths: sortedMonths, bestDefaultMonth: chosen };
   }, [discounts, platformInvoices]);
 
-  // Default to the month with the highest volume of activity (or most recent active month)
-  const [selectedMonth, setSelectedMonth] = useState<string>(() => {
-    if (availableMonths.includes('2026-09')) return '2026-09';
-    return availableMonths[0] || new Date().toISOString().slice(0, 7);
-  });
+  // Default to the current/most recent active month dynamically
+  const [selectedMonth, setSelectedMonth] = useState<string>(() => bestDefaultMonth);
 
   // Material filters
   const [materialFilterCategory, setMaterialFilterCategory] = useState<string>('ALL');
@@ -209,16 +237,12 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
   const [materialViewMode, setMaterialViewMode] = useState<'STRATEGIC_TOP' | 'DEMIR' | 'GAZBLOK' | 'IZOLASYON' | 'BETON' | 'TOP_SAVINGS' | 'ALL'>('STRATEGIC_TOP');
   const [expandedSupervisorId, setExpandedSupervisorId] = useState<string | null>(null);
 
-  // Keep selectedMonth valid if availableMonths changes
+  // Keep selectedMonth valid and synced when data loads
   React.useEffect(() => {
     if (availableMonths.length > 0 && !availableMonths.includes(selectedMonth) && selectedMonth !== 'ALL') {
-      if (availableMonths.includes('2026-09')) {
-        setSelectedMonth('2026-09');
-      } else {
-        setSelectedMonth(availableMonths[0]);
-      }
+      setSelectedMonth(bestDefaultMonth);
     }
-  }, [availableMonths, selectedMonth]);
+  }, [availableMonths, bestDefaultMonth, selectedMonth]);
 
   // Format month for executive presentation
   const formatMonthTitle = (mKey: string) => {
@@ -247,7 +271,7 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
   const monthInvoices = useMemo(() => {
     return platformInvoices.filter(inv => {
       if (selectedMonth === 'ALL') return true;
-      const ym = (inv.date || inv.uploadDate || '').slice(0, 7);
+      const ym = getRecordMonth(inv);
       return ym === selectedMonth;
     });
   }, [platformInvoices, selectedMonth]);
@@ -779,48 +803,48 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
 
     const map = new Map<string, MatAgg>();
 
-    // Step A: Canonical materials
+    // Her indirim kaydı için varsa doğrulanmış canonicalMaterials, yoksa kalemler (items) kullanılır (Çift sayımı kesin olarak önler)
     monthDiscounts.forEach(d => {
       const canons = d.canonicalMaterials || [];
-      canons.forEach(c => {
-        const name = (c.commonName || c.canonicalName || '').trim();
-        if (!name) return;
-        const qty = Number(c.quantity) || 1;
-        const pPrice = Number(c.purchasedUnitPrice) || 0;
-        const fPrice = Number(c.winningFirstUnitPrice) ||
-                       Number(c.lowestInitialOffer?.normalizedUnitPrice) ||
-                       Number(c.marketReferenceUnitPrice) ||
-                       pPrice;
-        const savings = Number(c.realTotalSavings) || (Math.max(0, fPrice - pPrice) * qty);
-        const agreedSpend = pPrice * qty;
-        const offerSpend = agreedSpend + savings;
+      if (canons.length > 0) {
+        canons.forEach(c => {
+          const name = (c.commonName || c.canonicalName || '').trim();
+          if (!name) return;
+          const qty = Number(c.quantity) || 1;
+          const pPrice = Number(c.purchasedUnitPrice) || 0;
+          const fPrice = Number(c.winningFirstUnitPrice) ||
+                         Number(c.lowestInitialOffer?.normalizedUnitPrice) ||
+                         Number(c.marketReferenceUnitPrice) ||
+                         pPrice;
+          const savings = Number(c.realTotalSavings) || (Math.max(0, fPrice - pPrice) * qty);
+          const agreedSpend = pPrice * qty;
+          const offerSpend = agreedSpend + savings;
 
-        if (!map.has(name)) {
-          const canonCat = normalizeCategoryName(c.materialType || d.category, name);
-          map.set(name, {
-            name,
-            category: canonCat !== 'Diğer Malzeme' && canonCat !== 'Прочие материалы' && canonCat !== 'Diğer' ? canonCat : 'Çelik Malzemeler',
-            unit: c.standardUnit || 'Birim',
-            totalQty: 0,
-            totalAgreedSpend: 0,
-            totalOfferSpend: 0,
-            totalSavings: 0,
-            txCount: 0,
-            vendors: new Set()
-          });
-        }
-        const item = map.get(name)!;
-        item.totalQty += qty;
-        item.totalAgreedSpend += agreedSpend;
-        item.totalOfferSpend += offerSpend;
-        item.totalSavings += savings;
-        item.txCount += 1;
-        if (d.vendorName) item.vendors.add(d.vendorName);
-      });
-    });
+          if (!map.has(name)) {
+            const canonCat = normalizeCategoryName(c.materialType || d.category, name);
+            map.set(name, {
+              name,
+              category: canonCat !== 'Diğer Malzeme' && canonCat !== 'Прочие материалы' && canonCat !== 'Diğer' ? canonCat : 'Çelik Malzemeler',
+              unit: c.standardUnit || 'Birim',
+              totalQty: 0,
+              totalAgreedSpend: 0,
+              totalOfferSpend: 0,
+              totalSavings: 0,
+              txCount: 0,
+              vendors: new Set()
+            });
+          }
+          const item = map.get(name)!;
+          item.totalQty += qty;
+          item.totalAgreedSpend += agreedSpend;
+          item.totalOfferSpend += offerSpend;
+          item.totalSavings += savings;
+          item.txCount += 1;
+          if (d.vendorName) item.vendors.add(d.vendorName);
+        });
+        return;
+      }
 
-    // Step B: Line items
-    monthDiscounts.forEach(d => {
       const discAmt = Number(d.discountAmount) || 0;
       const agrAmt = Number(d.agreedPrice) || 1;
       const offAmt = Number(d.offerPrice) || (agrAmt + discAmt);
@@ -1008,6 +1032,73 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
     return Array.from(set).sort();
   }, [criticalBenchmarks]);
 
+  // 8.25. Aynı Marka & Aynı Teknik Özellik Fiyat Farkı Uyarıları (Elma-Elma Birim Fiyat Sapma Denetimi)
+  const sameBrandPriceAlerts = useMemo(() => {
+    if (!Array.isArray(comparisons) || comparisons.length === 0) return [];
+    const appleToApple = getSynchronizedAppleToAppleComparisons(comparisons, 'local_only');
+    const alerts: Array<{
+      id: string;
+      materialName: string;
+      brand: string;
+      category: string;
+      unit: string;
+      minPrice: number;
+      maxPrice: number;
+      diffPct: number;
+      excessSpend: number;
+      cheapestSite: string;
+      cheapestVendor: string;
+      priciestSite: string;
+      priciestVendor: string;
+      purchaseCount: number;
+    }> = [];
+
+    appleToApple.forEach(comp => {
+      const monthHist = (comp.history || []).filter(h => {
+        if (selectedMonth === 'ALL') return true;
+        return parseToYearMonth(h.date) === selectedMonth;
+      });
+      const activeHist = monthHist.length >= 2 ? monthHist : (selectedMonth === 'ALL' ? (comp.history || []) : []);
+      if (activeHist.length < 2) return;
+
+      const validEntries = activeHist
+        .map(h => ({
+          h,
+          price: Number(h.normalizedUnitPrice ?? h.unitPrice) || 0,
+          qty: Number(h.normalizedQuantity ?? h.quantity) || 0
+        }))
+        .filter(x => x.price > 0 && x.qty > 0);
+
+      if (validEntries.length < 2) return;
+      const minEntry = validEntries.reduce((a, b) => (b.price < a.price ? b : a), validEntries[0]);
+      const maxEntry = validEntries.reduce((a, b) => (b.price > a.price ? b : a), validEntries[0]);
+      if (minEntry.price <= 0 || maxEntry.price <= minEntry.price) return;
+
+      const diffPct = ((maxEntry.price - minEntry.price) / minEntry.price) * 100;
+      if (diffPct < 5) return;
+
+      const excessSpend = validEntries.reduce((sum, x) => sum + Math.max(0, (x.price - minEntry.price) * x.qty), 0);
+      alerts.push({
+        id: comp.id || comp.materialName,
+        materialName: comp.materialName,
+        brand: comp.brand || 'Standart / Aynı Seri',
+        category: comp.category || 'Genel',
+        unit: comp.unit || 'Adet',
+        minPrice: minEntry.price,
+        maxPrice: maxEntry.price,
+        diffPct,
+        excessSpend,
+        cheapestSite: minEntry.h.jobsiteName || '-',
+        cheapestVendor: minEntry.h.supplier || '-',
+        priciestSite: maxEntry.h.jobsiteName || '-',
+        priciestVendor: maxEntry.h.supplier || '-',
+        purchaseCount: validEntries.length
+      });
+    });
+
+    return alerts.sort((a, b) => b.excessSpend - a.excessSpend || b.diffPct - a.diffPct).slice(0, 15);
+  }, [comparisons, selectedMonth]);
+
   // 8.5. Akıllı ve Veri Odaklı Yönetici İcra Bulguları (Hem Ekran Hem HTML/PDF Raporu İçin Ortak Motor)
   const executiveInsights = useMemo(() => {
     const topSite = jobsiteBudgetBreakdown[0];
@@ -1059,7 +1150,7 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
         summaryHtml: topSup && topSup.totalDiscount > 0
           ? `Dönemin tasarruf liderliğini <strong>${formatRuble(topSup.totalAgreed)}</strong> alım hacmi üzerinden <strong style="color:#059669;">+${formatRuble(topSup.totalDiscount)}</strong> (<strong>%${topSup.savingsPercentage.toFixed(1)}</strong>) indirim sağlayan <strong>${topSup.supervisorName}</strong> üstlenmiştir.${secondSup && secondSup.totalDiscount > 0 ? ` Onu <strong>+${formatRuble(secondSup.totalDiscount)}</strong> ile <strong>${secondSup.supervisorName}</strong> takip etmektedir.` : ''}`
           : `Satınalma şefleri ve uzman kadrosu dönem içi siparişleri bütçe limitleri dahilinde tamamlamıştır.`,
-        footerHtml: `Kapanış Dağılımı: <strong>⚽ ${totalGol} Şef / 👟 ${totalAsist} Uzman Asisti</strong> | Toplam: <strong>${totalRounds} Müzakere Turu</strong>`
+        footerHtml: `Kapanış Dağılımı: <strong>${totalGol} Doğrudan Şef / ${totalAsist} Uzman Katkısı</strong> | Toplam: <strong>${totalRounds} Müzakere Turu</strong>`
       },
       {
         id: 'categories',
@@ -1898,7 +1989,7 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
               <th class="num" style="width: 15%;">Yönetilen Alım (₽)</th>
               <th class="num" style="width: 15%;">Sağlanan Tasarruf (₽)</th>
               <th class="num" style="width: 10%;">İndirim Oranı</th>
-              <th class="num" style="width: 10%;">Gol / Asist</th>
+              <th class="num" style="width: 10%;">Doğrudan / Uzman</th>
               <th class="num" style="width: 9%;">Müzakere Turu</th>
               <th class="num" style="width: 7%;">Yeni Firma</th>
               <th style="width: 12%;">Uzman Ekip Katkısı</th>
@@ -1917,7 +2008,7 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
                   ${s.totalDiscount > 0 ? '+' : ''}${formatRuble(s.totalDiscount)}
                 </td>
                 <td class="num"><span class="tag ${s.savingsPercentage > 0 ? 'tag-emerald' : 'tag-slate'}">%${s.savingsPercentage.toFixed(1)}</span></td>
-                <td class="num">⚽ ${s.golCount} / 👟 ${s.asistCount}</td>
+                <td class="num">${s.golCount} Şef / ${s.asistCount} Uzman</td>
                 <td class="num">${s.totalNegotiationRounds} tur</td>
                 <td class="num">${s.newVendorsCount > 0 ? `+${s.newVendorsCount}` : '-'}</td>
                 <td>
@@ -1935,7 +2026,7 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
               <td class="num">${formatRuble(kpis.totalAgreed)}</td>
               <td class="num" style="color: #6ee7b7 !important;">+${formatRuble(kpis.totalDiscount)}</td>
               <td class="num">%${kpis.savingsPct.toFixed(1)}</td>
-              <td class="num">⚽ ${totalGolAll} / 👟 ${totalAsistAll}</td>
+              <td class="num">${totalGolAll} Şef / ${totalAsistAll} Uzman</td>
               <td class="num">${totalRoundsAll} tur</td>
               <td class="num">+${totalNewVendorsAll}</td>
               <td>Tüm Ekip Toplamı</td>
@@ -2133,6 +2224,49 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
         </table>
       </div>
     </div>
+
+    ${sameBrandPriceAlerts.length > 0 ? `
+    <!-- 8.5. Aynı Marka & Özellik Fiyat Farkı Uyarıları -->
+    <div class="section" id="sec-price-alerts">
+      <div class="section-header">
+        <div>
+          <div class="section-title">⚠️ Aynı Marka & Teknik Özellik Fiyat Farkı Uyarıları (Birebir Elma-Elma Kıyaslama)</div>
+          <div class="section-desc">Aynı malzeme, aynı teknik ebat ve aynı marka/seri olmasına rağmen farklı birim fiyatlarla alınan kalemler ve oluşan fiyat farkı</div>
+        </div>
+        <span class="tag tag-amber">${sameBrandPriceAlerts.length} Fiyat Sapması Uyarısı</span>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 28%;">Malzeme & Marka / Seri</th>
+              <th style="width: 7%;">Birim</th>
+              <th class="num" style="width: 11%;">En Düşük Birim (₽)</th>
+              <th style="width: 15%;">En Uygun Şantiye / Firma</th>
+              <th class="num" style="width: 11%;">En Yüksek Birim (₽)</th>
+              <th style="width: 15%;">En Pahalı Şantiye / Firma</th>
+              <th class="num" style="width: 6%;">Fark %</th>
+              <th class="num" style="width: 7%;">Fark Etkisi (₽)</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sameBrandPriceAlerts.map(a => `
+              <tr>
+                <td><strong>${a.materialName}</strong></td>
+                <td>${a.unit}</td>
+                <td class="num" style="color: var(--emerald); font-weight: 700;">${formatRuble(a.minPrice)}</td>
+                <td><span style="font-size: 10.5px;"><strong>${a.cheapestSite}</strong> (${a.cheapestVendor})</span></td>
+                <td class="num" style="color: var(--rose); font-weight: 800;">${formatRuble(a.maxPrice)}</td>
+                <td><span style="font-size: 10.5px;"><strong>${a.priciestSite}</strong> (${a.priciestVendor})</span></td>
+                <td class="num"><span class="tag tag-amber">+%${a.diffPct.toFixed(1)}</span></td>
+                <td class="num" style="color: var(--rose); font-weight: 700;">${formatRuble(a.excessSpend)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    ` : ''}
 
     <!-- 9. İmza ve Onay Bölümü -->
     <div class="signatures">
@@ -3402,18 +3536,83 @@ export const MonthlyExecutiveReportModal: React.FC<Props> = ({
                         </td>
                       </tr>
                     ))}
-                    {filteredBenchmarks.length === 0 && (
-                      <tr>
-                        <td colSpan={10} className="py-8 text-center text-slate-500 text-xs">
-                          Filtreye uygun malzeme bulunamadı.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                      {filteredBenchmarks.length === 0 && (
+                        <tr>
+                          <td colSpan={10} className="py-8 text-center text-slate-500 text-xs">
+                            Filtreye uygun malzeme bulunamadı.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* AYNI MARKA & TEKNİK ÖZELLİK FİYAT FARKI UYARILARI (ELMA-ELMA DENETİMİ) */}
+                {sameBrandPriceAlerts.length > 0 && (
+                  <div className="bg-slate-950/70 border border-amber-500/30 rounded-2xl p-4 sm:p-5 shadow-xl space-y-3 mt-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h4 className="text-sm font-bold text-amber-300 flex items-center gap-2">
+                          <ShieldAlert className="w-4 h-4 text-amber-400" />
+                          <span>Aynı Marka & Teknik Özellik Fiyat Farkı Uyarıları (Birebir Elma-Elma Kıyaslama)</span>
+                        </h4>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          Aynı malzeme, aynı teknik özellik ve aynı marka/seri olmasına rağmen farklı birim fiyatlardan alınan kalemler
+                        </p>
+                      </div>
+                      <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                        {sameBrandPriceAlerts.length} Fiyat Farkı Uyarısı
+                      </span>
+                    </div>
+
+                    <div className="overflow-x-auto rounded-xl border border-slate-800">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-800 bg-slate-900/90 text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
+                            <th className="py-2.5 px-3">Malzeme & Marka / Seri</th>
+                            <th className="py-2.5 px-3">Birim</th>
+                            <th className="py-2.5 px-3 text-right">En Düşük Birim</th>
+                            <th className="py-2.5 px-3">En Uygun Şantiye / Firma</th>
+                            <th className="py-2.5 px-3 text-right">En Yüksek Birim</th>
+                            <th className="py-2.5 px-3">En Pahalı Şantiye / Firma</th>
+                            <th className="py-2.5 px-3 text-right">Fiyat Farkı %</th>
+                            <th className="py-2.5 px-3 text-right">Birim Fark Etkisi</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/60">
+                          {sameBrandPriceAlerts.map(a => (
+                            <tr key={a.id} className="hover:bg-slate-900/60 transition-colors">
+                              <td className="py-2.5 px-3 font-semibold text-white max-w-xs truncate" title={a.materialName}>
+                                {a.materialName}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-400">{a.unit}</td>
+                              <td className="py-2.5 px-3 text-right font-bold text-emerald-400">{formatRuble(a.minPrice)}</td>
+                              <td className="py-2.5 px-3 text-slate-300 truncate max-w-[180px]" title={`${a.cheapestSite} — ${a.cheapestVendor}`}>
+                                <span className="font-medium text-white">{a.cheapestSite}</span>
+                                <span className="text-slate-500"> · {a.cheapestVendor}</span>
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-bold text-rose-400">{formatRuble(a.maxPrice)}</td>
+                              <td className="py-2.5 px-3 text-slate-300 truncate max-w-[180px]" title={`${a.priciestSite} — ${a.priciestVendor}`}>
+                                <span className="font-medium text-white">{a.priciestSite}</span>
+                                <span className="text-slate-500"> · {a.priciestVendor}</span>
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                  +%{a.diffPct.toFixed(1)}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-bold text-rose-400">
+                                {formatRuble(a.excessSpend)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            )}
 
         </div>
 
