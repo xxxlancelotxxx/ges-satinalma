@@ -21,7 +21,7 @@ import { matchLines } from '../src/utils/invoiceLineMatcher';
 import { findUnreliableLegacyCanonicals, CURRENT_LINE_MATCH_VERSION } from '../src/utils/discountLineReference';
 import { translateRussianMaterialToTurkish } from '../src/utils/categoryClassifier';
 
-export const DISCOUNT_LINE_REPAIR_VERSION = 1;
+export const DISCOUNT_LINE_REPAIR_VERSION = 2;
 
 export interface VerifiedDocument {
   lines: ParsedInvoiceLine[];
@@ -92,7 +92,51 @@ export function planDiscountRepair(
 
   // Belge tutarı kayıttan çok farklıysa (yanlış dosya bağlanmış olabilir) hiçbir şeye dokunulmaz.
   const recordAgreed = Number(discount.agreedPrice) || 0;
-  if (finalDoc && recordAgreed > 0 && Math.abs(recordAgreed - finalDoc.total) / finalDoc.total > 0.25) {
+  if (finalDoc && initialDocs.length === 1 && initialDocs[0].doc.total < finalDoc.total - 0.01) {
+    const fLines = goodsLines(finalDoc);
+    const iLines = goodsLines(initialDocs[0].doc);
+    const pairMatch = matchLines(
+      fLines.map(l => ({ originalName: l.name, article: l.article })),
+      iLines.map(l => ({ originalName: l.name, article: l.article }))
+    ).filter(m => m >= 0).length;
+    if (fLines.length > 0 && pairMatch >= Math.ceil(Math.min(fLines.length, iLines.length) * 0.5)) {
+      const tmpDoc = finalDoc;
+      finalDoc = initialDocs[0].doc;
+      initialDocs = [{ ...initialDocs[0], doc: tmpDoc }];
+      if (discount.firstOfferFileUrl && discount.finalOfferFileUrl) {
+        discountUpdate.firstOfferFileUrl = discount.finalOfferFileUrl;
+        discountUpdate.finalOfferFileUrl = discount.firstOfferFileUrl;
+        invoiceUpdate.fileUrl = discount.firstOfferFileUrl;
+      }
+      if (discount.firstOfferFileName && discount.finalOfferFileName) {
+        discountUpdate.firstOfferFileName = discount.finalOfferFileName;
+        discountUpdate.finalOfferFileName = discount.firstOfferFileName;
+      }
+      notes.push(`İlk teklif (${tmpDoc.total}) ve nihai fatura (${finalDoc.total}) PDF sırası ters olduğu için düzeltildi.`);
+    }
+  }
+  const fLinesCheck = finalDoc ? goodsLines(finalDoc) : [];
+  const hasVerifiedInitialPair = Boolean(
+    finalDoc &&
+    fLinesCheck.length > 0 &&
+    initialDocs.some(d =>
+      d.doc.total >= finalDoc!.total &&
+      matchLines(
+        fLinesCheck.map(l => ({ originalName: l.name, article: l.article })),
+        goodsLines(d.doc).map(l => ({ originalName: l.name, article: l.article }))
+      ).filter(m => m >= 0).length >= Math.ceil(Math.min(fLinesCheck.length, goodsLines(d.doc).length) * 0.5)
+    )
+  );
+  const matchesStoredItems = Boolean(
+    finalDoc &&
+    fLinesCheck.length > 0 &&
+    storedItems.length > 0 &&
+    matchLines(
+      fLinesCheck.map(l => ({ originalName: l.name, article: l.article })),
+      storedItems.map(it => ({ originalName: it.originalName, materialName: it.materialName, article: it.article, productCode: it.productCode }))
+    ).some(m => m >= 0)
+  );
+  if (finalDoc && recordAgreed > 0 && Math.abs(recordAgreed - finalDoc.total) / finalDoc.total > 0.25 && !hasVerifiedInitialPair && !matchesStoredItems) {
     notes.push(`Nihai belge tutarı (${finalDoc.total}) kayıttan (${recordAgreed}) çok farklı; elle kontrol gerekir, dokunulmadı.`);
     finalDoc = null;
   }
@@ -196,6 +240,18 @@ export function planDiscountRepair(
     discountUpdate.adjustedOfferPrice = deduction > 0 ? baseline : offer;
     discountUpdate.discountAmount = amount;
     discountUpdate.discountPercentage = pct;
+    if (Array.isArray(discount.stageDocuments) && discount.stageDocuments.length >= 2) {
+      const stages = discount.stageDocuments.map((s: any) => ({ ...s }));
+      if (discountUpdate.firstOfferFileUrl && discountUpdate.finalOfferFileUrl && stages.length === 2) {
+        stages[0].fileUrl = discountUpdate.firstOfferFileUrl;
+        stages[0].fileName = discountUpdate.firstOfferFileName || stages[0].fileName;
+        stages[1].fileUrl = discountUpdate.finalOfferFileUrl;
+        stages[1].fileName = discountUpdate.finalOfferFileName || stages[1].fileName;
+      }
+      stages[0].amount = offer;
+      stages[stages.length - 1].amount = finalTotal;
+      discountUpdate.stageDocuments = stages;
+    }
     if (discount.calculationMethod === 'MARKET_BASELINE_TO_FINAL') {
       discountUpdate.marketReferencePrice = offer;
       discountUpdate.realMarketSavings = amount;

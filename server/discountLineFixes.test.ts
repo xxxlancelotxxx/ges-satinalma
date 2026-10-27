@@ -221,4 +221,69 @@ test('denetim: gerçek fiyat artışı hâlâ yakalanır', () => {
   assert.strictEqual(line.potentialSavings, Math.round((663.04 - 600) * 250));
 });
 
+test('KOMUS 4 ondalıklı birim fiyatlar (14,4448 / 13,5908) bölünmez ve К оплате toplamı doğru okunur', () => {
+  const komusSample = [
+    'Получатель платежа ООО "КОМУС"',
+    'СЧЕТ № 0LW/3531554/7718697 Дата счета: 21.10.2026',
+    'Артикул Наименование товара Ед. изм. Количество Цена с НДС РУБ Сумма с НДС РУБ',
+    '979412 Стержень микрографический 0, 5 HB 12 грифелей упак 50 14,4448 722,24',
+    '979413 Стержень микрографический 0, 7 HB 12 грифелей упак 50 14,4448 722,24',
+    'К оплате: Одна тысяча четыреста сорок четыре рубля 48 коп.',
+    '1 444,48',
+    'Всего НДС 260,48'
+  ].join('\n');
+  const parsed = fallbackExtractInvoiceFromTextOrCsv(komusSample, 'komus.pdf', false);
+  assert.strictEqual(parsed.totalAmount.value, 1444.48);
+  assert.strictEqual(parsed.items.length, 2);
+  assert.strictEqual(parsed.items[0].totalPrice, 722.24);
+  assert.strictEqual(parsed.items[1].totalPrice, 722.24);
+});
+
+test('onarım: ters yüklenmiş PDF sırası ve >%25 hatalı OCR toplamı doğrulanmış belgelerle düzeltilir', () => {
+  const initDocText = [
+    'Получатель платежа ООО "КОМУС"',
+    'СЧЕТ № 0LW/3531554/7718697 Дата счета: 21.10.2026',
+    'Артикул Наименование товара Ед. изм. Количество Цена с НДС РУБ Сумма с НДС РУБ',
+    '979412 Стержень микрографический 0, 5 HB 12 грифелей упак 50 14,4448 722,24',
+    '979413 Стержень микрографический 0, 7 HB 12 грифелей упак 50 14,4448 722,24',
+    'К оплате: Одна тысяча четыреста сорок четыре рубля 48 коп.',
+    '1 444,48',
+    'Всего НДС 260,48'
+  ].join('\n');
+  const finalDocText = [
+    'Получатель платежа ООО "КОМУС"',
+    'СЧЕТ № 0LW/3531554/7718697 Дата счета: 21.10.2026',
+    'Артикул Наименование товара Ед. изм. Количество Цена с НДС РУБ Сумма с НДС РУБ',
+    '979412 Стержень микрографический 0, 5 HB 12 грифелей упак 50 13,5908 679,54',
+    '979413 Стержень микрографический 0, 7 HB 12 грифелей упак 50 13,5908 679,54',
+    'К оплате: Одна тысяча триста пятьдесят девять рублей 08 коп.',
+    '1 359,08',
+    'Всего НДС 245,08'
+  ].join('\n');
+  const vInit = readVerifiedDocument(initDocText)!;
+  const vFinal = readVerifiedDocument(finalDocText)!;
+  assert.ok(vInit && vFinal);
+  // Ters bağlanmış (initial=vFinal, final=vInit) ve hatalı OCR tutarlı (97444.48 -> 17359.08) kayıt
+  const plan = planDiscountRepair(
+    {
+      id: 'disc_test_swap',
+      vendorName: 'ООО "КОМУС"',
+      offerPrice: 97444.48,
+      agreedPrice: 17359.08,
+      firstOfferFileUrl: '/api/files/final.pdf',
+      finalOfferFileUrl: '/api/files/init.pdf',
+      firstOfferFileName: 'final.pdf',
+      finalOfferFileName: 'init.pdf',
+      items: []
+    },
+    vInit,
+    [{ doc: vFinal, supplier: 'ООО "КОМУС"' }]
+  );
+  assert.strictEqual(plan.discountUpdate.offerPrice, 1444.48);
+  assert.strictEqual(plan.discountUpdate.agreedPrice, 1359.08);
+  assert.strictEqual(plan.discountUpdate.discountAmount, 85.4);
+  assert.strictEqual(plan.discountUpdate.firstOfferFileUrl, '/api/files/init.pdf');
+  assert.strictEqual(plan.discountUpdate.finalOfferFileUrl, '/api/files/final.pdf');
+});
+
 console.log(`\n${passed} test geçti.`);

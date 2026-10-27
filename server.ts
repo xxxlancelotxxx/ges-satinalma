@@ -10659,8 +10659,11 @@ export async function integratePrizmaInvoicesInternal(dbInstance: any, options: 
     // Check for duplicate / existing match (including soft-deleted records in trash)
     let match = (pDemandId ? byPrizmaDemandId.get(pDemandId) : null) ||
       (pCleanNo && pCleanVendor ? byVendorAndNo.get(`${pCleanVendor}___${pCleanNo}`) : null) ||
-      (pCleanNo && pCleanNo.length >= 4 ? byInvoiceNo.get(pCleanNo) : null) ||
+      (pCleanNo && pCleanNo.length >= 4 && byInvoiceNo.get(pCleanNo) && pAmt > 0 && Math.abs((Number(byInvoiceNo.get(pCleanNo).totalAmount) || 0) - pAmt) / pAmt <= 0.05 ? byInvoiceNo.get(pCleanNo) : null) ||
       (pCleanVendor && pDate && pAmt > 0 ? byVendorDateAmount.get(`${pCleanVendor}___${pDate}___${pAmt}`) : null);
+    if (match && !String(match.id || '').startsWith('inv_prizma_') && pAmt > 0 && Number(match.totalAmount) > 0 && Math.abs((Number(match.totalAmount) || 0) - pAmt) / Math.max(pAmt, Number(match.totalAmount)) > 0.20) {
+      match = null;
+    }
 
     if (match) {
       // Çöp kutusundaysa (isDeleted) veya kalıcı silinmişse dokunma ve hortlatma!

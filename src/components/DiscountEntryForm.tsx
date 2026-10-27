@@ -1942,11 +1942,14 @@ export const DiscountEntryForm: React.FC<Props> = ({
           }
           const file = docItem.file;
           if (!file && !docItem.base64) return;
+          let base64Data = docItem.base64 || '';
+          let uploadedUrl = docItem.fileUrl || '';
+          let uploadedFileId = docItem.fileId;
 
           try {
-            const base64Data = docItem.base64 || (file ? await readFileOrCompressImage(file) : '');
-            let uploadedUrl = docItem.fileUrl || '';
-            let uploadedFileId = docItem.fileId;
+            if (!base64Data && file) base64Data = await readFileOrCompressImage(file);
+            // Preserve outer uploadedUrl and uploadedFileId
+            // across try/catch blocks
 
             if (!uploadedUrl && base64Data) {
               try {
@@ -2039,6 +2042,7 @@ export const DiscountEntryForm: React.FC<Props> = ({
             };
           } catch (err: any) {
             console.error(`Error scanning ${docItem.fileName}:`, err);
+            docItem = { ...docItem, base64: base64Data || docItem.base64, fileUrl: uploadedUrl || docItem.fileUrl, fileId: uploadedFileId || docItem.fileId };
             updatedDocs[idx] = {
               ...docItem,
               status: 'error',
@@ -2659,8 +2663,28 @@ export const DiscountEntryForm: React.FC<Props> = ({
 
     setIsProcessingAI(true);
     try {
-      const firstUrl = await resolveFileUrl(firstOfferFile, firstDocName);
-      const finalUrl = await resolveFileUrl(finalOfferFile, finalDocName);
+      let firstUrl = await resolveFileUrl(firstOfferFile, firstDocName);
+      let finalUrl = await resolveFileUrl(finalOfferFile, finalDocName);
+      if (!firstUrl.url && stagedOfferDocs.length >= 1) {
+        const stgFirst = stagedOfferDocs.find(d => d.role === 'initial_offer') || stagedOfferDocs[0];
+        if (stgFirst) {
+          if (stgFirst.fileUrl) firstUrl = { url: stgFirst.fileUrl, fileId: stgFirst.fileId };
+          else if (stgFirst.base64 || stgFirst.file) {
+            const b64 = stgFirst.base64 || (stgFirst.file ? await readFileOrCompressImage(stgFirst.file) : '');
+            if (b64) firstUrl = await resolveFileUrl({ name: stgFirst.fileName, url: '', base64: b64 }, stgFirst.fileName);
+          }
+        }
+      }
+      if (!finalUrl.url && stagedOfferDocs.length >= 2) {
+        const stgFinal = stagedOfferDocs.find(d => d.role === 'final_invoice') || stagedOfferDocs[stagedOfferDocs.length - 1];
+        if (stgFinal) {
+          if (stgFinal.fileUrl) finalUrl = { url: stgFinal.fileUrl, fileId: stgFinal.fileId };
+          else if (stgFinal.base64 || stgFinal.file) {
+            const b64 = stgFinal.base64 || (stgFinal.file ? await readFileOrCompressImage(stgFinal.file) : '');
+            if (b64) finalUrl = await resolveFileUrl({ name: stgFinal.fileName, url: '', base64: b64 }, stgFinal.fileName);
+          }
+        }
+      }
 
       const generatedStageDocs: StageDocument[] = [];
       let generatedInitialOffersComparison: any[] | undefined = undefined;
@@ -2785,7 +2809,24 @@ export const DiscountEntryForm: React.FC<Props> = ({
         finalOfferDriveFileId: finalUrl.fileId,
         forceSave: forceSaveDuplicate,
         forceSaveDuplicate: forceSaveDuplicate,
-        items: extractedItems.length > 0 ? extractedItems as any : undefined,
+        items: extractedItems.length > 0 ? (() => {
+          const sumIt = extractedItems.reduce((s, it) => s + (Number(it.totalPrice) || 0), 0);
+          if (extractedItems.length === 1 && calcAgreed > 0 && Math.abs(sumIt - calcAgreed) > 1) {
+            const q = Number(extractedItems[0].quantity) || 1;
+            const up = Number((calcAgreed / q).toFixed(2));
+            return [{ ...extractedItems[0], unitPrice: up, totalPrice: calcAgreed }] as any;
+          }
+          if (calcAgreed > 0 && calcOffer > calcAgreed && Math.abs(sumIt - calcOffer) <= 2 && Math.abs(sumIt - calcAgreed) > 2) {
+            const ratio = calcAgreed / sumIt;
+            return extractedItems.map(it => {
+              const q = Number(it.quantity) || 1;
+              const tp = Number(((Number(it.totalPrice) || 0) * ratio).toFixed(2));
+              const up = Number((tp / q).toFixed(2));
+              return { ...it, unitPrice: up, totalPrice: tp };
+            }) as any;
+          }
+          return extractedItems as any;
+        })() : undefined,
         negotiationRounds: validRounds.length > 0 ? validRounds : undefined,
         stageDocuments: generatedStageDocs,
         ...(generatedInitialOffersComparison && generatedInitialOffersComparison.length > 0 ? {

@@ -396,7 +396,7 @@ export function extractDeterministicPdfTableRows(fullText: string, explicitTotal
 
   const UNIT_PAT = `(?:шт\\.?|штук[аи]?|компл\\.?|комплект|упак\\.?|уп\\.?|п\\.?\\s*м\\.?|пог\\.?\\s*м\\.?|м2|м²|кв\\.?\\s*м\\.?|м3|м³|куб\\.?\\s*м\\.?|м\\.?|тн|тонн[аы]?|т\\.?|кг\\.?|гр\\.?|л\\.?|литр[а-я]*|рул\\.?|рулон|меш\\.?|лист[а-я]*|пачк[а-я]*|пар[аы]?|бухт[а-я]*|бочк[а-я]*|канистр[а-я]*|ед\\.?|маш\\.?|рейс[а-я]*|adet|ad\\.?|ton|kg|m3|m2|mtül|mt|m|lt|paket|pk|torba|koli|rulo|takım|set|çift)`;
   const QTY_PAT = `(?:\\d+(?:[\\s\\u00A0]\\d{3})*(?:[.,]\\d+)?)`;
-  const PRICES_BLOCK_PAT = `((?:(?:\\d{1,3}(?:[\\s\\u00A0.]\\d{3})*[.,]\\d{2}|\\d+[.,]\\d{2}|\\d{1,2}\\s*%|Без\\s*НДС|без\\s*ндс|-)[\\s\\t]*){2,8})`;
+  const PRICES_BLOCK_PAT = `((?:(?:\\d{1,3}(?:[\\s\\u00A0.]\\d{3})*[.,]\\d{2,4}(?!\\d)|\\d+[.,]\\d{2,4}(?!\\d)|\\d{1,2}\\s*%|Без\\s*НДС|без\\s*ндс|-)[\\s\\t]*){2,8})`;
 
   // Order A/B: <prefix> <qty> <unit> [optional integer weight like 0] <prices + optional % НДС>
   const rowTailQtyFirstRx = new RegExp(
@@ -515,7 +515,7 @@ export function extractDeterministicPdfTableRows(fullText: string, explicitTotal
 
       // Remove percentage tokens (e.g. "22%", "20%") before extracting currency amounts
       const cleanPricesBlock = pricesBlock.replace(/\b\d{1,2}\s*%/g, ' ');
-      const priceTokens = cleanPricesBlock.match(/\d{1,3}(?:[\s\u00A0]\d{3})*[.,]\d{2}|\d+[.,]\d{2}/g) || [];
+      const priceTokens = cleanPricesBlock.match(/\d{1,3}(?:[\s\u00A0]\d{3})*[.,]\d{2,4}(?!\d)|\d+[.,]\d{2,4}(?!\d)/g) || [];
       const prices = priceTokens.map(p => parseNumberSafe(p)).filter(n => n > 0 && n < 1e11);
       if (prices.length === 0) continue;
 
@@ -714,7 +714,8 @@ export function fallbackExtractInvoiceFromTextOrCsv(
   let explicitTotal = 0;
   const totalRegexes = [
     /(?:Всего\s+к\s+оплате|Итого\s+с\s+НДС|Всего\s+наименований[^\r\n]*?на\s+сумму|Итого(?!\s+НДС)|ВСЕГО(?!\s+НДС)|Genel\s+Toplam|Ödenecek\s+Tutar|Toplam\s+Tutar)\s*[:：;,\t ]*\s*(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+(?:[.,]\d{2})?)/gi,
-    /Всего\s+НДС\s+\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}\s+(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+[.,]\d{2})/gi
+    /Всего\s+НДС\s+\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}\s+(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+[.,]\d{2})/gi,
+    /(?:К\s+оплате|Всего\s+к\s+оплате)\s*[:：][^\r\n]*[\r\n]+\s*(\d{1,3}(?:[\s\u00A0.]\d{3})*[.,]\d{2}|\d+[.,]\d{2})/gi
   ];
   for (const rgx of totalRegexes) {
     let m: RegExpExecArray | null;
@@ -742,7 +743,42 @@ export function fallbackExtractInvoiceFromTextOrCsv(
 
   // 5. Try Deterministic PDF Table Parser first
   let fallbackItems: any[] = [];
-  if (!isSummaryOnly) {
+  try {
+    const strictDoc = parseInvoiceText(fullText);
+    const strictTotal = Number(strictDoc.totalWithVat || explicitTotal || 0);
+    const strictCheck = strictTotal > 0 ? verifyParsedInvoice(strictDoc, strictTotal) : null;
+    if (strictCheck?.verified && strictDoc.lines.length > 0) {
+      explicitTotal = strictTotal;
+      if (strictDoc.docVatAmount && strictDoc.docVatAmount > 0) {
+        explicitTax = strictDoc.docVatAmount;
+      }
+      if (!isSummaryOnly && fallbackItems.length === 0) {
+        fallbackItems = strictDoc.lines.map(l => {
+          const grossTotal = Number(l.grossAmount.toFixed(2));
+          const grossUnit = strictDoc.pricesIncludeVat ? l.price : Number((grossTotal / (l.quantity || 1)).toFixed(2));
+          const trName = /[А-Яа-яЁё]/.test(l.name) ? (translateRussianMaterialToTurkish(l.name) || l.name) : l.name;
+          return {
+            materialName: trName,
+            originalName: l.name,
+            category: normalizeCategoryName('', `${trName} ${l.name}`),
+            quantity: l.quantity,
+            unit: normalizeExtractedUnit(mapDocumentUnit(l.unitRaw)),
+            unitPrice: grossUnit,
+            grossUnitPrice: grossUnit,
+            unitPriceNet: l.quantity > 0 ? Number((l.netAmount / l.quantity).toFixed(2)) : grossUnit,
+            discountAmount: 0,
+            totalPrice: grossTotal,
+            grossTotalPrice: grossTotal,
+            netTotalPrice: Number(l.netAmount.toFixed(2)),
+            productCode: l.article || '',
+            lineSource: 'invoice_pdf',
+            confidence: 0.99
+          };
+        });
+      }
+    }
+  } catch (_) {}
+  if (!isSummaryOnly && fallbackItems.length === 0) {
     const pdfRows = extractDeterministicPdfTableRows(fullText, explicitTotal);
     if (pdfRows.length > 0) {
       fallbackItems = pdfRows;
@@ -1071,7 +1107,7 @@ export async function processInvoiceTwoStages(params: {
       'Tedarikçi Firma';
 
     const resolvedTotal =
-      parseNumberSafe(rawExtracted.totalAmount?.value ?? rawExtracted.totalAmount ?? 0) ||
+      parseNumberSafe(localSupplement.totalAmount?.value ?? 0) || parseNumberSafe(rawExtracted.totalAmount?.value ?? rawExtracted.totalAmount ?? 0) ||
       parseNumberSafe(localSupplement.totalAmount?.value ?? 0);
 
     const rawSummaryInvNo = extractStringSafe(rawExtracted.invoiceNumber);
@@ -1256,7 +1292,7 @@ export async function processInvoiceTwoStages(params: {
   // Resolve authoritative Invoice Grand Total and Tax Amount
   const aiTotalAmount = parseNumberSafe(standardized.totalAmount?.value ?? standardized.totalAmount ?? rawExtracted.totalAmount?.value ?? 0);
   const pdfExplicitTotal = parseNumberSafe(localFallback.totalAmount?.value ?? 0);
-  const rawTotalAmount = pdfExplicitTotal > 0 && (aiTotalAmount <= 0 || Math.abs(aiTotalAmount - pdfExplicitTotal) > 1.0)
+  let rawTotalAmount = pdfExplicitTotal > 0 && (aiTotalAmount <= 0 || Math.abs(aiTotalAmount - pdfExplicitTotal) > 1.0)
     ? pdfExplicitTotal
     : (aiTotalAmount > 0 ? aiTotalAmount : pdfExplicitTotal);
 
@@ -1422,7 +1458,7 @@ export async function processInvoiceTwoStages(params: {
     excludedFreightNetSum = pdfFreightNetSum;
   }
   const pdfTableSum = pdfTableItems.reduce((s: number, it: any) => s + (Number(it.totalPrice) || 0), 0);
-  const targetGoodsTotal = rawTotalAmount > excludedFreightGrossSum
+  let targetGoodsTotal = rawTotalAmount > excludedFreightGrossSum
     ? Number((rawTotalAmount - excludedFreightGrossSum).toFixed(2))
     : rawTotalAmount;
 
@@ -1518,13 +1554,15 @@ export async function processInvoiceTwoStages(params: {
   // STAGE 1b: Katı belge ayrıştırıcısı (invoiceLineParser). Satırlar kendi içinde (miktar × fiyat = tutar)
   // ve belge toplamıyla kuruşu kuruşuna tutuyorsa fiyatlar yapay zekâdan değil BELGEDEN alınır.
   const allLockedFromPdf = mappedItems.length > 0 && mappedItems.every((it: any) => it.lineSource === 'invoice_pdf');
-  if (!allLockedFromPdf && extractedPdfText) {
+  if (extractedPdfText) {
     try {
       const strictDoc = parseInvoiceText(extractedPdfText);
       const strictTotal = Number(strictDoc.totalWithVat || 0);
       const strictCheck = strictTotal > 0 ? verifyParsedInvoice(strictDoc, strictTotal) : null;
       if (strictCheck?.verified) {
         const goodsLines = strictDoc.lines.filter(l => !isFreightItem(l.name));
+        rawTotalAmount = strictTotal;
+        targetGoodsTotal = Number(goodsLines.reduce((s, l) => s + l.grossAmount, 0).toFixed(2));
         if (goodsLines.length > 0) {
           const aiPool = [...mappedItems];
           mappedItems = goodsLines.map((l, idx) => {
